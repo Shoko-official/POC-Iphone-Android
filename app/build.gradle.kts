@@ -19,8 +19,12 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Signed with the debug key until a real upload key exists, so the
+            // release APK stays installable for POC validation.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

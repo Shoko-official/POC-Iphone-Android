@@ -53,6 +53,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.poc.camera.R
 import com.poc.camera.pipeline.BurstMergePipeline
+import com.poc.camera.pipeline.FinishingParams
+import com.poc.camera.pipeline.FinishingPipeline
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -216,7 +218,13 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
                                 scope.launch(Dispatchers.Default) {
                                     try {
                                         val result = BurstMergePipeline.merge(frames)
-                                        MergedPhotoSaver.save(context, result.merged)
+                                        // Tone/saturation/contrast finishing applies only to the
+                                        // merged burst; single PhotoCapture JPEGs are left untouched.
+                                        val finished = FinishingPipeline.apply(
+                                            result.merged,
+                                            FinishingParams.DEFAULT,
+                                        )
+                                        MergedPhotoSaver.save(context, finished)
                                         withContext(Dispatchers.Main) {
                                             isBurstInProgress = false
                                             snackbarHostState.showSnackbar(

@@ -24,4 +24,18 @@
     <string name="burst_merge_failure">Failed to merge burst. Please try again.</string>
     <string name="look_neutral">Neutral</string>
     <string name="look_cinematic">Cinematic look</string>
+    <string name="recording_indicator_content_description">Recording</string>
+    <string name="preview_bind_failure_message">Couldn\'t start the camera preview.</string>
+    <string name="preview_bind_retry">Retry</string>
+    <string name="open_settings_content_description">Settings</string>
+    <string name="settings_back_content_description">Back</string>
+    <string name="settings_title">Settings</string>
+    <string name="settings_section_burst">Burst photo</string>
+    <string name="settings_burst_frame_count_label">Frames per burst</string>
+    <string name="settings_burst_frame_count_option_description">%1$d frames per burst</string>
+    <string name="settings_section_merged_photos">Merged photos</string>
+    <string name="settings_apply_finishing_label">Apply finishing to merged photos</string>
+    <string name="settings_apply_finishing_description">Adds tone, saturation and contrast finishing when a burst is merged and saved.</string>
+    <string name="settings_section_cinematic">Cinematic mode</string>
+    <string name="settings_default_look_label">Default look</string>
 </resources>

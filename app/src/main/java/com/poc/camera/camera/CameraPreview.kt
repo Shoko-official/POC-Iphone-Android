@@ -1,8 +1,12 @@
 package com.poc.camera.camera
 
+import android.util.Size
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
@@ -18,6 +22,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import java.util.concurrent.Executors
+
+private val BURST_ANALYSIS_RESOLUTION = Size(1280, 720)
 
 @Composable
 fun CameraPreview(
@@ -25,6 +32,7 @@ fun CameraPreview(
     modifier: Modifier = Modifier,
     onImageCaptureReady: (ImageCapture) -> Unit = {},
     onVideoCaptureReady: (VideoCapture<Recorder>) -> Unit = {},
+    onBurstControllerReady: (BurstController) -> Unit = {},
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -36,11 +44,13 @@ fun CameraPreview(
             .build()
     }
     val videoCapture = remember { VideoCapture.withOutput(recorder) }
+    val burstController = remember { BurstController() }
 
     // Bind per mode rather than all use cases at once: some devices reject the combined
     // Preview + ImageCapture + VideoCapture graph, so each mode only binds what it needs.
     DisposableEffect(lifecycleOwner, mode) {
         var cameraProvider: ProcessCameraProvider? = null
+        val analysisExecutor = Executors.newSingleThreadExecutor()
         val providerFuture = ProcessCameraProvider.getInstance(context)
 
         providerFuture.addListener(
@@ -55,13 +65,32 @@ fun CameraPreview(
                 provider.unbindAll()
                 when (mode) {
                     CameraMode.Photo -> {
+                        val imageAnalysis = ImageAnalysis.Builder()
+                            .setResolutionSelector(
+                                ResolutionSelector.Builder()
+                                    .setResolutionStrategy(
+                                        ResolutionStrategy(
+                                            BURST_ANALYSIS_RESOLUTION,
+                                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                                        ),
+                                    )
+                                    .build(),
+                            )
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
+                            .apply {
+                                setAnalyzer(analysisExecutor) { image -> burstController.onFrame(image) }
+                            }
+
                         provider.bindToLifecycle(
                             lifecycleOwner,
                             CameraSelector.DEFAULT_BACK_CAMERA,
                             preview,
                             imageCapture,
+                            imageAnalysis,
                         )
                         onImageCaptureReady(imageCapture)
+                        onBurstControllerReady(burstController)
                     }
                     CameraMode.Video -> {
                         provider.bindToLifecycle(
@@ -79,6 +108,7 @@ fun CameraPreview(
 
         onDispose {
             cameraProvider?.unbindAll()
+            analysisExecutor.shutdown()
         }
     }
 

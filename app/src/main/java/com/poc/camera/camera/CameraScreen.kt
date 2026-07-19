@@ -112,6 +112,8 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     var mode by rememberSaveable { mutableStateOf(CameraMode.Photo) }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var videoCapture by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
+    var burstController by remember { mutableStateOf<BurstController?>(null) }
+    var isBurstInProgress by remember { mutableStateOf(false) }
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
     var isRecording by remember { mutableStateOf(false) }
     var recordingStartMillis by remember { mutableLongStateOf(0L) }
@@ -126,6 +128,8 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     val stopContentDescription = stringResource(R.string.stop_button_content_description)
     val photoModeLabel = stringResource(R.string.mode_photo)
     val videoModeLabel = stringResource(R.string.mode_video)
+    val burstButtonLabel = stringResource(R.string.burst_button)
+    val burstCaptureSuccessMessage = stringResource(R.string.burst_capture_success)
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -161,6 +165,7 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
             modifier = Modifier.fillMaxSize(),
             onImageCaptureReady = { imageCapture = it },
             onVideoCaptureReady = { videoCapture = it },
+            onBurstControllerReady = { burstController = it },
         )
 
         Column(
@@ -193,78 +198,103 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
                 )
             }
 
-            Button(
-                onClick = {
-                    when (mode) {
-                        CameraMode.Photo -> {
-                            val capture = imageCapture ?: return@Button
-                            PhotoCapture.capture(
-                                context = context,
-                                imageCapture = capture,
-                                onSuccess = { uri ->
-                                    scope.launch {
-                                        snackbarHostState.showSnackbar(
-                                            String.format(captureSuccessMessage, uri),
-                                        )
-                                    }
-                                },
-                                onError = {
-                                    scope.launch {
-                                        snackbarHostState.showSnackbar(captureFailureMessage)
-                                    }
-                                },
-                            )
-                        }
-                        CameraMode.Video -> {
-                            if (isRecording) {
-                                activeRecording?.stop()
-                            } else {
-                                val capture = videoCapture ?: return@Button
-                                activeRecording = VideoRecording.start(
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (mode == CameraMode.Photo) {
+                    OutlinedButton(
+                        onClick = {
+                            val controller = burstController ?: return@OutlinedButton
+                            isBurstInProgress = true
+                            controller.arm { frames ->
+                                isBurstInProgress = false
+                                scope.launch {
+                                    snackbarHostState.showSnackbar(
+                                        String.format(burstCaptureSuccessMessage, frames.size),
+                                    )
+                                }
+                            }
+                        },
+                        enabled = burstController != null && !isBurstInProgress,
+                    ) {
+                        Text(text = burstButtonLabel)
+                    }
+                }
+
+                Button(
+                    onClick = {
+                        when (mode) {
+                            CameraMode.Photo -> {
+                                val capture = imageCapture ?: return@Button
+                                PhotoCapture.capture(
                                     context = context,
-                                    recorder = capture.output,
-                                    onFinalized = { event ->
-                                        isRecording = false
-                                        activeRecording = null
-                                        if (event.hasError()) {
-                                            scope.launch {
-                                                snackbarHostState.showSnackbar(videoFailureMessage)
-                                            }
-                                        } else {
-                                            scope.launch {
-                                                snackbarHostState.showSnackbar(
-                                                    String.format(
-                                                        videoSuccessMessage,
-                                                        event.outputResults.outputUri,
-                                                    ),
-                                                )
-                                            }
+                                    imageCapture = capture,
+                                    onSuccess = { uri ->
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar(
+                                                String.format(captureSuccessMessage, uri),
+                                            )
+                                        }
+                                    },
+                                    onError = {
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar(captureFailureMessage)
                                         }
                                     },
                                 )
-                                recordingStartMillis = System.currentTimeMillis()
-                                elapsedMillis = 0L
-                                isRecording = true
+                            }
+                            CameraMode.Video -> {
+                                if (isRecording) {
+                                    activeRecording?.stop()
+                                } else {
+                                    val capture = videoCapture ?: return@Button
+                                    activeRecording = VideoRecording.start(
+                                        context = context,
+                                        recorder = capture.output,
+                                        onFinalized = { event ->
+                                            isRecording = false
+                                            activeRecording = null
+                                            if (event.hasError()) {
+                                                scope.launch {
+                                                    snackbarHostState.showSnackbar(videoFailureMessage)
+                                                }
+                                            } else {
+                                                scope.launch {
+                                                    snackbarHostState.showSnackbar(
+                                                        String.format(
+                                                            videoSuccessMessage,
+                                                            event.outputResults.outputUri,
+                                                        ),
+                                                    )
+                                                }
+                                            }
+                                        },
+                                    )
+                                    recordingStartMillis = System.currentTimeMillis()
+                                    elapsedMillis = 0L
+                                    isRecording = true
+                                }
                             }
                         }
-                    }
-                },
-                shape = CircleShape,
-                colors = if (isRecording) {
-                    ButtonDefaults.buttonColors(containerColor = Color.Red)
-                } else {
-                    ButtonDefaults.buttonColors()
-                },
-                modifier = Modifier
-                    .size(72.dp)
-                    .semantics {
-                        contentDescription = when {
-                            mode == CameraMode.Video && isRecording -> stopContentDescription
-                            mode == CameraMode.Video -> recordContentDescription
-                            else -> shutterContentDescription
-                        }
                     },
-            ) {}
+                    shape = CircleShape,
+                    colors = if (isRecording) {
+                        ButtonDefaults.buttonColors(containerColor = Color.Red)
+                    } else {
+                        ButtonDefaults.buttonColors()
+                    },
+                    modifier = Modifier
+                        .size(72.dp)
+                        .semantics {
+                            contentDescription = when {
+                                mode == CameraMode.Video && isRecording -> stopContentDescription
+                                mode == CameraMode.Video -> recordContentDescription
+                                else -> shutterContentDescription
+                            }
+                        },
+                ) {}
+            }
         }
 
         SnackbarHost(

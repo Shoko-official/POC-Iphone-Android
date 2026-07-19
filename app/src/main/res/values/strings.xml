@@ -8,4 +8,10 @@
     <string name="shutter_button_content_description">Capture photo</string>
     <string name="capture_success">Photo saved: %1$s</string>
     <string name="capture_failure">Failed to save photo. Please try again.</string>
+    <string name="mode_photo">Photo</string>
+    <string name="mode_video">Video</string>
+    <string name="record_button_content_description">Start recording</string>
+    <string name="stop_button_content_description">Stop recording</string>
+    <string name="video_capture_success">Video saved: %1$s</string>
+    <string name="video_capture_failure">Failed to save video. Please try again.</string>
 </resources>

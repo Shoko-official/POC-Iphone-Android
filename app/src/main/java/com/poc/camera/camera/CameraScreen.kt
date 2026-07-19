@@ -14,6 +14,7 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -123,6 +125,7 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     var isRecording by remember { mutableStateOf(false) }
     var recordingStartMillis by remember { mutableLongStateOf(0L) }
     var elapsedMillis by remember { mutableLongStateOf(0L) }
+    var cinematicConfig by remember { mutableStateOf<CinematicConfig?>(null) }
 
     val captureSuccessMessage = stringResource(R.string.capture_success)
     val captureFailureMessage = stringResource(R.string.capture_failure)
@@ -133,16 +136,21 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     val stopContentDescription = stringResource(R.string.stop_button_content_description)
     val photoModeLabel = stringResource(R.string.mode_photo)
     val videoModeLabel = stringResource(R.string.mode_video)
+    val cinematicModeLabel = stringResource(R.string.mode_cinematic)
     val burstButtonLabel = stringResource(R.string.burst_button)
     val burstMergeSuccessMessage = stringResource(R.string.burst_merge_success)
     val burstMergeFailureMessage = stringResource(R.string.burst_merge_failure)
+    val cinematicFps24Label = stringResource(R.string.cinematic_fps_24)
+    val cinematicFpsDefaultLabel = stringResource(R.string.cinematic_fps_default)
+    val cinematicStabilizedTemplate = stringResource(R.string.cinematic_overlay_stabilized)
+    val cinematicUnstabilizedTemplate = stringResource(R.string.cinematic_overlay_unstabilized)
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { /* Recording proceeds without audio if this was denied; checked again at record time. */ }
 
     LaunchedEffect(mode) {
-        if (mode == CameraMode.Video &&
+        if (mode.isVideoLike &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
             PackageManager.PERMISSION_GRANTED
         ) {
@@ -160,6 +168,9 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     // Switching mode rebinds the camera use cases, which would orphan an in-flight
     // recording, so stop it whenever the mode changes or the screen leaves composition.
     DisposableEffect(mode) {
+        if (mode != CameraMode.Cinematic) {
+            cinematicConfig = null
+        }
         onDispose {
             activeRecording?.stop()
         }
@@ -172,7 +183,29 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
             onImageCaptureReady = { imageCapture = it },
             onVideoCaptureReady = { videoCapture = it },
             onBurstControllerReady = { burstController = it },
+            onCinematicConfigReady = { cinematicConfig = it },
         )
+
+        if (mode == CameraMode.Cinematic) {
+            cinematicConfig?.let { config ->
+                Text(
+                    text = CinematicOverlayText.format(
+                        config = config,
+                        fps24Label = cinematicFps24Label,
+                        fpsDefaultLabel = cinematicFpsDefaultLabel,
+                        stabilizedTemplate = cinematicStabilizedTemplate,
+                        unstabilizedTemplate = cinematicUnstabilizedTemplate,
+                    ),
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 16.dp)
+                        .background(Color.Black.copy(alpha = 0.4f), shape = RoundedCornerShape(8.dp))
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                )
+            }
+        }
 
         Column(
             modifier = Modifier
@@ -201,6 +234,12 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
                     selected = mode == CameraMode.Video,
                     enabled = !isRecording,
                     onClick = { mode = CameraMode.Video },
+                )
+                CameraModeButton(
+                    label = cinematicModeLabel,
+                    selected = mode == CameraMode.Cinematic,
+                    enabled = !isRecording,
+                    onClick = { mode = CameraMode.Cinematic },
                 )
             }
 
@@ -251,58 +290,55 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
 
                 Button(
                     onClick = {
-                        when (mode) {
-                            CameraMode.Photo -> {
-                                val capture = imageCapture ?: return@Button
-                                PhotoCapture.capture(
+                        if (mode.isVideoLike) {
+                            if (isRecording) {
+                                activeRecording?.stop()
+                            } else {
+                                val capture = videoCapture ?: return@Button
+                                activeRecording = VideoRecording.start(
                                     context = context,
-                                    imageCapture = capture,
-                                    onSuccess = { uri ->
-                                        scope.launch {
-                                            snackbarHostState.showSnackbar(
-                                                String.format(captureSuccessMessage, uri),
-                                            )
-                                        }
-                                    },
-                                    onError = {
-                                        scope.launch {
-                                            snackbarHostState.showSnackbar(captureFailureMessage)
+                                    recorder = capture.output,
+                                    onFinalized = { event ->
+                                        isRecording = false
+                                        activeRecording = null
+                                        if (event.hasError()) {
+                                            scope.launch {
+                                                snackbarHostState.showSnackbar(videoFailureMessage)
+                                            }
+                                        } else {
+                                            scope.launch {
+                                                snackbarHostState.showSnackbar(
+                                                    String.format(
+                                                        videoSuccessMessage,
+                                                        event.outputResults.outputUri,
+                                                    ),
+                                                )
+                                            }
                                         }
                                     },
                                 )
+                                recordingStartMillis = System.currentTimeMillis()
+                                elapsedMillis = 0L
+                                isRecording = true
                             }
-                            CameraMode.Video -> {
-                                if (isRecording) {
-                                    activeRecording?.stop()
-                                } else {
-                                    val capture = videoCapture ?: return@Button
-                                    activeRecording = VideoRecording.start(
-                                        context = context,
-                                        recorder = capture.output,
-                                        onFinalized = { event ->
-                                            isRecording = false
-                                            activeRecording = null
-                                            if (event.hasError()) {
-                                                scope.launch {
-                                                    snackbarHostState.showSnackbar(videoFailureMessage)
-                                                }
-                                            } else {
-                                                scope.launch {
-                                                    snackbarHostState.showSnackbar(
-                                                        String.format(
-                                                            videoSuccessMessage,
-                                                            event.outputResults.outputUri,
-                                                        ),
-                                                    )
-                                                }
-                                            }
-                                        },
-                                    )
-                                    recordingStartMillis = System.currentTimeMillis()
-                                    elapsedMillis = 0L
-                                    isRecording = true
-                                }
-                            }
+                        } else {
+                            val capture = imageCapture ?: return@Button
+                            PhotoCapture.capture(
+                                context = context,
+                                imageCapture = capture,
+                                onSuccess = { uri ->
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar(
+                                            String.format(captureSuccessMessage, uri),
+                                        )
+                                    }
+                                },
+                                onError = {
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar(captureFailureMessage)
+                                    }
+                                },
+                            )
                         }
                     },
                     shape = CircleShape,
@@ -315,8 +351,8 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
                         .size(72.dp)
                         .semantics {
                             contentDescription = when {
-                                mode == CameraMode.Video && isRecording -> stopContentDescription
-                                mode == CameraMode.Video -> recordContentDescription
+                                mode.isVideoLike && isRecording -> stopContentDescription
+                                mode.isVideoLike -> recordContentDescription
                                 else -> shutterContentDescription
                             }
                         },

@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">POC Camera</string>
+    <string name="camera_permission_rationale">Camera access is required to show the live preview.</string>
+    <string name="camera_permission_grant">Grant camera permission</string>
+    <string name="camera_permission_permanently_denied">Camera permission was denied. Enable it from system settings to use the camera.</string>
+    <string name="camera_permission_open_settings">Open settings</string>
 </resources>

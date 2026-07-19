@@ -15,19 +15,30 @@ import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -35,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,11 +55,16 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -57,13 +74,25 @@ import com.poc.camera.R
 import com.poc.camera.pipeline.BurstMergePipeline
 import com.poc.camera.pipeline.FinishingParams
 import com.poc.camera.pipeline.FinishingPipeline
+import com.poc.camera.settings.CameraSettingsData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+// Shared scrim strong enough to keep white overlay text/icons legible over a bright,
+// unpredictable live preview (sky, snow, direct light); paired with a text shadow below
+// for the worst case of a near-white background behind a status chip.
+private val OverlayScrimColor = Color.Black.copy(alpha = 0.6f)
+private val OverlayTextShadow = Shadow(color = Color.Black, offset = Offset(0f, 1f), blurRadius = 4f)
+private val SecondaryControlSlotWidth = 88.dp
+
 @Composable
-fun CameraScreen(modifier: Modifier = Modifier) {
+fun CameraScreen(
+    settings: CameraSettingsData,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     var permissionState by rememberSaveable {
         mutableStateOf(context.currentCameraPermissionState())
@@ -102,7 +131,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     }
 
     when (permissionState) {
-        CameraPermissionState.Granted -> CameraCaptureScreen(modifier = modifier)
+        CameraPermissionState.Granted -> CameraCaptureScreen(
+            settings = settings,
+            onOpenSettings = onOpenSettings,
+            modifier = modifier,
+        )
         CameraPermissionState.Denied -> CameraPermissionRationale(
             modifier = modifier,
             onRequestPermission = { launcher.launch(Manifest.permission.CAMERA) },
@@ -112,7 +145,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
+private fun CameraCaptureScreen(
+    settings: CameraSettingsData,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -126,7 +163,11 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     var recordingStartMillis by remember { mutableLongStateOf(0L) }
     var elapsedMillis by remember { mutableLongStateOf(0L) }
     var cinematicConfig by remember { mutableStateOf<CinematicConfig?>(null) }
-    var videoLook by rememberSaveable { mutableStateOf(VideoLook.Neutral) }
+    // Settings only seed the initial look for a fresh session; once the user picks a
+    // look in Cinematic mode it stays under their control for the rest of the session.
+    var videoLook by rememberSaveable { mutableStateOf(settings.defaultCinematicLook) }
+    var previewBindError by remember { mutableStateOf(false) }
+    var previewRetryToken by remember { mutableIntStateOf(0) }
 
     val captureSuccessMessage = stringResource(R.string.capture_success)
     val captureFailureMessage = stringResource(R.string.capture_failure)
@@ -147,6 +188,10 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     val cinematicUnstabilizedTemplate = stringResource(R.string.cinematic_overlay_unstabilized)
     val neutralLookLabel = stringResource(R.string.look_neutral)
     val cinematicLookLabel = stringResource(R.string.look_cinematic)
+    val recordingIndicatorContentDescription = stringResource(R.string.recording_indicator_content_description)
+    val openSettingsContentDescription = stringResource(R.string.open_settings_content_description)
+    val previewBindFailureMessage = stringResource(R.string.preview_bind_failure_message)
+    val previewRetryLabel = stringResource(R.string.preview_bind_retry)
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -183,201 +228,250 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
         CameraPreview(
             mode = mode,
             look = videoLook,
+            burstFrameCount = settings.burstFrameCount,
+            retryToken = previewRetryToken,
             modifier = Modifier.fillMaxSize(),
             onImageCaptureReady = { imageCapture = it },
             onVideoCaptureReady = { videoCapture = it },
             onBurstControllerReady = { burstController = it },
             onCinematicConfigReady = { cinematicConfig = it },
+            onBindError = { previewBindError = true },
         )
-
-        if (mode == CameraMode.Cinematic) {
-            cinematicConfig?.let { config ->
-                Text(
-                    text = CinematicOverlayText.format(
-                        config = config,
-                        fps24Label = cinematicFps24Label,
-                        fpsDefaultLabel = cinematicFpsDefaultLabel,
-                        stabilizedTemplate = cinematicStabilizedTemplate,
-                        unstabilizedTemplate = cinematicUnstabilizedTemplate,
-                    ),
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 16.dp)
-                        .background(Color.Black.copy(alpha = 0.4f), shape = RoundedCornerShape(8.dp))
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                )
-            }
-        }
 
         Column(
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 32.dp),
+                .align(Alignment.TopCenter)
+                .padding(top = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (isRecording) {
-                Text(
-                    text = RecordingTimeFormatter.format(elapsedMillis),
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-            }
-
             if (mode == CameraMode.Cinematic) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CameraModeButton(
-                        label = neutralLookLabel,
-                        selected = videoLook == VideoLook.Neutral,
-                        enabled = !isRecording,
-                        onClick = { videoLook = VideoLook.Neutral },
-                    )
-                    CameraModeButton(
-                        label = cinematicLookLabel,
-                        selected = videoLook == VideoLook.Cinematic,
-                        enabled = !isRecording,
-                        onClick = { videoLook = VideoLook.Cinematic },
-                    )
-                }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                CameraModeButton(
-                    label = photoModeLabel,
-                    selected = mode == CameraMode.Photo,
-                    enabled = !isRecording,
-                    onClick = { mode = CameraMode.Photo },
-                )
-                CameraModeButton(
-                    label = videoModeLabel,
-                    selected = mode == CameraMode.Video,
-                    enabled = !isRecording,
-                    onClick = { mode = CameraMode.Video },
-                )
-                CameraModeButton(
-                    label = cinematicModeLabel,
-                    selected = mode == CameraMode.Cinematic,
-                    enabled = !isRecording,
-                    onClick = { mode = CameraMode.Cinematic },
-                )
-            }
-
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (mode == CameraMode.Photo) {
-                    OutlinedButton(
-                        onClick = {
-                            val controller = burstController ?: return@OutlinedButton
-                            isBurstInProgress = true
-                            controller.arm { frames ->
-                                // Merge off the main thread, then persist and report.
-                                scope.launch(Dispatchers.Default) {
-                                    try {
-                                        val result = BurstMergePipeline.merge(frames)
-                                        // Tone/saturation/contrast finishing applies only to the
-                                        // merged burst; single PhotoCapture JPEGs are left untouched.
-                                        val finished = FinishingPipeline.apply(
-                                            result.merged,
-                                            FinishingParams.DEFAULT,
-                                        )
-                                        MergedPhotoSaver.save(context, finished)
-                                        withContext(Dispatchers.Main) {
-                                            isBurstInProgress = false
-                                            snackbarHostState.showSnackbar(
-                                                String.format(
-                                                    burstMergeSuccessMessage,
-                                                    result.usedFrameCount,
-                                                ),
-                                            )
-                                        }
-                                    } catch (e: Exception) {
-                                        withContext(Dispatchers.Main) {
-                                            isBurstInProgress = false
-                                            snackbarHostState.showSnackbar(burstMergeFailureMessage)
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        enabled = burstController != null && !isBurstInProgress,
-                    ) {
-                        Text(text = burstButtonLabel)
+                cinematicConfig?.let { config ->
+                    OverlayChip {
+                        Text(
+                            text = CinematicOverlayText.format(
+                                config = config,
+                                fps24Label = cinematicFps24Label,
+                                fpsDefaultLabel = cinematicFpsDefaultLabel,
+                                stabilizedTemplate = cinematicStabilizedTemplate,
+                                unstabilizedTemplate = cinematicUnstabilizedTemplate,
+                            ),
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
+                        )
                     }
                 }
+            }
 
-                Button(
-                    onClick = {
-                        if (mode.isVideoLike) {
-                            if (isRecording) {
-                                activeRecording?.stop()
+            if (isRecording) {
+                OverlayChip {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.semantics(mergeDescendants = true) {
+                            contentDescription = recordingIndicatorContentDescription
+                        },
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(Color.Red, CircleShape),
+                        )
+                        Text(
+                            text = RecordingTimeFormatter.format(elapsedMillis),
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyLarge.copy(shadow = OverlayTextShadow),
+                        )
+                    }
+                }
+            }
+        }
+
+        IconButton(
+            onClick = onOpenSettings,
+            enabled = !isRecording,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(16.dp)
+                .background(OverlayScrimColor, CircleShape),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Settings,
+                contentDescription = openSettingsContentDescription,
+                tint = Color.White.copy(alpha = if (isRecording) 0.38f else 1f),
+            )
+        }
+
+        if (previewBindError) {
+            OverlayChip(modifier = Modifier.align(Alignment.Center)) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        text = previewBindFailureMessage,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyLarge.copy(shadow = OverlayTextShadow),
+                        textAlign = TextAlign.Center,
+                    )
+                    Button(
+                        onClick = {
+                            previewBindError = false
+                            previewRetryToken++
+                        },
+                    ) {
+                        Text(text = previewRetryLabel)
+                    }
+                }
+            }
+        }
+
+        OverlayChip(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 24.dp),
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                ModeSelector(
+                    selected = mode,
+                    enabled = !isRecording,
+                    photoLabel = photoModeLabel,
+                    videoLabel = videoModeLabel,
+                    cinematicLabel = cinematicModeLabel,
+                    onSelected = { mode = it },
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier.width(SecondaryControlSlotWidth),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (mode == CameraMode.Photo) {
+                            Button(
+                                onClick = {
+                                    val controller = burstController ?: return@Button
+                                    isBurstInProgress = true
+                                    controller.arm { frames ->
+                                        // Merge off the main thread, then persist and report.
+                                        scope.launch(Dispatchers.Default) {
+                                            try {
+                                                val result = BurstMergePipeline.merge(frames)
+                                                // Finishing (tone/saturation/contrast) is optional and
+                                                // only ever applies to the merged burst frame.
+                                                val output = if (settings.applyFinishingToMergedPhotos) {
+                                                    FinishingPipeline.apply(result.merged, FinishingParams.DEFAULT)
+                                                } else {
+                                                    result.merged
+                                                }
+                                                MergedPhotoSaver.save(context, output)
+                                                withContext(Dispatchers.Main) {
+                                                    isBurstInProgress = false
+                                                    snackbarHostState.showSnackbar(
+                                                        String.format(
+                                                            burstMergeSuccessMessage,
+                                                            result.usedFrameCount,
+                                                        ),
+                                                    )
+                                                }
+                                            } catch (e: Exception) {
+                                                withContext(Dispatchers.Main) {
+                                                    isBurstInProgress = false
+                                                    snackbarHostState.showSnackbar(burstMergeFailureMessage)
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                enabled = burstController != null && !isBurstInProgress,
+                            ) {
+                                Text(text = burstButtonLabel)
+                            }
+                        }
+                    }
+
+                    ShutterButton(
+                        mode = mode,
+                        isRecording = isRecording,
+                        contentDescription = when {
+                            mode.isVideoLike && isRecording -> stopContentDescription
+                            mode.isVideoLike -> recordContentDescription
+                            else -> shutterContentDescription
+                        },
+                        onClick = {
+                            if (mode.isVideoLike) {
+                                if (isRecording) {
+                                    activeRecording?.stop()
+                                } else {
+                                    val capture = videoCapture ?: return@ShutterButton
+                                    activeRecording = VideoRecording.start(
+                                        context = context,
+                                        recorder = capture.output,
+                                        onFinalized = { event ->
+                                            isRecording = false
+                                            activeRecording = null
+                                            if (event.hasError()) {
+                                                scope.launch {
+                                                    snackbarHostState.showSnackbar(videoFailureMessage)
+                                                }
+                                            } else {
+                                                scope.launch {
+                                                    snackbarHostState.showSnackbar(
+                                                        String.format(
+                                                            videoSuccessMessage,
+                                                            event.outputResults.outputUri,
+                                                        ),
+                                                    )
+                                                }
+                                            }
+                                        },
+                                    )
+                                    recordingStartMillis = System.currentTimeMillis()
+                                    elapsedMillis = 0L
+                                    isRecording = true
+                                }
                             } else {
-                                val capture = videoCapture ?: return@Button
-                                activeRecording = VideoRecording.start(
+                                val capture = imageCapture ?: return@ShutterButton
+                                PhotoCapture.capture(
                                     context = context,
-                                    recorder = capture.output,
-                                    onFinalized = { event ->
-                                        isRecording = false
-                                        activeRecording = null
-                                        if (event.hasError()) {
-                                            scope.launch {
-                                                snackbarHostState.showSnackbar(videoFailureMessage)
-                                            }
-                                        } else {
-                                            scope.launch {
-                                                snackbarHostState.showSnackbar(
-                                                    String.format(
-                                                        videoSuccessMessage,
-                                                        event.outputResults.outputUri,
-                                                    ),
-                                                )
-                                            }
+                                    imageCapture = capture,
+                                    onSuccess = { uri ->
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar(
+                                                String.format(captureSuccessMessage, uri),
+                                            )
+                                        }
+                                    },
+                                    onError = {
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar(captureFailureMessage)
                                         }
                                     },
                                 )
-                                recordingStartMillis = System.currentTimeMillis()
-                                elapsedMillis = 0L
-                                isRecording = true
-                            }
-                        } else {
-                            val capture = imageCapture ?: return@Button
-                            PhotoCapture.capture(
-                                context = context,
-                                imageCapture = capture,
-                                onSuccess = { uri ->
-                                    scope.launch {
-                                        snackbarHostState.showSnackbar(
-                                            String.format(captureSuccessMessage, uri),
-                                        )
-                                    }
-                                },
-                                onError = {
-                                    scope.launch {
-                                        snackbarHostState.showSnackbar(captureFailureMessage)
-                                    }
-                                },
-                            )
-                        }
-                    },
-                    shape = CircleShape,
-                    colors = if (isRecording) {
-                        ButtonDefaults.buttonColors(containerColor = Color.Red)
-                    } else {
-                        ButtonDefaults.buttonColors()
-                    },
-                    modifier = Modifier
-                        .size(72.dp)
-                        .semantics {
-                            contentDescription = when {
-                                mode.isVideoLike && isRecording -> stopContentDescription
-                                mode.isVideoLike -> recordContentDescription
-                                else -> shutterContentDescription
                             }
                         },
-                ) {}
+                    )
+
+                    Box(
+                        modifier = Modifier.width(SecondaryControlSlotWidth),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (mode == CameraMode.Cinematic) {
+                            LookSelector(
+                                selected = videoLook,
+                                enabled = !isRecording,
+                                neutralLabel = neutralLookLabel,
+                                cinematicLabel = cinematicLookLabel,
+                                onSelected = { videoLook = it },
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -388,20 +482,123 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     }
 }
 
+/** Rounded translucent backing so white overlay content stays legible over the live preview. */
 @Composable
-private fun CameraModeButton(
-    label: String,
-    selected: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit,
+private fun OverlayChip(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
 ) {
-    if (selected) {
-        Button(onClick = onClick, enabled = enabled) {
-            Text(text = label)
+    Box(
+        modifier = modifier
+            .background(OverlayScrimColor, shape = RoundedCornerShape(16.dp))
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun ModeSelector(
+    selected: CameraMode,
+    enabled: Boolean,
+    photoLabel: String,
+    videoLabel: String,
+    cinematicLabel: String,
+    onSelected: (CameraMode) -> Unit,
+) {
+    val options = listOf(
+        CameraMode.Photo to photoLabel,
+        CameraMode.Video to videoLabel,
+        CameraMode.Cinematic to cinematicLabel,
+    )
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.widthIn(max = 320.dp)) {
+        options.forEachIndexed { index, (candidateMode, label) ->
+            SegmentedButton(
+                modifier = Modifier.heightIn(min = 48.dp),
+                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                selected = selected == candidateMode,
+                enabled = enabled,
+                onClick = { onSelected(candidateMode) },
+                icon = {},
+                label = { Text(text = label) },
+            )
         }
-    } else {
-        OutlinedButton(onClick = onClick, enabled = enabled) {
-            Text(text = label)
+    }
+}
+
+@Composable
+private fun LookSelector(
+    selected: VideoLook,
+    enabled: Boolean,
+    neutralLabel: String,
+    cinematicLabel: String,
+    onSelected: (VideoLook) -> Unit,
+) {
+    val options = listOf(
+        VideoLook.Neutral to neutralLabel,
+        VideoLook.Cinematic to cinematicLabel,
+    )
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.widthIn(max = SecondaryControlSlotWidth * 2)) {
+        options.forEachIndexed { index, (candidateLook, label) ->
+            SegmentedButton(
+                modifier = Modifier.heightIn(min = 48.dp),
+                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                selected = selected == candidateLook,
+                enabled = enabled,
+                onClick = { onSelected(candidateLook) },
+                icon = {},
+                label = {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                    )
+                },
+            )
+        }
+    }
+}
+
+/**
+ * Single unified shutter affordance: a white ring that stays constant while its centre
+ * swaps shape - filled white disc for photo, red disc for an idle video-like mode, red
+ * square once recording - rather than swapping to a different control per mode.
+ */
+@Composable
+private fun ShutterButton(
+    mode: CameraMode,
+    isRecording: Boolean,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .size(76.dp)
+            .border(4.dp, Color.White, CircleShape)
+            .clickable(onClick = onClick)
+            .semantics {
+                role = Role.Button
+                this.contentDescription = contentDescription
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        when {
+            mode.isVideoLike && isRecording -> Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .background(Color.Red, RoundedCornerShape(6.dp)),
+            )
+            mode.isVideoLike -> Box(
+                modifier = Modifier
+                    .size(60.dp)
+                    .background(Color.Red, CircleShape),
+            )
+            else -> Box(
+                modifier = Modifier
+                    .size(60.dp)
+                    .background(Color.White, CircleShape),
+            )
         }
     }
 }
@@ -420,9 +617,10 @@ private fun CameraPermissionRationale(
     ) {
         Text(
             text = stringResource(R.string.camera_permission_rationale),
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.titleMedium,
+            textAlign = TextAlign.Center,
         )
-        Button(onClick = onRequestPermission) {
+        Button(onClick = onRequestPermission, modifier = Modifier.fillMaxWidth()) {
             Text(text = stringResource(R.string.camera_permission_grant))
         }
     }
@@ -441,9 +639,13 @@ private fun CameraPermissionSettingsPrompt(modifier: Modifier = Modifier) {
     ) {
         Text(
             text = stringResource(R.string.camera_permission_permanently_denied),
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.titleMedium,
+            textAlign = TextAlign.Center,
         )
-        Button(onClick = { context.startActivity(context.appSettingsIntent()) }) {
+        Button(
+            onClick = { context.startActivity(context.appSettingsIntent()) },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
             Text(text = stringResource(R.string.camera_permission_open_settings))
         }
     }

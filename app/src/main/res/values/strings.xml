@@ -22,4 +22,6 @@
     <string name="burst_button">Burst</string>
     <string name="burst_merge_success">Merged %1$d frames</string>
     <string name="burst_merge_failure">Failed to merge burst. Please try again.</string>
+    <string name="look_neutral">Neutral</string>
+    <string name="look_cinematic">Cinematic look</string>
 </resources>

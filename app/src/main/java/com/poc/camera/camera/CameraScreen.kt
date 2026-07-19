@@ -126,6 +126,7 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     var recordingStartMillis by remember { mutableLongStateOf(0L) }
     var elapsedMillis by remember { mutableLongStateOf(0L) }
     var cinematicConfig by remember { mutableStateOf<CinematicConfig?>(null) }
+    var videoLook by rememberSaveable { mutableStateOf(VideoLook.Neutral) }
 
     val captureSuccessMessage = stringResource(R.string.capture_success)
     val captureFailureMessage = stringResource(R.string.capture_failure)
@@ -144,6 +145,8 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     val cinematicFpsDefaultLabel = stringResource(R.string.cinematic_fps_default)
     val cinematicStabilizedTemplate = stringResource(R.string.cinematic_overlay_stabilized)
     val cinematicUnstabilizedTemplate = stringResource(R.string.cinematic_overlay_unstabilized)
+    val neutralLookLabel = stringResource(R.string.look_neutral)
+    val cinematicLookLabel = stringResource(R.string.look_cinematic)
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -179,6 +182,7 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     Box(modifier = modifier) {
         CameraPreview(
             mode = mode,
+            look = videoLook,
             modifier = Modifier.fillMaxSize(),
             onImageCaptureReady = { imageCapture = it },
             onVideoCaptureReady = { videoCapture = it },
@@ -220,6 +224,23 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
                     color = Color.White,
                     style = MaterialTheme.typography.bodyLarge,
                 )
+            }
+
+            if (mode == CameraMode.Cinematic) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CameraModeButton(
+                        label = neutralLookLabel,
+                        selected = videoLook == VideoLook.Neutral,
+                        enabled = !isRecording,
+                        onClick = { videoLook = VideoLook.Neutral },
+                    )
+                    CameraModeButton(
+                        label = cinematicLookLabel,
+                        selected = videoLook == VideoLook.Cinematic,
+                        enabled = !isRecording,
+                        onClick = { videoLook = VideoLook.Cinematic },
+                    )
+                }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

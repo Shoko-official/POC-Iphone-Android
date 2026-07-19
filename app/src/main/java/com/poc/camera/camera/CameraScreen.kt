@@ -10,30 +10,41 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.ImageCapture
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.compose.runtime.DisposableEffect
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.poc.camera.R
+import kotlinx.coroutines.launch
 
 @Composable
 fun CameraScreen(modifier: Modifier = Modifier) {
@@ -75,12 +86,63 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     }
 
     when (permissionState) {
-        CameraPermissionState.Granted -> CameraPreview(modifier = modifier)
+        CameraPermissionState.Granted -> CameraCaptureScreen(modifier = modifier)
         CameraPermissionState.Denied -> CameraPermissionRationale(
             modifier = modifier,
             onRequestPermission = { launcher.launch(Manifest.permission.CAMERA) },
         )
         CameraPermissionState.PermanentlyDenied -> CameraPermissionSettingsPrompt(modifier = modifier)
+    }
+}
+
+@Composable
+private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
+    val captureSuccessMessage = stringResource(R.string.capture_success)
+    val captureFailureMessage = stringResource(R.string.capture_failure)
+    val shutterContentDescription = stringResource(R.string.shutter_button_content_description)
+
+    Box(modifier = modifier) {
+        CameraPreview(
+            modifier = Modifier.fillMaxSize(),
+            onImageCaptureReady = { imageCapture = it },
+        )
+
+        Button(
+            onClick = {
+                val capture = imageCapture ?: return@Button
+                PhotoCapture.capture(
+                    context = context,
+                    imageCapture = capture,
+                    onSuccess = { uri ->
+                        scope.launch {
+                            snackbarHostState.showSnackbar(
+                                String.format(captureSuccessMessage, uri),
+                            )
+                        }
+                    },
+                    onError = {
+                        scope.launch {
+                            snackbarHostState.showSnackbar(captureFailureMessage)
+                        }
+                    },
+                )
+            },
+            shape = CircleShape,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 32.dp)
+                .size(72.dp)
+                .semantics { contentDescription = shutterContentDescription },
+        ) {}
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
     }
 }
 

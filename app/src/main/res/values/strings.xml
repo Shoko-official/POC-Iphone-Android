@@ -5,4 +5,7 @@
     <string name="camera_permission_grant">Grant camera permission</string>
     <string name="camera_permission_permanently_denied">Camera permission was denied. Enable it from system settings to use the camera.</string>
     <string name="camera_permission_open_settings">Open settings</string>
+    <string name="shutter_button_content_description">Capture photo</string>
+    <string name="capture_success">Photo saved: %1$s</string>
+    <string name="capture_failure">Failed to save photo. Please try again.</string>
 </resources>

@@ -10,6 +10,11 @@
     <string name="capture_failure">Failed to save photo. Please try again.</string>
     <string name="mode_photo">Photo</string>
     <string name="mode_video">Video</string>
+    <string name="mode_cinematic">Cinematic</string>
+    <string name="cinematic_fps_24">24 fps</string>
+    <string name="cinematic_fps_default">Default fps</string>
+    <string name="cinematic_overlay_stabilized">%1$s - stabilized</string>
+    <string name="cinematic_overlay_unstabilized">%1$s - unstabilized</string>
     <string name="record_button_content_description">Start recording</string>
     <string name="stop_button_content_description">Stop recording</string>
     <string name="video_capture_success">Video saved: %1$s</string>

@@ -52,8 +52,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.poc.camera.R
+import com.poc.camera.pipeline.BurstMergePipeline
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun CameraScreen(modifier: Modifier = Modifier) {
@@ -129,7 +132,8 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
     val photoModeLabel = stringResource(R.string.mode_photo)
     val videoModeLabel = stringResource(R.string.mode_video)
     val burstButtonLabel = stringResource(R.string.burst_button)
-    val burstCaptureSuccessMessage = stringResource(R.string.burst_capture_success)
+    val burstMergeSuccessMessage = stringResource(R.string.burst_merge_success)
+    val burstMergeFailureMessage = stringResource(R.string.burst_merge_failure)
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -208,11 +212,26 @@ private fun CameraCaptureScreen(modifier: Modifier = Modifier) {
                             val controller = burstController ?: return@OutlinedButton
                             isBurstInProgress = true
                             controller.arm { frames ->
-                                isBurstInProgress = false
-                                scope.launch {
-                                    snackbarHostState.showSnackbar(
-                                        String.format(burstCaptureSuccessMessage, frames.size),
-                                    )
+                                // Merge off the main thread, then persist and report.
+                                scope.launch(Dispatchers.Default) {
+                                    try {
+                                        val result = BurstMergePipeline.merge(frames)
+                                        MergedPhotoSaver.save(context, result.merged)
+                                        withContext(Dispatchers.Main) {
+                                            isBurstInProgress = false
+                                            snackbarHostState.showSnackbar(
+                                                String.format(
+                                                    burstMergeSuccessMessage,
+                                                    result.usedFrameCount,
+                                                ),
+                                            )
+                                        }
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            isBurstInProgress = false
+                                            snackbarHostState.showSnackbar(burstMergeFailureMessage)
+                                        }
+                                    }
                                 }
                             }
                         },

@@ -1,5 +1,6 @@
 package com.poc.camera.camera
 
+import android.util.Range
 import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -33,6 +34,7 @@ fun CameraPreview(
     onImageCaptureReady: (ImageCapture) -> Unit = {},
     onVideoCaptureReady: (VideoCapture<Recorder>) -> Unit = {},
     onBurstControllerReady: (BurstController) -> Unit = {},
+    onCinematicConfigReady: (CinematicConfig) -> Unit = {},
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -100,6 +102,35 @@ fun CameraPreview(
                             videoCapture,
                         )
                         onVideoCaptureReady(videoCapture)
+                    }
+                    CameraMode.Cinematic -> {
+                        // Characteristics vary per device, so the config is resolved fresh
+                        // on each bind rather than cached alongside the remembered use cases.
+                        val cameraInfo = CameraSelector.DEFAULT_BACK_CAMERA
+                            .filter(provider.availableCameraInfos)
+                            .firstOrNull()
+                        val cinematicConfig = cameraInfo
+                            ?.let { CinematicCameraCharacteristics.resolve(it) }
+                            ?: CinematicConfig(use24Fps = false, stabilization = StabilizationChoice.OFF)
+
+                        val cinematicVideoCapture = VideoCapture.Builder(recorder)
+                            .apply {
+                                if (cinematicConfig.use24Fps) {
+                                    val fps = CinematicConfigResolver.TARGET_FPS
+                                    setTargetFrameRate(Range(fps, fps))
+                                }
+                            }
+                            .setVideoStabilizationEnabled(cinematicConfig.stabilization == StabilizationChoice.ON)
+                            .build()
+
+                        provider.bindToLifecycle(
+                            lifecycleOwner,
+                            CameraSelector.DEFAULT_BACK_CAMERA,
+                            preview,
+                            cinematicVideoCapture,
+                        )
+                        onVideoCaptureReady(cinematicVideoCapture)
+                        onCinematicConfigReady(cinematicConfig)
                     }
                 }
             },

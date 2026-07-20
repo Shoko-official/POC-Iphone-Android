@@ -83,20 +83,22 @@ class GoldenPipelineRegressionTest {
         const val SEED = 0xC0FFEEL
         const val MERGE_SEED = 0xBEEFL
 
-        // Measured 2026-07-20 (see class KDoc), each floor = measured value * 0.98
-        // (PSNR/SSIM) or measured value * 1.02 (MAE ceiling).
-        // Reference actuals at capture time:
-        //   edges        psnr 36.66  ssim 0.9921  mae 2.534
-        //   texture      psnr 32.98  ssim 0.9951  mae 3.099
-        //   gradients    psnr 36.78  ssim 0.9395  mae 2.813
-        //   lowlight     psnr 37.60  ssim 0.9476  mae 2.601
-        //   highcontrast psnr 34.95  ssim 0.8763  mae 3.529
+        // RAISED after tile/sub-pixel alignment + ghost rejection, 2026-07-20.
+        // Each floor = measured value * 0.98 (PSNR/SSIM) or measured value * 1.02
+        // (MAE ceiling). Floors were raised where the new pipeline improved beyond
+        // the tolerance and left unchanged where it held flat; none were lowered.
+        // Old actuals (global integer merge)  ->  New actuals (tile/sub-pixel merge):
+        //   edges        psnr 36.66->36.66  ssim 0.9921->0.9921  mae 2.534->2.535
+        //   texture      psnr 32.98->33.03  ssim 0.9951->0.9953  mae 3.099->3.079
+        //   gradients    psnr 36.78->39.07  ssim 0.9395->0.9638  mae 2.813->2.211
+        //   lowlight     psnr 37.60->39.05  ssim 0.9476->0.9630  mae 2.601->2.246
+        //   highcontrast psnr 34.95->36.22  ssim 0.8763->0.8910  mae 3.529->3.123
         val FLOORS = listOf(
             Floor("edges", minPsnr = 35.9, minSsim = 0.972, maxMae = 2.59),
-            Floor("texture", minPsnr = 32.3, minSsim = 0.975, maxMae = 3.17),
-            Floor("gradients", minPsnr = 36.0, minSsim = 0.920, maxMae = 2.87),
-            Floor("lowlight", minPsnr = 36.8, minSsim = 0.928, maxMae = 2.66),
-            Floor("highcontrast", minPsnr = 34.2, minSsim = 0.858, maxMae = 3.60),
+            Floor("texture", minPsnr = 32.3, minSsim = 0.975, maxMae = 3.15),
+            Floor("gradients", minPsnr = 38.2, minSsim = 0.944, maxMae = 2.26),
+            Floor("lowlight", minPsnr = 38.2, minSsim = 0.943, maxMae = 2.30),
+            Floor("highcontrast", minPsnr = 35.4, minSsim = 0.873, maxMae = 3.19),
         )
     }
 }

@@ -4,6 +4,7 @@ import com.poc.camera.pipeline.Frame
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.ln
+import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -29,6 +30,35 @@ object SyntheticScenes {
 
     /** Scene names in the deterministic order used by the quality report. */
     val names: List<String> = listOf("edges", "texture", "gradients", "lowlight", "highcontrast")
+
+    // --- HDR (exposure-bracketing) scene -------------------------------------
+    //
+    // A single high-dynamic-range scene whose true radiance exceeds what an 8-bit
+    // capture can hold in one exposure, used by the HDR fusion quality gate. It is
+    // deliberately kept OUT of [names] so the existing single-EV golden report is
+    // unaffected.
+
+    /** Radiance ceiling of the HDR scene: four stops above an 8-bit white (4 * 255). */
+    const val HDR_MAX_RADIANCE = 4 * 255
+
+    /** Relative EVs of the simulated bracket, darkest (highlight-preserving) first. */
+    val HDR_EVS: List<Double> = listOf(-2.0, 0.0, 2.0)
+
+    /** Frames captured per EV in the simulated HDR burst. */
+    const val HDR_FRAMES_PER_EV = 2
+
+    // Reinhard tone-map key. The reference operator is Ld(L) = Ls / (1 + Ls) with
+    // Ls = L / HDR_REINHARD_KEY, rescaled so the peak radiance maps to 255. A small
+    // key relative to the radiance ceiling lifts the shadows strongly (matching what
+    // exposure fusion recovers from the bright captures) while its concave shoulder
+    // compresses the highlights, giving an achievable 8-bit rendering that shows
+    // detail across the whole range. Tuned against the fusion pipeline.
+    private const val HDR_REINHARD_KEY = 170.0
+
+    // Peak-to-peak radiance texture (in radiance units) laid over the smooth ramp so
+    // both shadows and highlights carry fine detail that single clipped/crushed
+    // exposures destroy but fusion recovers.
+    private const val HDR_TEXTURE_AMPLITUDE = 120.0
 
     // Signal-dependent Gaussian noise defaults: sigma(luma) = sqrt(read^2 + gain*luma),
     // i.e. a read-noise floor plus shot noise that grows with sqrt(signal). Tuned so
@@ -85,6 +115,91 @@ object SyntheticScenes {
         require(count >= 1) { "count must be >= 1" }
         val clean = clean(name)
         return (0 until count).map { i -> noisy(clean, baseSeed + i * SEED_STRIDE) }
+    }
+
+    /** A bracketed HDR burst: [HDR_FRAMES_PER_EV] noisy captures at each of [HDR_EVS]. */
+    data class HdrBurst(val frames: List<Frame>, val evs: List<Double>)
+
+    /**
+     * True scene radiance in [0, [HDR_MAX_RADIANCE]] per pixel: a smooth diagonal
+     * ramp spanning the full range (so value deciles are clean) with an interpolated
+     * texture laid on top (so shadows and highlights carry recoverable detail).
+     */
+    fun hdrRadiance(): DoubleArray {
+        val texture = texturedCanvas(seed = 0x4DE7L, cell = 8, low = 0, high = 255)
+        val out = DoubleArray(SIZE * SIZE)
+        val maxIndex = 2 * (SIZE - 1)
+        for (y in 0 until SIZE) {
+            for (x in 0 until SIZE) {
+                val i = y * SIZE + x
+                val ramp = (x + y).toDouble() / maxIndex
+                val base = ramp * HDR_MAX_RADIANCE
+                val detail = (texture[i] / 255.0 - 0.5) * 2.0 * HDR_TEXTURE_AMPLITUDE
+                out[i] = (base + detail).coerceIn(0.0, HDR_MAX_RADIANCE.toDouble())
+            }
+        }
+        return out
+    }
+
+    /**
+     * The deterministic reference tone-mapping of [hdrRadiance]: a global Reinhard
+     * operator Ld(L) = Ls / (1 + Ls), Ls = L / [HDR_REINHARD_KEY], rescaled so the
+     * peak radiance lands on 255. This is the achievable 8-bit rendering the fused
+     * result is scored against; fusion cannot exceed 8 bits, so scoring against the
+     * raw radiance would be meaningless.
+     */
+    fun hdrToneMappedTruth(): Frame {
+        val radiance = hdrRadiance()
+        val ldMax = reinhard(HDR_MAX_RADIANCE.toDouble())
+        val out = IntArray(radiance.size)
+        for (i in radiance.indices) {
+            val v = (255.0 * reinhard(radiance[i]) / ldMax).roundToInt().coerceIn(0, 255)
+            out[i] = gray(v)
+        }
+        return frame(out)
+    }
+
+    /** Reinhard tone-mapped luminance (unscaled) for radiance [l]. */
+    private fun reinhard(l: Double): Double {
+        val ls = l / HDR_REINHARD_KEY
+        return ls / (1.0 + ls)
+    }
+
+    /**
+     * The clean (noise-free) capture of the HDR scene at relative exposure [evRel]:
+     * v = clamp(L * 2^evRel, 0, 255) per pixel. A negative EV darkens and preserves
+     * highlights; a positive EV brightens and clips them.
+     */
+    fun hdrCleanCaptureAtEv(evRel: Double): Frame {
+        val radiance = hdrRadiance()
+        val scale = 2.0.pow(evRel)
+        val out = IntArray(radiance.size)
+        for (i in radiance.indices) {
+            val v = (radiance[i] * scale).roundToInt().coerceIn(0, 255)
+            out[i] = gray(v)
+        }
+        return frame(out)
+    }
+
+    /**
+     * A full simulated bracketed burst: [HDR_FRAMES_PER_EV] independent noisy
+     * captures at each EV in [HDR_EVS] (reusing the shared [noisy] sensor model),
+     * with the parallel per-frame EV list. Per-frame seeds are derived from
+     * [baseSeed] so the burst is reproducible.
+     */
+    fun hdrBurst(baseSeed: Long): HdrBurst {
+        val frames = ArrayList<Frame>(HDR_EVS.size * HDR_FRAMES_PER_EV)
+        val evs = ArrayList<Double>(HDR_EVS.size * HDR_FRAMES_PER_EV)
+        var slot = 0
+        for (ev in HDR_EVS) {
+            val clean = hdrCleanCaptureAtEv(ev)
+            for (k in 0 until HDR_FRAMES_PER_EV) {
+                frames.add(noisy(clean, baseSeed + slot * SEED_STRIDE))
+                evs.add(ev)
+                slot++
+            }
+        }
+        return HdrBurst(frames, evs)
     }
 
     private fun edges(): Frame {

@@ -74,6 +74,26 @@ fun SettingsScreen(
                     selected = settings.burstFrameCount,
                     onSelected = { onSettingsChanged(settings.copy(burstFrameCount = it)) },
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_hdr_burst_label),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            text = stringResource(R.string.settings_hdr_burst_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = settings.hdrBurstEnabled,
+                        onCheckedChange = { onSettingsChanged(settings.copy(hdrBurstEnabled = it)) },
+                    )
+                }
             }
 
             HorizontalDivider()

@@ -14,6 +14,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
+import androidx.camera.core.TorchState
 import androidx.camera.core.ZoomState
 import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
@@ -261,6 +262,17 @@ private fun CameraCaptureScreen(
     // androidx.compose.runtime.livedata - that module isn't a project dependency and adding
     // it for a single LiveData would be a new dependency for one call site.
     var liveZoomState by remember { mutableStateOf<ZoomState?>(null) }
+    // Persists across mode switches like zoomRatio - cycling flash is a deliberate user
+    // choice that should survive a Photo -> Video -> Photo round trip, not reset silently.
+    var flashMode by rememberSaveable { mutableStateOf(FlashMode.Off) }
+    // Session-only (not rememberSaveable): torch is a physical light, not a preference worth
+    // restoring after process death, and TorchLogic.torchEnabledAfterModeChange already resets
+    // it to false on every transition out of a video-like mode - see the LaunchedEffect below.
+    var torchEnabled by remember { mutableStateOf(false) }
+    // Mirrors the bound camera's live androidx.camera.core.TorchState the same way
+    // liveZoomState mirrors ZoomState (see the DisposableEffect below) so the torch chip
+    // reflects what the camera actually reports - e.g. if it auto-disables the torch itself.
+    var liveTorchState by remember { mutableStateOf<Int?>(null) }
     // Settings only seed the initial look for a fresh session; once the user picks a
     // look in Cinematic mode it stays under their control for the rest of the session.
     var videoLook by rememberSaveable { mutableStateOf(settings.defaultCinematicLook) }
@@ -292,6 +304,18 @@ private fun CameraCaptureScreen(
     val openSettingsContentDescription = stringResource(R.string.open_settings_content_description)
     val tapToFocusContentDescription = stringResource(R.string.tap_to_focus_content_description)
     val zoomResetContentDescriptionTemplate = stringResource(R.string.zoom_reset_content_description)
+    val flashModeOffLabel = stringResource(R.string.flash_mode_off)
+    val flashModeAutoLabel = stringResource(R.string.flash_mode_auto)
+    val flashModeOnLabel = stringResource(R.string.flash_mode_on)
+    val flashControlLabelTemplate = stringResource(R.string.flash_control_label)
+    val flashContentDescriptionOff = stringResource(R.string.flash_control_content_description_off)
+    val flashContentDescriptionAuto = stringResource(R.string.flash_control_content_description_auto)
+    val flashContentDescriptionOn = stringResource(R.string.flash_control_content_description_on)
+    val torchModeOffLabel = stringResource(R.string.torch_mode_off)
+    val torchModeOnLabel = stringResource(R.string.torch_mode_on)
+    val torchControlLabelTemplate = stringResource(R.string.torch_control_label)
+    val torchContentDescriptionOff = stringResource(R.string.torch_control_content_description_off)
+    val torchContentDescriptionOn = stringResource(R.string.torch_control_content_description_on)
     val compareActionLabel = stringResource(R.string.compare_action)
     val previewBindFailureMessage = stringResource(R.string.preview_bind_failure_message)
     val previewRetryLabel = stringResource(R.string.preview_bind_retry)
@@ -310,6 +334,29 @@ private fun CameraCaptureScreen(
         ) {
             audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
+    }
+
+    // Torch has no control surface outside Video/Cinematic - see TorchLogic for the reset
+    // rule. The actual CameraControl.enableTorch call is driven by torchEnabled below, once
+    // this has settled it (and, independently, by CameraPreview's own onDispose safety net).
+    LaunchedEffect(mode) {
+        torchEnabled = TorchLogic.torchEnabledAfterModeChange(mode, torchEnabled)
+    }
+
+    // Applies the photo-mode flash cycle to the actual ImageCapture instance whenever either
+    // changes: a fresh bind (imageCapture) or the user cycling the top-status control
+    // (flashMode). CameraPreview also applies it once at bind time so a freshly (re)bound
+    // ImageCapture never starts from FLASH_MODE_OFF regardless of ordering.
+    LaunchedEffect(imageCapture, flashMode) {
+        imageCapture?.flashMode = flashMode.toImageCaptureFlashMode()
+    }
+
+    // Applies the requested torch state to the actual CameraControl whenever either changes:
+    // a fresh/rebound camera (cameraHandle) or the user toggling the top-status control
+    // (torchEnabled). Fire-and-forget, like the zoom calls elsewhere on this screen - nothing
+    // here needs to await the future beyond what liveTorchState reports back.
+    LaunchedEffect(cameraHandle, torchEnabled) {
+        cameraHandle?.cameraControl?.enableTorch(torchEnabled)
     }
 
     LaunchedEffect(isRecording, recordingStartMillis) {
@@ -350,6 +397,30 @@ private fun CameraCaptureScreen(
         }
     }
 
+    // Mirrors the bound camera's TorchState the same way the block above mirrors ZoomState,
+    // so the torch chip reflects reality (e.g. the camera auto-disabling torch under thermal
+    // or power constraints) rather than only the last state this screen requested.
+    DisposableEffect(cameraHandle) {
+        val handle = cameraHandle
+        if (handle == null) {
+            onDispose {}
+        } else {
+            val observer = Observer<Int> { liveTorchState = it }
+            handle.cameraInfo.torchState.observeForever(observer)
+            onDispose {
+                handle.cameraInfo.torchState.removeObserver(observer)
+                liveTorchState = null
+            }
+        }
+    }
+
+    // Capability gate for both the flash and torch controls: neither is ever shown on a
+    // camera that reports no flash unit at all, per CameraInfo already exposed on the handle.
+    val hasFlashUnit = cameraHandle?.cameraInfo?.hasFlashUnit() == true
+    // The torch chip's displayed state - falls back to the requested torchEnabled only until
+    // the observer above delivers a real reading (e.g. immediately after a fresh bind).
+    val torchIsOn = liveTorchState?.let { it == TorchState.ON } ?: torchEnabled
+
     Box(modifier = modifier) {
         CameraPreview(
             mode = mode,
@@ -363,6 +434,7 @@ private fun CameraCaptureScreen(
             },
             retryToken = previewRetryToken,
             desiredZoomRatio = zoomRatio,
+            flashMode = flashMode,
             modifier = Modifier.fillMaxSize(),
             onImageCaptureReady = { imageCapture = it },
             onVideoCaptureReady = { videoCapture = it },
@@ -522,6 +594,40 @@ private fun CameraCaptureScreen(
                     detail = guidedCaptureBannerDetail,
                     cancelContentDescription = guidedCancelContentDescription,
                     onCancel = onGuidedCancel,
+                )
+            }
+
+            if (hasFlashUnit && mode == CameraMode.Photo) {
+                StatusControlChip(
+                    label = String.format(
+                        flashControlLabelTemplate,
+                        when (flashMode) {
+                            FlashMode.Off -> flashModeOffLabel
+                            FlashMode.Auto -> flashModeAutoLabel
+                            FlashMode.On -> flashModeOnLabel
+                        },
+                    ),
+                    contentDescription = when (flashMode) {
+                        FlashMode.Off -> flashContentDescriptionOff
+                        FlashMode.Auto -> flashContentDescriptionAuto
+                        FlashMode.On -> flashContentDescriptionOn
+                    },
+                    onClick = { flashMode = flashMode.next() },
+                )
+            }
+
+            if (hasFlashUnit && mode.isVideoLike) {
+                StatusControlChip(
+                    label = String.format(
+                        torchControlLabelTemplate,
+                        if (torchIsOn) torchModeOnLabel else torchModeOffLabel,
+                    ),
+                    contentDescription = if (torchIsOn) {
+                        torchContentDescriptionOn
+                    } else {
+                        torchContentDescriptionOff
+                    },
+                    onClick = { torchEnabled = TorchLogic.toggle(torchIsOn) },
                 )
             }
 
@@ -966,6 +1072,41 @@ private fun ZoomChip(
     ) {
         Text(
             text = ZoomLogic.formatLabel(ratio),
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
+        )
+    }
+}
+
+/**
+ * Shared visual for the flash-cycle (Photo) and torch-toggle (Video/Cinematic) top-status
+ * controls: a 48dp-minimum tap target styled like [ZoomChip], showing a short text label
+ * rather than an icon. material-icons-core - this project's only icon dependency, so as not
+ * to pull in the extended icon set for two glyphs - ships no flash/torch icon at all, so this
+ * is a deliberate text-chip fallback; [label] and [contentDescription] both state the mode by
+ * name so the state is never colour-only.
+ */
+@Composable
+private fun StatusControlChip(
+    label: String,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .background(OverlayScrimColor, shape = RoundedCornerShape(16.dp))
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .clickable(onClick = onClick)
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                this.contentDescription = contentDescription
+            }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
             color = Color.White,
             style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
         )

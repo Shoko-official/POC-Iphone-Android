@@ -18,6 +18,9 @@ package com.poc.camera.pipeline
  * [DetailParams] default gain (1), so a modest value sharpens gently; radius, coring
  * and the overshoot allowance stay at their defaults so only the effect magnitude
  * scales.
+ *
+ * [whiteBalance] is the strength of the [WhiteBalance] pass in [0, 1] (0 disables it),
+ * blending the bounded auto white-balance gains toward identity.
  */
 data class FinishingParams(
     val shadowsLift: Double,
@@ -27,6 +30,7 @@ data class FinishingParams(
     val localContrast: Double = 0.0,
     val chromaDenoise: Double = 0.0,
     val detailEnhance: Double = 0.0,
+    val whiteBalance: Double = 0.0,
 ) {
     companion object {
         /**
@@ -47,6 +51,15 @@ data class FinishingParams(
          * (up to 1.0, scaling to the [DetailParams] default gain) is available for real
          * captures, where perceived sharpness matters more than PSNR against a synthetic
          * clean truth.
+         *
+         * [whiteBalance] ships on at a strong-but-bounded strength. On a colour-cast
+         * capture it recovers most of the cast (large MAE/PSNR gains vs. the uncast
+         * truth); on an already-neutral scene the estimator returns near-identity gains,
+         * so it barely moves the image and every neutral-scene floor stays green. Its
+         * effect is bounded twice over -- the gains are clamped to [WhiteBalance]'s
+         * [WhiteBalance.DEFAULT_MAX_GAIN] range and then scaled by this strength -- so it
+         * cannot over-correct. See AwbGoldenRegressionTest for the cast-correction and
+         * neutrality proofs behind this default.
          */
         val DEFAULT = FinishingParams(
             shadowsLift = 0.12,
@@ -56,6 +69,7 @@ data class FinishingParams(
             localContrast = 0.03,
             chromaDenoise = 0.6,
             detailEnhance = 0.08,
+            whiteBalance = 0.8,
         )
     }
 }
@@ -65,8 +79,13 @@ data class FinishingParams(
  * curve, then luma-preserving saturation, then pivot contrast. Returns a new [Frame]
  * with the source dimensions and timestamp and alpha forced opaque.
  *
- * Ordering rationale: [ChromaDenoiser] runs FIRST, on the merged data, so chroma
- * speckle is cleaned before any rendition stage can amplify it -- in particular before
+ * Ordering rationale: [WhiteBalance] runs FIRST of all, on the raw merged data, so the
+ * colour cast is neutralised before any later stage computes statistics from the colour.
+ * In particular it precedes [ChromaDenoiser]: chroma denoise reasons in an opponent
+ * (luma/chroma) space, and a cast biases the chroma planes, so correcting the cast first
+ * lets the denoiser see the true, cast-free chroma. [ChromaDenoiser] then runs, on the
+ * white-balanced data, so chroma speckle is cleaned before any rendition stage can
+ * amplify it -- in particular before
  * [Saturation] boosts colour and before [LocalToneMapper]'s per-channel luma ratio
  * redistributes it. [LocalToneMapper] then runs on the denoised, still
  * scene-referred-ish data, so its guided base/detail split sees the untouched local
@@ -85,10 +104,15 @@ data class FinishingParams(
 object FinishingPipeline {
 
     fun apply(frame: Frame, params: FinishingParams = FinishingParams.DEFAULT): Frame {
-        val denoised = if (params.chromaDenoise > 0.0) {
-            ChromaDenoiser.apply(frame, params.chromaDenoise)
+        val balanced = if (params.whiteBalance > 0.0) {
+            WhiteBalance.apply(frame, params.whiteBalance)
         } else {
             frame
+        }
+        val denoised = if (params.chromaDenoise > 0.0) {
+            ChromaDenoiser.apply(balanced, params.chromaDenoise)
+        } else {
+            balanced
         }
         val locallyMapped = if (params.localContrast > 0.0) {
             LocalToneMapper.apply(denoised, localToneParams(params.localContrast))

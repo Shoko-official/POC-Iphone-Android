@@ -15,6 +15,7 @@ data class CameraSettingsData(
     val hdrBurstEnabled: Boolean = DEFAULT_HDR_BURST_ENABLED,
     val saveComparisonPair: Boolean = DEFAULT_SAVE_COMPARISON_PAIR,
     val nightModeEnabled: Boolean = DEFAULT_NIGHT_MODE_ENABLED,
+    val superResolutionEnabled: Boolean = DEFAULT_SUPER_RESOLUTION_ENABLED,
     val finishingPreset: FinishingPreset = DEFAULT_FINISHING_PRESET,
 ) {
     companion object {
@@ -22,6 +23,7 @@ data class CameraSettingsData(
         const val DEFAULT_HDR_BURST_ENABLED = false
         const val DEFAULT_SAVE_COMPARISON_PAIR = false
         const val DEFAULT_NIGHT_MODE_ENABLED = false
+        const val DEFAULT_SUPER_RESOLUTION_ENABLED = false
         val DEFAULT_FINISHING_PRESET = FinishingPreset.Natural
         val ALLOWED_BURST_FRAME_COUNTS = listOf(3, 6, 9)
         val DEFAULT = CameraSettingsData()
@@ -41,6 +43,7 @@ data class CameraSettingsData(
             hdrBurstEnabled: Boolean,
             saveComparisonPair: Boolean,
             nightModeEnabled: Boolean,
+            superResolutionEnabled: Boolean,
             finishingPresetName: String? = null,
         ): CameraSettingsData = CameraSettingsData(
             burstFrameCount = sanitizeBurstFrameCount(burstFrameCount),
@@ -50,6 +53,7 @@ data class CameraSettingsData(
             hdrBurstEnabled = hdrBurstEnabled,
             saveComparisonPair = saveComparisonPair,
             nightModeEnabled = nightModeEnabled,
+            superResolutionEnabled = superResolutionEnabled,
             finishingPreset = FinishingPreset.entries.firstOrNull { it.name == finishingPresetName }
                 ?: DEFAULT.finishingPreset,
         )

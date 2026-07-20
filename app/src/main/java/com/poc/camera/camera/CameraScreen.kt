@@ -799,7 +799,15 @@ private fun CameraCaptureScreen(
                                         } else {
                                             merged
                                         }
-                                        val processedUri = MergedPhotoSaver.save(context, output)
+                                        val processedUri = MergedPhotoSaver.save(
+                                            context,
+                                            output,
+                                            exif = ExifMetadata(
+                                                captureTimestampMillis = output.timestampMillis,
+                                                widthPx = output.width,
+                                                heightPx = output.height,
+                                            ),
+                                        )
                                         // A guided-comparison capture always fills slot A with the
                                         // processed result and leaves slot B unset until the user
                                         // picks the reference photo on the Compare screen. Otherwise,
@@ -812,6 +820,11 @@ private fun CameraCaptureScreen(
                                                 context,
                                                 merged,
                                                 prefix = MergedPhotoSaver.RAW_PREFIX,
+                                                exif = ExifMetadata(
+                                                    captureTimestampMillis = merged.timestampMillis,
+                                                    widthPx = merged.width,
+                                                    heightPx = merged.height,
+                                                ),
                                             )
                                             ComparePair(processedUri = processedUri, referenceUri = referenceUri)
                                         } else {

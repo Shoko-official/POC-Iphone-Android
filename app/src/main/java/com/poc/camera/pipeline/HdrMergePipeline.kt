@@ -18,7 +18,7 @@ import kotlin.math.roundToInt
  *     alignment still locks onto structure because a brightness offset shifts the
  *     matching cost uniformly, so the minimum stays at the true translation; for a
  *     static scene this resolves to identity.
- *  4. Fuse the aligned per-exposure frames with [ExposureFusion].
+ *  4. Fuse the aligned per-exposure frames with [LaplacianExposureFusion].
  *
  * Deterministic and free of Android dependencies. A single-EV input degenerates to
  * the (aligned) single merged exposure.
@@ -85,7 +85,7 @@ object HdrMergePipeline {
             PerEvMerge(ev, alignedFrame)
         }
 
-        val fused = ExposureFusion.fuse(
+        val fused = LaplacianExposureFusion.fuse(
             frames = aligned.map { it.merged },
             evs = aligned.map { it.ev },
         )

@@ -63,29 +63,24 @@ class HdrGoldenPipelineRegressionTest {
         const val SEED = 0xDEC1L
 
         // MEASURED BASELINES, 2026-07-20 (seed 0xDEC1, HdrMergePipeline + Finishing).
-        // RE-MEASURED after local tone mapping (LocalToneMapper on at
-        // FinishingParams.DEFAULT.localContrast); the changes stay within the existing
-        // tolerance, so the floors are kept.
-        // Full-frame actuals: psnr 20.834  ssim 0.6679  mae 18.198 (was 20.815 / 0.6692
-        // / 18.333). Floors = actual * 0.98 (PSNR/SSIM); ceiling = actual * 1.02 (MAE).
-        // Dynamic-range actuals over the tone-mapped truth's deciles:
-        //   shadow:    fused 15.045  vs best single 20.027  (fusion wins by 4.98)
-        //   highlight: fused 4.379   vs best single 5.435   (fusion wins by 1.06)
+        // Floors = actual * 0.98 (PSNR/SSIM); ceiling = actual * 1.02 (MAE).
         //
-        // RE-MEASURED after luma-guided chroma denoise (ChromaDenoiser on at
-        // FinishingParams.DEFAULT.chromaDenoise = 0.6), 2026-07-20. The HDR scene is
-        // grayscale, so the denoiser strips residual per-channel chroma speckle:
-        // psnr 20.834->20.931, mae 18.198->18.027 (ssim 0.6679->0.6662, a hair softer
-        // from chroma-reconstruction rounding but far above the floor). PSNR floor
-        // raised and MAE ceiling tightened to the new actuals; SSIM floor kept.
-        //
-        // UNCHANGED after detail enhancement (DetailEnhancer on at
-        // FinishingParams.DEFAULT.detailEnhance = 0.08), 2026-07-20. The HDR scene is a
-        // smooth radiance ramp with fine texture; at the conservative DEFAULT strength
-        // the fused actuals barely move (psnr 20.931->20.930, ssim 0.6662->0.6660, mae
-        // 18.027->18.027) and stay well within the committed floors, so none are moved.
-        const val MIN_PSNR = 20.5
-        const val MIN_SSIM = 0.655
-        const val MAX_MAE = 18.39
+        // RAISED after Laplacian fusion, 2026-07-20. HdrMergePipeline now fuses with
+        // LaplacianExposureFusion (true multi-scale Laplacian-pyramid blending) instead
+        // of the box-blurred weight ramp of ExposureFusion. On this smooth radiance
+        // scene the pyramid blend improves every full-frame metric:
+        //   psnr 20.930 -> 22.108   ssim 0.6662 -> 0.6923   mae 18.027 -> 15.499
+        // Dynamic-range decile actuals over the tone-mapped truth (fusion still beats
+        // the best single exposure at BOTH ends, the genuine HDR property):
+        //   shadow:    fused 18.627 vs best single 19.687  (was box-blur fused 14.877)
+        //   highlight: fused 3.953  vs best single 5.340   (was box-blur fused 4.064)
+        // The shadow decile is looser than the box-blur baseline because full-depth
+        // pyramid blending smooths the deep-shadow low frequencies; the mild
+        // sub-unity LaplacianExposureFusion.DEFAULT_SELECTIVITY (0.7) keeps it below the
+        // best single exposure while pulling the full-frame errors down. Floors raised
+        // and the MAE ceiling tightened to the new actuals.
+        const val MIN_PSNR = 21.66
+        const val MIN_SSIM = 0.678
+        const val MAX_MAE = 15.81
     }
 }

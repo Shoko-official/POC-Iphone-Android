@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ImageCapture
@@ -79,6 +80,7 @@ import com.poc.camera.pipeline.FinishingPipeline
 import com.poc.camera.pipeline.Frame
 import com.poc.camera.pipeline.HdrMergePipeline
 import com.poc.camera.settings.CameraSettingsData
+import java.util.concurrent.Executors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -87,6 +89,7 @@ import kotlinx.coroutines.withContext
 // Shared scrim strong enough to keep white overlay text/icons legible over a bright,
 // unpredictable live preview (sky, snow, direct light); paired with a text shadow below
 // for the worst case of a near-white background behind a status chip.
+private const val TAG = "CameraScreen"
 private val OverlayScrimColor = Color.Black.copy(alpha = 0.6f)
 private val OverlayTextShadow = Shadow(color = Color.Black, offset = Offset(0f, 1f), blurRadius = 4f)
 private val SecondaryControlSlotWidth = 88.dp
@@ -166,6 +169,13 @@ private fun CameraCaptureScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    // Single background thread that both delivers each takePicture callback and decodes
+    // the returned JPEG, so heavy full-resolution decode stays off the main thread and
+    // captures never overlap. Shut down when the screen leaves composition.
+    val burstCaptureExecutor = remember { Executors.newSingleThreadExecutor() }
+    DisposableEffect(Unit) {
+        onDispose { burstCaptureExecutor.shutdown() }
+    }
     var mode by rememberSaveable { mutableStateOf(CameraMode.Photo) }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var videoCapture by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
@@ -438,29 +448,48 @@ private fun CameraCaptureScreen(
                             Button(
                                 onClick = {
                                     val controller = burstController ?: return@Button
+                                    val capture = imageCapture ?: return@Button
                                     isBurstInProgress = true
+                                    val frameCapture = BurstController.FrameCapture { onResult ->
+                                        BurstImageCapture.capture(capture, burstCaptureExecutor, onResult)
+                                    }
                                     val exposure = exposureController
                                     if (settings.hdrBurstEnabled && exposure != null) {
                                         controller.armBracketed(
                                             steps = exposure.steps,
                                             framesPerEv = exposure.framesPerEv,
                                             setExposureIndex = exposure.setIndexAndAwait,
+                                            captureFrame = frameCapture,
                                         ) { burst ->
+                                            Log.d(
+                                                TAG,
+                                                "HDR burst captured ${burst.frames.size} frames " +
+                                                    "in ${burst.captureSpanMillis} ms",
+                                            )
                                             mergeAndSave {
                                                 val result = HdrMergePipeline.merge(burst.frames, burst.evs)
                                                 result.fused to String.format(
                                                     hdrBurstMergeSuccessMessage,
                                                     result.usedFrameCount,
+                                                    result.fused.width,
+                                                    result.fused.height,
                                                 )
                                             }
                                         }
                                     } else {
-                                        controller.arm { frames ->
+                                        controller.arm(frameCapture) { burst ->
+                                            Log.d(
+                                                TAG,
+                                                "Burst captured ${burst.frames.size} frames " +
+                                                    "in ${burst.captureSpanMillis} ms",
+                                            )
                                             mergeAndSave {
-                                                val result = BurstMergePipeline.merge(frames)
+                                                val result = BurstMergePipeline.merge(burst.frames)
                                                 result.merged to String.format(
                                                     burstMergeSuccessMessage,
                                                     result.usedFrameCount,
+                                                    result.merged.width,
+                                                    result.merged.height,
                                                 )
                                             }
                                         }

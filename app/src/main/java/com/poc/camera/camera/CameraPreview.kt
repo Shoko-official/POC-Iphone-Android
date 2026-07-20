@@ -2,15 +2,11 @@ package com.poc.camera.camera
 
 import android.util.Log
 import android.util.Range
-import android.util.Size
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
-import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
@@ -27,10 +23,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.poc.camera.pipeline.Looks
-import java.util.concurrent.Executors
 
 private const val TAG = "CameraPreview"
-private val BURST_ANALYSIS_RESOLUTION = Size(1280, 720)
 
 @Composable
 fun CameraPreview(
@@ -64,7 +58,6 @@ fun CameraPreview(
     DisposableEffect(lifecycleOwner, mode, look, burstFrameCount, retryToken) {
         var cameraProvider: ProcessCameraProvider? = null
         var activeEffect: LookCameraEffect? = null
-        val analysisExecutor = Executors.newSingleThreadExecutor()
         val providerFuture = ProcessCameraProvider.getInstance(context)
 
         providerFuture.addListener(
@@ -80,29 +73,15 @@ fun CameraPreview(
                     provider.unbindAll()
                     when (mode) {
                         CameraMode.Photo -> {
-                            val imageAnalysis = ImageAnalysis.Builder()
-                                .setResolutionSelector(
-                                    ResolutionSelector.Builder()
-                                        .setResolutionStrategy(
-                                            ResolutionStrategy(
-                                                BURST_ANALYSIS_RESOLUTION,
-                                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
-                                            ),
-                                        )
-                                        .build(),
-                                )
-                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                                .build()
-                                .apply {
-                                    setAnalyzer(analysisExecutor) { image -> burstController.onFrame(image) }
-                                }
-
+                            // Burst now captures sequential full-resolution ImageCapture
+                            // frames (driven from CameraScreen), so no ImageAnalysis use
+                            // case is bound; Preview + ImageCapture cover both the single
+                            // shot and the burst.
                             val camera = provider.bindToLifecycle(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
                                 preview,
                                 imageCapture,
-                                imageAnalysis,
                             )
                             onImageCaptureReady(imageCapture)
                             onBurstControllerReady(burstController)
@@ -186,7 +165,6 @@ fun CameraPreview(
         onDispose {
             cameraProvider?.unbindAll()
             activeEffect?.release()
-            analysisExecutor.shutdown()
         }
     }
 

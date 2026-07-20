@@ -31,6 +31,7 @@
     <string name="preview_bind_retry">Retry</string>
     <string name="open_settings_content_description">Settings</string>
     <string name="tap_to_focus_content_description">Tap to focus and expose</string>
+    <string name="zoom_reset_content_description">Zoom %1$s. Tap to reset to 1x.</string>
     <string name="settings_back_content_description">Back</string>
     <string name="settings_title">Settings</string>
     <string name="settings_section_burst">Burst photo</string>

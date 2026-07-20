@@ -82,9 +82,11 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -117,6 +119,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+// Volume-key shutter and capture haptics (issue #73): deliberately no MediaActionSound -
+// several regions (e.g. Japan/Korea) and OEMs already enforce an audible shutter sound at
+// the OS/hardware level regardless of what an app does, so an app-level sound would either
+// be redundant or fight a platform policy this POC has no business overriding. The haptic
+// pulse on capture/record events is the only added feedback.
 
 // Shared scrim strong enough to keep white overlay text/icons legible over a bright,
 // unpredictable live preview (sky, snow, direct light); paired with a text shadow below
@@ -152,6 +160,14 @@ fun CameraScreen(
     guidedStep: GuidedCompareStep = GuidedCompareStep.Idle,
     onGuidedCaptureCompleted: () -> Unit = {},
     onGuidedCancel: () -> Unit = {},
+    // Hardware volume-key shutter (issue #73): incremented once per accepted press by
+    // MainActivity.onKeyDown, which lives outside this composition - see VolumeShutterPolicy.
+    // 0 is the sentinel "no press yet" value.
+    volumeShutterTrigger: Int = 0,
+    // MainActivity.onKeyDown needs to know whether camera permission is currently granted
+    // to gate the volume shutter the same way this screen itself does below, but that
+    // Activity-level dispatch happens outside this composition - see VolumeShutterPolicy.
+    onCameraPermissionStateChanged: (CameraPermissionState) -> Unit = {},
 ) {
     val context = LocalContext.current
     var permissionState by rememberSaveable {
@@ -190,6 +206,12 @@ fun CameraScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // Mirrors permissionState out to MainActivity so its onKeyDown (outside this
+    // composition) can gate the volume shutter the same way this screen gates its own UI.
+    LaunchedEffect(permissionState) {
+        onCameraPermissionStateChanged(permissionState)
+    }
+
     when (permissionState) {
         CameraPermissionState.Granted -> CameraCaptureScreen(
             settings = settings,
@@ -200,6 +222,7 @@ fun CameraScreen(
             guidedStep = guidedStep,
             onGuidedCaptureCompleted = onGuidedCaptureCompleted,
             onGuidedCancel = onGuidedCancel,
+            volumeShutterTrigger = volumeShutterTrigger,
             modifier = modifier,
         )
         CameraPermissionState.Denied -> CameraPermissionRationale(
@@ -220,10 +243,12 @@ private fun CameraCaptureScreen(
     guidedStep: GuidedCompareStep,
     onGuidedCaptureCompleted: () -> Unit,
     onGuidedCancel: () -> Unit,
+    volumeShutterTrigger: Int,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
     val snackbarHostState = remember { SnackbarHostState() }
     // Single background thread that both delivers each takePicture callback and decodes
     // the returned JPEG, so heavy full-resolution decode stays off the main thread and
@@ -451,6 +476,80 @@ private fun CameraCaptureScreen(
     // The torch chip's displayed state - falls back to the requested torchEnabled only until
     // the observer above delivers a real reading (e.g. immediately after a fresh bind).
     val torchIsOn = liveTorchState?.let { it == TorchState.ON } ?: torchEnabled
+
+    // The shutter's primary action, shared by the on-screen ShutterButton and the hardware
+    // volume-key path below (issue #73) - a plain local lambda (recreated every recomposition,
+    // like the inline onClick it replaces) rather than a remembered reference, since it closes
+    // over plain Compose state that must always read the latest value. Haptic feedback fires
+    // once per event, right after the corresponding null-check so a not-yet-ready use case
+    // never buzzes for a capture that didn't actually start. No shutter sound is played
+    // deliberately - see the module doc note above CameraScreen.kt's imports.
+    val onShutterPressed: () -> Unit = shutterAction@{
+        if (mode.isVideoLike) {
+            if (isRecording) {
+                haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                activeRecording?.stop()
+            } else {
+                val capture = videoCapture ?: return@shutterAction
+                haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                activeRecording = VideoRecording.start(
+                    context = context,
+                    recorder = capture.output,
+                    onFinalized = { event ->
+                        isRecording = false
+                        activeRecording = null
+                        if (event.hasError()) {
+                            scope.launch {
+                                snackbarHostState.showSnackbar(videoFailureMessage)
+                            }
+                        } else {
+                            scope.launch {
+                                snackbarHostState.showSnackbar(
+                                    String.format(
+                                        videoSuccessMessage,
+                                        event.outputResults.outputUri,
+                                    ),
+                                )
+                            }
+                        }
+                    },
+                )
+                recordingStartMillis = System.currentTimeMillis()
+                elapsedMillis = 0L
+                isRecording = true
+            }
+        } else {
+            val capture = imageCapture ?: return@shutterAction
+            haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+            PhotoCapture.capture(
+                context = context,
+                imageCapture = capture,
+                onSuccess = { uri ->
+                    scope.launch {
+                        snackbarHostState.showSnackbar(
+                            String.format(captureSuccessMessage, uri),
+                        )
+                    }
+                },
+                onError = {
+                    scope.launch {
+                        snackbarHostState.showSnackbar(captureFailureMessage)
+                    }
+                },
+            )
+        }
+    }
+
+    // Bridges MainActivity's hardware volume-key dispatch into this screen's own shutter
+    // action - Activity.onKeyDown can't reach into composable state directly, so
+    // MainActivity increments volumeShutterTrigger instead (see VolumeShutterPolicy for the
+    // gating decision made there). 0 is the sentinel "no press yet" value, so the initial
+    // composition never fires a phantom capture.
+    LaunchedEffect(volumeShutterTrigger) {
+        if (volumeShutterTrigger > 0) {
+            onShutterPressed()
+        }
+    }
 
     Box(modifier = modifier) {
         CameraPreview(
@@ -972,6 +1071,7 @@ private fun CameraCaptureScreen(
                                 onClick = {
                                     val controller = burstController ?: return@Button
                                     val capture = imageCapture ?: return@Button
+                                    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
                                     isBurstInProgress = true
                                     val frameCapture = BurstController.FrameCapture { onResult ->
                                         BurstImageCapture.capture(capture, burstCaptureExecutor, maxBurstPixels, onResult)
@@ -1074,58 +1174,7 @@ private fun CameraCaptureScreen(
                             mode.isVideoLike -> recordContentDescription
                             else -> shutterContentDescription
                         },
-                        onClick = {
-                            if (mode.isVideoLike) {
-                                if (isRecording) {
-                                    activeRecording?.stop()
-                                } else {
-                                    val capture = videoCapture ?: return@ShutterButton
-                                    activeRecording = VideoRecording.start(
-                                        context = context,
-                                        recorder = capture.output,
-                                        onFinalized = { event ->
-                                            isRecording = false
-                                            activeRecording = null
-                                            if (event.hasError()) {
-                                                scope.launch {
-                                                    snackbarHostState.showSnackbar(videoFailureMessage)
-                                                }
-                                            } else {
-                                                scope.launch {
-                                                    snackbarHostState.showSnackbar(
-                                                        String.format(
-                                                            videoSuccessMessage,
-                                                            event.outputResults.outputUri,
-                                                        ),
-                                                    )
-                                                }
-                                            }
-                                        },
-                                    )
-                                    recordingStartMillis = System.currentTimeMillis()
-                                    elapsedMillis = 0L
-                                    isRecording = true
-                                }
-                            } else {
-                                val capture = imageCapture ?: return@ShutterButton
-                                PhotoCapture.capture(
-                                    context = context,
-                                    imageCapture = capture,
-                                    onSuccess = { uri ->
-                                        scope.launch {
-                                            snackbarHostState.showSnackbar(
-                                                String.format(captureSuccessMessage, uri),
-                                            )
-                                        }
-                                    },
-                                    onError = {
-                                        scope.launch {
-                                            snackbarHostState.showSnackbar(captureFailureMessage)
-                                        }
-                                    },
-                                )
-                            }
-                        },
+                        onClick = onShutterPressed,
                     )
 
                     Box(

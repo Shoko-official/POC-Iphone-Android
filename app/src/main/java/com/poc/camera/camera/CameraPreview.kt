@@ -56,6 +56,10 @@ fun CameraPreview(
     // rememberUpdatedState below, not a DisposableEffect key: changing it while already
     // bound (every pinch delta) must never force a camera rebind.
     desiredZoomRatio: Float = 1f,
+    // Photo-mode flash setting. setFlashMode is dynamic on ImageCapture, so like zoom this is
+    // read via rememberUpdatedState rather than a DisposableEffect key - cycling the flash
+    // control while already bound must never force a camera rebind.
+    flashMode: FlashMode = FlashMode.Off,
     onImageCaptureReady: (ImageCapture) -> Unit = {},
     onVideoCaptureReady: (VideoCapture<Recorder>) -> Unit = {},
     onBurstControllerReady: (BurstController) -> Unit = {},
@@ -76,6 +80,7 @@ fun CameraPreview(
     val videoCapture = remember { VideoCapture.withOutput(recorder) }
     val burstController = remember(burstFrameCount) { BurstController(burstFrameCount) }
     val currentDesiredZoomRatio by rememberUpdatedState(desiredZoomRatio)
+    val currentFlashMode by rememberUpdatedState(flashMode)
 
     // Bind per mode rather than all use cases at once: some devices reject the combined
     // Preview + ImageCapture + VideoCapture graph, so each mode only binds what it needs.
@@ -83,6 +88,10 @@ fun CameraPreview(
     DisposableEffect(lifecycleOwner, mode, look, burstFrameCount, retryToken) {
         var cameraProvider: ProcessCameraProvider? = null
         var activeEffect: LookCameraEffect? = null
+        // Torch is a physical light that outlives whichever use case turned it on; tracked
+        // separately from cameraProvider so onDispose can explicitly switch it off before
+        // unbinding, regardless of which mode (or dispose reason) triggered the teardown.
+        var boundCamera: Camera? = null
         val providerFuture = ProcessCameraProvider.getInstance(context)
 
         providerFuture.addListener(
@@ -102,12 +111,17 @@ fun CameraPreview(
                             // frames (driven from CameraScreen), so no ImageAnalysis use
                             // case is bound; Preview + ImageCapture cover both the single
                             // shot and the burst.
+                            // setFlashMode is dynamic and safe to call before bind even on a
+                            // device with no flash unit at all (CameraX simply has nothing to
+                            // apply it to).
+                            imageCapture.flashMode = currentFlashMode.toImageCaptureFlashMode()
                             val camera = provider.bindToLifecycle(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
                                 preview,
                                 imageCapture,
                             )
+                            boundCamera = camera
                             onImageCaptureReady(imageCapture)
                             onBurstControllerReady(burstController)
                             onExposureControllerReady(camera.exposureController())
@@ -121,6 +135,7 @@ fun CameraPreview(
                                 preview,
                                 videoCapture,
                             )
+                            boundCamera = camera
                             onVideoCaptureReady(videoCapture)
                             onCameraReady(camera.cameraHandle(previewView))
                             camera.reapplyPendingZoom(currentDesiredZoomRatio)
@@ -179,6 +194,7 @@ fun CameraPreview(
                                     cinematicVideoCapture,
                                 )
                             }
+                            boundCamera = camera
                             onVideoCaptureReady(cinematicVideoCapture)
                             onCinematicConfigReady(cinematicConfig)
                             onCameraReady(camera.cameraHandle(previewView))
@@ -194,6 +210,11 @@ fun CameraPreview(
         )
 
         onDispose {
+            // Explicitly off before unbinding: a defensive no-op on devices where closing
+            // the camera already kills the torch, and the one call that matters on devices
+            // where it doesn't. Fire-and-forget - nothing left to observe the result of once
+            // the bind is torn down.
+            boundCamera?.cameraControl?.enableTorch(false)
             cameraProvider?.unbindAll()
             activeEffect?.release()
             // Invalidates any in-flight camera handle from this bind so a mode switch or

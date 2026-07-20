@@ -19,6 +19,7 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
             CameraSettingsData.DEFAULT.applyFinishingToMergedPhotos,
         ),
         defaultCinematicLookName = prefs.getString(KEY_DEFAULT_LOOK, null),
+        hdrBurstEnabled = prefs.getBoolean(KEY_HDR_BURST_ENABLED, CameraSettingsData.DEFAULT.hdrBurstEnabled),
     )
 
     override fun save(data: CameraSettingsData) {
@@ -26,6 +27,7 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
             putInt(KEY_BURST_FRAME_COUNT, data.burstFrameCount)
             putBoolean(KEY_APPLY_FINISHING, data.applyFinishingToMergedPhotos)
             putString(KEY_DEFAULT_LOOK, data.defaultCinematicLook.name)
+            putBoolean(KEY_HDR_BURST_ENABLED, data.hdrBurstEnabled)
         }
     }
 
@@ -34,5 +36,6 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
         private const val KEY_BURST_FRAME_COUNT = "burst_frame_count"
         private const val KEY_APPLY_FINISHING = "apply_finishing_to_merged_photos"
         private const val KEY_DEFAULT_LOOK = "default_cinematic_look"
+        private const val KEY_HDR_BURST_ENABLED = "hdr_burst_enabled"
     }
 }

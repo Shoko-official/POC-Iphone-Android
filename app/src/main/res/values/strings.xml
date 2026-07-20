@@ -21,6 +21,7 @@
     <string name="video_capture_failure">Failed to save video. Please try again.</string>
     <string name="burst_button">Burst</string>
     <string name="burst_merge_success">Merged %1$d frames</string>
+    <string name="burst_hdr_merge_success">HDR merged %1$d frames</string>
     <string name="burst_merge_failure">Failed to merge burst. Please try again.</string>
     <string name="look_neutral">Neutral</string>
     <string name="look_cinematic">Cinematic look</string>
@@ -33,6 +34,8 @@
     <string name="settings_section_burst">Burst photo</string>
     <string name="settings_burst_frame_count_label">Frames per burst</string>
     <string name="settings_burst_frame_count_option_description">%1$d frames per burst</string>
+    <string name="settings_hdr_burst_label">HDR burst</string>
+    <string name="settings_hdr_burst_description">Brackets exposure across -2/0/+2 EV and fuses for extra dynamic range instead of the single-exposure burst.</string>
     <string name="settings_section_merged_photos">Merged photos</string>
     <string name="settings_apply_finishing_label">Apply finishing to merged photos</string>
     <string name="settings_apply_finishing_description">Adds tone, saturation and contrast finishing when a burst is merged and saved.</string>

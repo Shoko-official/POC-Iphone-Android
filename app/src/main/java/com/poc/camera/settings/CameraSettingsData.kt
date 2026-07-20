@@ -12,9 +12,11 @@ data class CameraSettingsData(
     val burstFrameCount: Int = DEFAULT_BURST_FRAME_COUNT,
     val applyFinishingToMergedPhotos: Boolean = true,
     val defaultCinematicLook: VideoLook = VideoLook.Neutral,
+    val hdrBurstEnabled: Boolean = DEFAULT_HDR_BURST_ENABLED,
 ) {
     companion object {
         const val DEFAULT_BURST_FRAME_COUNT = 6
+        const val DEFAULT_HDR_BURST_ENABLED = false
         val ALLOWED_BURST_FRAME_COUNTS = listOf(3, 6, 9)
         val DEFAULT = CameraSettingsData()
 
@@ -30,11 +32,13 @@ data class CameraSettingsData(
             burstFrameCount: Int,
             applyFinishingToMergedPhotos: Boolean,
             defaultCinematicLookName: String?,
+            hdrBurstEnabled: Boolean,
         ): CameraSettingsData = CameraSettingsData(
             burstFrameCount = sanitizeBurstFrameCount(burstFrameCount),
             applyFinishingToMergedPhotos = applyFinishingToMergedPhotos,
             defaultCinematicLook = VideoLook.entries.firstOrNull { it.name == defaultCinematicLookName }
                 ?: DEFAULT.defaultCinematicLook,
+            hdrBurstEnabled = hdrBurstEnabled,
         )
     }
 }

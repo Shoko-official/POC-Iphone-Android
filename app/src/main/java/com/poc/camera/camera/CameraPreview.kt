@@ -3,6 +3,7 @@ package com.poc.camera.camera
 import android.util.Log
 import android.util.Range
 import android.util.Size
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -41,6 +42,7 @@ fun CameraPreview(
     onImageCaptureReady: (ImageCapture) -> Unit = {},
     onVideoCaptureReady: (VideoCapture<Recorder>) -> Unit = {},
     onBurstControllerReady: (BurstController) -> Unit = {},
+    onExposureControllerReady: (ExposureController?) -> Unit = {},
     onCinematicConfigReady: (CinematicConfig) -> Unit = {},
     onBindError: (Throwable) -> Unit = {},
 ) {
@@ -95,7 +97,7 @@ fun CameraPreview(
                                     setAnalyzer(analysisExecutor) { image -> burstController.onFrame(image) }
                                 }
 
-                            provider.bindToLifecycle(
+                            val camera = provider.bindToLifecycle(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
                                 preview,
@@ -104,6 +106,7 @@ fun CameraPreview(
                             )
                             onImageCaptureReady(imageCapture)
                             onBurstControllerReady(burstController)
+                            onExposureControllerReady(camera.exposureController())
                         }
                         CameraMode.Video -> {
                             provider.bindToLifecycle(
@@ -190,5 +193,34 @@ fun CameraPreview(
     AndroidView(
         factory = { previewView },
         modifier = modifier.fillMaxSize(),
+    )
+}
+
+/**
+ * Builds an [ExposureController] from this camera's reported exposure-compensation
+ * state, or null when the device does not support compensation at all. The returned
+ * [ExposureController.setIndexAndAwait] drives [androidx.camera.core.CameraControl]
+ * and blocks on its future, so it must be invoked off the main thread.
+ */
+private fun Camera.exposureController(): ExposureController? {
+    val exposureState = cameraInfo.exposureState
+    if (!exposureState.isExposureCompensationSupported) return null
+
+    val step = exposureState.exposureCompensationStep
+    val range = exposureState.exposureCompensationRange
+    val plan = ExposureBracket.plan(
+        stepNumerator = step.numerator,
+        stepDenominator = step.denominator,
+        rangeLower = range.lower,
+        rangeUpper = range.upper,
+    )
+    return ExposureController(
+        steps = plan,
+        framesPerEv = ExposureBracket.DEFAULT_FRAMES_PER_EV,
+        setIndexAndAwait = { index ->
+            // Blocks until the compensation change is applied; the awaited future is
+            // the best-effort AE-settle signal without Camera2 interop.
+            cameraControl.setExposureCompensationIndex(index).get()
+        },
     )
 }

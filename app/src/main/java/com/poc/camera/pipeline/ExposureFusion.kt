@@ -1,0 +1,132 @@
+package com.poc.camera.pipeline
+
+import kotlin.math.roundToInt
+
+/**
+ * Mertens-style exposure fusion of a set of ALIGNED frames tagged with relative EV.
+ *
+ * Each frame contributes a per-pixel weight from [ExposureFusionWeights]; the fused
+ * output is, per pixel and per channel, the weight-normalised sum of the inputs:
+ *
+ *   out(p, c) = ( sum_i wb_i(p) * frame_i(p, c) ) / ( sum_i wb_i(p) )
+ *
+ * where wb_i is frame i's weight map after a small box blur.
+ *
+ * Blurring the weight maps before normalisation is what keeps naive per-pixel fusion
+ * from haloing: without it the hard, high-frequency transitions between "trust this
+ * exposure" and "trust that one" imprint visible seams and reversal artefacts around
+ * high-contrast edges. A separable box blur of radius [DEFAULT_BLUR_RADIUS] smears
+ * the transitions into gentle ramps, approximating the low-pass role that a full
+ * Laplacian-pyramid blend plays in true Mertens fusion. This is a deliberate
+ * two-level simplification; multi-scale pyramid fusion (per-band blending of a
+ * Laplacian pyramid of the frames against a Gaussian pyramid of the weights) is a
+ * future refinement that would further suppress residual low-frequency halos.
+ *
+ * A tiny [WEIGHT_EPS] floor is added to every blurred weight so a pixel that is
+ * clipped or crushed in every exposure (all weights 0) falls back to an equal-weight
+ * average instead of dividing by zero. Output inherits the first frame's dimensions
+ * and timestamp with alpha forced opaque.
+ *
+ * Pure Kotlin, deterministic, no Android dependencies.
+ */
+object ExposureFusion {
+
+    /** Box-blur radius applied to each weight map before normalisation. */
+    const val DEFAULT_BLUR_RADIUS = 8
+
+    /** Floor added to every blurred weight so normalisation never divides by zero. */
+    private const val WEIGHT_EPS = 1e-6
+
+    /**
+     * Fuses [frames] using their matching relative exposures [evs].
+     *
+     * @param frames aligned input frames, all sharing dimensions; must be non-empty.
+     * @param evs relative EV per frame, parallel to [frames].
+     * @param blurRadius weight-map box-blur radius; 0 disables blurring.
+     */
+    fun fuse(
+        frames: List<Frame>,
+        evs: List<Double>,
+        blurRadius: Int = DEFAULT_BLUR_RADIUS,
+    ): Frame {
+        require(frames.isNotEmpty()) { "frames must not be empty" }
+        require(frames.size == evs.size) { "frames and evs must have equal size" }
+        require(blurRadius >= 0) { "blurRadius must be >= 0" }
+        val width = frames.first().width
+        val height = frames.first().height
+        require(frames.all { it.width == width && it.height == height }) {
+            "all frames must share dimensions"
+        }
+
+        val pixelCount = width * height
+        val weightMaps = frames.mapIndexed { index, frame ->
+            val raw = ExposureFusionWeights.weightMap(frame, evs[index])
+            if (blurRadius > 0) boxBlur(raw, width, height, blurRadius) else raw
+        }
+
+        val out = IntArray(pixelCount)
+        for (p in 0 until pixelCount) {
+            var sumR = 0.0
+            var sumG = 0.0
+            var sumB = 0.0
+            var sumW = 0.0
+            for (index in frames.indices) {
+                val w = weightMaps[index][p] + WEIGHT_EPS
+                val pixel = frames[index].argb[p]
+                sumR += w * ((pixel shr 16) and 0xFF)
+                sumG += w * ((pixel shr 8) and 0xFF)
+                sumB += w * (pixel and 0xFF)
+                sumW += w
+            }
+            val r = (sumR / sumW).roundToInt().coerceIn(0, 255)
+            val g = (sumG / sumW).roundToInt().coerceIn(0, 255)
+            val b = (sumB / sumW).roundToInt().coerceIn(0, 255)
+            out[p] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+
+        return Frame(width, height, out, frames.first().timestampMillis)
+    }
+
+    /**
+     * Separable box blur of a [width]x[height] scalar field with a (2*[radius]+1)
+     * window per axis, edges clamped to the nearest valid sample. Runs a horizontal
+     * pass into scratch then a vertical pass into the output using running sums, so
+     * cost is O(pixels) independent of [radius].
+     */
+    private fun boxBlur(src: DoubleArray, width: Int, height: Int, radius: Int): DoubleArray {
+        val horizontal = DoubleArray(src.size)
+        val window = 2 * radius + 1
+        // Horizontal pass.
+        for (y in 0 until height) {
+            val row = y * width
+            var sum = 0.0
+            // Seed the window at x = 0 with clamped left edge.
+            for (k in -radius..radius) {
+                sum += src[row + k.coerceIn(0, width - 1)]
+            }
+            horizontal[row] = sum / window
+            for (x in 1 until width) {
+                val leaving = (x - radius - 1).coerceIn(0, width - 1)
+                val entering = (x + radius).coerceIn(0, width - 1)
+                sum += src[row + entering] - src[row + leaving]
+                horizontal[row + x] = sum / window
+            }
+        }
+        // Vertical pass.
+        val out = DoubleArray(src.size)
+        for (x in 0 until width) {
+            var sum = 0.0
+            for (k in -radius..radius) {
+                sum += horizontal[k.coerceIn(0, height - 1) * width + x]
+            }
+            out[x] = sum / window
+            for (y in 1 until height) {
+                val leaving = (y - radius - 1).coerceIn(0, height - 1)
+                val entering = (y + radius).coerceIn(0, height - 1)
+                sum += horizontal[entering * width + x] - horizontal[leaving * width + x]
+                out[y * width + x] = sum / window
+            }
+        }
+        return out
+    }
+}

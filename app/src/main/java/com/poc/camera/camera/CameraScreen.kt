@@ -2,6 +2,7 @@ package com.poc.camera.camera
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
@@ -187,6 +188,13 @@ private fun CameraCaptureScreen(
     val burstCaptureExecutor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) {
         onDispose { burstCaptureExecutor.shutdown() }
+    }
+    // Per-device native-resolution ceiling for burst decode: high-memory devices decode
+    // 12 MP+ sensors at native resolution, low-memory devices stay conservative. Read once
+    // from the device memory class (a device constant); see BurstImageGeometry.
+    val maxBurstPixels = remember(context) {
+        val memoryClassMb = (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).memoryClass
+        BurstImageGeometry.maxBurstPixelsFor(memoryClassMb)
     }
     var mode by rememberSaveable { mutableStateOf(CameraMode.Photo) }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
@@ -501,7 +509,7 @@ private fun CameraCaptureScreen(
                                     val capture = imageCapture ?: return@Button
                                     isBurstInProgress = true
                                     val frameCapture = BurstController.FrameCapture { onResult ->
-                                        BurstImageCapture.capture(capture, burstCaptureExecutor, onResult)
+                                        BurstImageCapture.capture(capture, burstCaptureExecutor, maxBurstPixels, onResult)
                                     }
                                     val exposure = exposureController
                                     if (settings.nightModeEnabled) {

@@ -169,7 +169,21 @@ data class FinishingParams(
  */
 object FinishingPipeline {
 
+    /**
+     * Pixel count at or above which [apply] routes through [TiledFinishing] instead of
+     * running the whole frame through the float-heavy stages at once. ~9 MP sits above
+     * every quality-harness fixture (the largest is 256x256) and above the old 8 MP
+     * decode bound, so the golden suites and any sub-9 MP capture keep taking the
+     * untouched whole-frame path, while native 12 MP+ captures -- whose full-resolution
+     * guided-filter intermediates would otherwise peak near a gigabyte of transient
+     * `DoubleArray`s -- are finished in bounded-memory tiles. See [TiledFinishing].
+     */
+    const val TILED_THRESHOLD_PIXELS: Long = 9_000_000L
+
     fun apply(frame: Frame, params: FinishingParams = FinishingParams.DEFAULT): Frame {
+        if (frame.width.toLong() * frame.height.toLong() >= TILED_THRESHOLD_PIXELS) {
+            return TiledFinishing.apply(frame, params)
+        }
         val balanced = if (params.whiteBalance > 0.0) {
             WhiteBalance.apply(frame, params.whiteBalance)
         } else {
@@ -201,7 +215,7 @@ object FinishingPipeline {
      * compression and detail gain from an identity pass (0) to the params defaults
      * (1). Radius and eps stay at their defaults so only the effect magnitude scales.
      */
-    private fun localToneParams(strength: Double): LocalToneParams {
+    internal fun localToneParams(strength: Double): LocalToneParams {
         val s = strength.coerceIn(0.0, 1.0)
         return LocalToneParams(
             baseCompression = s * LocalToneParams.DEFAULT_BASE_COMPRESSION,
@@ -214,12 +228,12 @@ object FinishingPipeline {
      * identity pass (0) to the params default gain (1). Radius, eps, coring factor and
      * overshoot allowance stay at their defaults so only the effect magnitude scales.
      */
-    private fun detailParams(strength: Double): DetailParams {
+    internal fun detailParams(strength: Double): DetailParams {
         val s = strength.coerceIn(0.0, 1.0)
         return DetailParams(gain = s * DetailParams.DEFAULT_GAIN)
     }
 
-    private fun forceOpaque(frame: Frame): Frame {
+    internal fun forceOpaque(frame: Frame): Frame {
         val src = frame.argb
         val out = IntArray(src.size) { (0xFF shl 24) or (src[it] and 0x00FFFFFF) }
         return Frame(frame.width, frame.height, out, frame.timestampMillis)

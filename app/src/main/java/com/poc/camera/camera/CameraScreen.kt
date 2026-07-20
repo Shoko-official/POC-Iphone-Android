@@ -12,13 +12,19 @@ import android.provider.Settings
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +32,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -59,9 +66,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -69,6 +84,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -85,6 +102,8 @@ import com.poc.camera.pipeline.NightPipeline
 import com.poc.camera.pipeline.SuperResolution
 import com.poc.camera.settings.CameraSettingsData
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -97,6 +116,21 @@ private const val TAG = "CameraScreen"
 private val OverlayScrimColor = Color.Black.copy(alpha = 0.6f)
 private val OverlayTextShadow = Shadow(color = Color.Black, offset = Offset(0f, 1f), blurRadius = 4f)
 private val SecondaryControlSlotWidth = 88.dp
+
+// Tap-to-focus reticle: transient feedback near the tap point, not a control, so it sits
+// well under the 48dp minimum touch target. CameraX auto-cancels the metering action
+// itself after FOCUS_AUTO_CANCEL_MILLIS; the reticle's own on-screen life
+// (FOCUS_RETICLE_SETTLE_DELAY_MILLIS then a fade) is a separate, shorter UI timer.
+private const val FOCUS_AUTO_CANCEL_MILLIS = 4_000L
+private const val FOCUS_RETICLE_SETTLE_DELAY_MILLIS = 800L
+private const val FOCUS_RETICLE_FADE_MILLIS = 250
+private val FocusReticleSize = 72.dp
+private val FocusReticleCornerRadius = 8.dp
+private val FocusReticleStrokeWidth = 2.dp
+private val FocusReticleStrokeWidthResolved = 3.dp
+private val FocusReticleFocusingColor = Color.White
+private val FocusReticleSuccessColor = Color(0xFF7CFF7A)
+private val FocusReticleFailureColor = Color(0xFFFF6B57)
 
 @Composable
 fun CameraScreen(
@@ -207,6 +241,10 @@ private fun CameraCaptureScreen(
     var recordingStartMillis by remember { mutableLongStateOf(0L) }
     var elapsedMillis by remember { mutableLongStateOf(0L) }
     var cinematicConfig by remember { mutableStateOf<CinematicConfig?>(null) }
+    var focusMeteringHandle by remember { mutableStateOf<FocusMeteringHandle?>(null) }
+    var reticleState by remember { mutableStateOf<FocusReticleState>(FocusReticleState.Idle) }
+    var focusRequestSeq by remember { mutableLongStateOf(0L) }
+    var previewSize by remember { mutableStateOf(IntSize.Zero) }
     // Settings only seed the initial look for a fresh session; once the user picks a
     // look in Cinematic mode it stays under their control for the rest of the session.
     var videoLook by rememberSaveable { mutableStateOf(settings.defaultCinematicLook) }
@@ -236,6 +274,7 @@ private fun CameraCaptureScreen(
     val cinematicLookLabel = stringResource(R.string.look_cinematic)
     val recordingIndicatorContentDescription = stringResource(R.string.recording_indicator_content_description)
     val openSettingsContentDescription = stringResource(R.string.open_settings_content_description)
+    val tapToFocusContentDescription = stringResource(R.string.tap_to_focus_content_description)
     val compareActionLabel = stringResource(R.string.compare_action)
     val previewBindFailureMessage = stringResource(R.string.preview_bind_failure_message)
     val previewRetryLabel = stringResource(R.string.preview_bind_retry)
@@ -292,8 +331,106 @@ private fun CameraCaptureScreen(
             onBurstControllerReady = { burstController = it },
             onExposureControllerReady = { exposureController = it },
             onCinematicConfigReady = { cinematicConfig = it },
+            onFocusMeteringReady = { focusMeteringHandle = it },
             onBindError = { previewBindError = true },
         )
+
+        // Tap-to-focus surface: sits above the preview but below every control below it
+        // in this Box, so buttons/chips still win the tap in their own bounds. Enabled in
+        // every mode (Photo/Video/Cinematic) and while recording - CameraX supports
+        // re-metering mid-recording.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .onSizeChanged { previewSize = it }
+                .pointerInput(focusMeteringHandle) {
+                    detectTapGestures { tapOffset ->
+                        val handle = focusMeteringHandle ?: return@detectTapGestures
+                        val bounds = previewSize
+                        if (bounds.width <= 0 || bounds.height <= 0) return@detectTapGestures
+
+                        val halfSizePx = FocusReticleSize.toPx() / 2f
+                        val point = FocusReticleGeometry.clamp(
+                            x = tapOffset.x,
+                            y = tapOffset.y,
+                            boundsWidth = bounds.width.toFloat(),
+                            boundsHeight = bounds.height.toFloat(),
+                            halfSize = halfSizePx,
+                        )
+                        val requestId = ++focusRequestSeq
+                        reticleState = FocusReticleReducer.reduce(
+                            reticleState,
+                            FocusMeteringEvent.TapStarted(point, requestId),
+                        )
+
+                        val meteringPoint = handle.meteringPointFactory.createPoint(point.x, point.y)
+                        val action = FocusMeteringAction.Builder(
+                            meteringPoint,
+                            FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
+                        )
+                            .setAutoCancelDuration(FOCUS_AUTO_CANCEL_MILLIS, TimeUnit.MILLISECONDS)
+                            .build()
+
+                        val future = handle.cameraControl.startFocusAndMetering(action)
+                        future.addListener(
+                            {
+                                // A mode switch may tear the bind down before this settles;
+                                // the future itself stays safe to read regardless.
+                                val succeeded = try {
+                                    future.get().isFocusSuccessful
+                                } catch (e: Exception) {
+                                    false
+                                }
+                                reticleState = FocusReticleReducer.reduce(
+                                    reticleState,
+                                    if (succeeded) {
+                                        FocusMeteringEvent.MeteringSucceeded(requestId)
+                                    } else {
+                                        FocusMeteringEvent.MeteringFailed(requestId)
+                                    },
+                                )
+                            },
+                            ContextCompat.getMainExecutor(context),
+                        )
+                    }
+                }
+                .semantics {
+                    contentDescription = tapToFocusContentDescription
+                },
+        )
+
+        // Drives the pure reducer's Settled event once a resolved (Focused/Failed)
+        // reticle has shown long enough; a stale timer from a superseded tap is a no-op
+        // in the reducer, so no extra bookkeeping is needed here.
+        LaunchedEffect(reticleState) {
+            val settleRequestId = when (val state = reticleState) {
+                is FocusReticleState.Focused -> state.requestId
+                is FocusReticleState.Failed -> state.requestId
+                else -> null
+            }
+            if (settleRequestId != null) {
+                delay(FOCUS_RETICLE_SETTLE_DELAY_MILLIS)
+                reticleState = FocusReticleReducer.reduce(reticleState, FocusMeteringEvent.Settled(settleRequestId))
+            }
+        }
+
+        val reticleAlpha by animateFloatAsState(
+            targetValue = if (reticleState == FocusReticleState.Idle) 0f else 1f,
+            animationSpec = tween(durationMillis = FOCUS_RETICLE_FADE_MILLIS, easing = LinearEasing),
+            label = "focus_reticle_alpha",
+        )
+        // Retains the last non-idle state through the fade-out so the reticle keeps
+        // rendering at its resolved point/colour while alpha animates to zero, instead of
+        // snapping away the instant the reducer returns to Idle.
+        var lastReticleState by remember { mutableStateOf<FocusReticleState?>(null) }
+        if (reticleState != FocusReticleState.Idle) {
+            lastReticleState = reticleState
+        }
+        if (reticleAlpha > 0f) {
+            lastReticleState?.let { state ->
+                FocusReticle(state = state, alpha = reticleAlpha)
+            }
+        }
 
         Column(
             modifier = Modifier
@@ -847,6 +984,104 @@ private fun ShutterButton(
                     .size(60.dp)
                     .background(Color.White, CircleShape),
             )
+        }
+    }
+}
+
+/**
+ * Transient tap-to-focus feedback near the tap point: a small stroked square that reads
+ * its colour, stroke weight and inner mark from [state], so success/failure is never
+ * colour-only - Focused adds a thicker stroke plus an inner tick, Failed switches to a
+ * dashed stroke plus an inner cross. Not a control (see [FocusReticleSize]), so it stays
+ * well under the 48dp minimum touch target used elsewhere on this screen.
+ */
+@Composable
+private fun FocusReticle(
+    state: FocusReticleState,
+    alpha: Float,
+    modifier: Modifier = Modifier,
+) {
+    val point = when (state) {
+        is FocusReticleState.Focusing -> state.point
+        is FocusReticleState.Focused -> state.point
+        is FocusReticleState.Failed -> state.point
+        FocusReticleState.Idle -> return
+    }
+    val strokeColor = when (state) {
+        is FocusReticleState.Focusing -> FocusReticleFocusingColor
+        is FocusReticleState.Focused -> FocusReticleSuccessColor
+        is FocusReticleState.Failed -> FocusReticleFailureColor
+        FocusReticleState.Idle -> return
+    }
+    val strokeWidth = if (state is FocusReticleState.Focused) {
+        FocusReticleStrokeWidthResolved
+    } else {
+        FocusReticleStrokeWidth
+    }
+    val dashed = state is FocusReticleState.Failed
+
+    Canvas(
+        modifier = modifier
+            .offset {
+                val halfSizePx = FocusReticleSize.toPx() / 2f
+                IntOffset((point.x - halfSizePx).roundToInt(), (point.y - halfSizePx).roundToInt())
+            }
+            .size(FocusReticleSize)
+            .alpha(alpha),
+    ) {
+        val strokeWidthPx = strokeWidth.toPx()
+        val inset = strokeWidthPx / 2f
+        val pathEffect = if (dashed) PathEffect.dashPathEffect(floatArrayOf(10f, 8f)) else null
+        drawRoundRect(
+            color = strokeColor,
+            topLeft = Offset(inset, inset),
+            size = Size(size.width - strokeWidthPx, size.height - strokeWidthPx),
+            cornerRadius = CornerRadius(FocusReticleCornerRadius.toPx()),
+            style = Stroke(width = strokeWidthPx, pathEffect = pathEffect),
+        )
+
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        when (state) {
+            is FocusReticleState.Focused -> {
+                // Inner checkmark: the non-colour cue that distinguishes success from a
+                // plain thicker stroke alone.
+                val tick = size.minDimension * 0.14f
+                drawLine(
+                    color = strokeColor,
+                    start = Offset(cx - tick, cy),
+                    end = Offset(cx - tick * 0.2f, cy + tick),
+                    strokeWidth = strokeWidthPx,
+                    cap = StrokeCap.Round,
+                )
+                drawLine(
+                    color = strokeColor,
+                    start = Offset(cx - tick * 0.2f, cy + tick),
+                    end = Offset(cx + tick * 1.4f, cy - tick),
+                    strokeWidth = strokeWidthPx,
+                    cap = StrokeCap.Round,
+                )
+            }
+            is FocusReticleState.Failed -> {
+                // Inner cross: the non-colour cue that distinguishes failure from the
+                // dashed stroke alone.
+                val cross = size.minDimension * 0.16f
+                drawLine(
+                    color = strokeColor,
+                    start = Offset(cx - cross, cy - cross),
+                    end = Offset(cx + cross, cy + cross),
+                    strokeWidth = strokeWidthPx,
+                    cap = StrokeCap.Round,
+                )
+                drawLine(
+                    color = strokeColor,
+                    start = Offset(cx - cross, cy + cross),
+                    end = Offset(cx + cross, cy - cross),
+                    strokeWidth = strokeWidthPx,
+                    cap = StrokeCap.Round,
+                )
+            }
+            else -> Unit
         }
     }
 }

@@ -61,7 +61,7 @@ object ExposureFusion {
         val pixelCount = width * height
         val weightMaps = frames.mapIndexed { index, frame ->
             val raw = ExposureFusionWeights.weightMap(frame, evs[index])
-            if (blurRadius > 0) boxBlur(raw, width, height, blurRadius) else raw
+            if (blurRadius > 0) BoxBlur.blur(raw, width, height, blurRadius) else raw
         }
 
         val out = IntArray(pixelCount)
@@ -85,48 +85,5 @@ object ExposureFusion {
         }
 
         return Frame(width, height, out, frames.first().timestampMillis)
-    }
-
-    /**
-     * Separable box blur of a [width]x[height] scalar field with a (2*[radius]+1)
-     * window per axis, edges clamped to the nearest valid sample. Runs a horizontal
-     * pass into scratch then a vertical pass into the output using running sums, so
-     * cost is O(pixels) independent of [radius].
-     */
-    private fun boxBlur(src: DoubleArray, width: Int, height: Int, radius: Int): DoubleArray {
-        val horizontal = DoubleArray(src.size)
-        val window = 2 * radius + 1
-        // Horizontal pass.
-        for (y in 0 until height) {
-            val row = y * width
-            var sum = 0.0
-            // Seed the window at x = 0 with clamped left edge.
-            for (k in -radius..radius) {
-                sum += src[row + k.coerceIn(0, width - 1)]
-            }
-            horizontal[row] = sum / window
-            for (x in 1 until width) {
-                val leaving = (x - radius - 1).coerceIn(0, width - 1)
-                val entering = (x + radius).coerceIn(0, width - 1)
-                sum += src[row + entering] - src[row + leaving]
-                horizontal[row + x] = sum / window
-            }
-        }
-        // Vertical pass.
-        val out = DoubleArray(src.size)
-        for (x in 0 until width) {
-            var sum = 0.0
-            for (k in -radius..radius) {
-                sum += horizontal[k.coerceIn(0, height - 1) * width + x]
-            }
-            out[x] = sum / window
-            for (y in 1 until height) {
-                val leaving = (y - radius - 1).coerceIn(0, height - 1)
-                val entering = (y + radius).coerceIn(0, height - 1)
-                sum += horizontal[entering * width + x] - horizontal[leaving * width + x]
-                out[y * width + x] = sum / window
-            }
-        }
-        return out
     }
 }

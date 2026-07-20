@@ -18,6 +18,7 @@ class CameraSettingsDataTest {
         assertEquals(false, default.nightModeEnabled)
         assertEquals(false, default.superResolutionEnabled)
         assertEquals(FinishingPreset.Natural, default.finishingPreset)
+        assertEquals(false, default.hdrVideoEnabled)
     }
 
     @Test
@@ -46,6 +47,7 @@ class CameraSettingsDataTest {
             nightModeEnabled = true,
             superResolutionEnabled = true,
             finishingPreset = FinishingPreset.Vivid,
+            hdrVideoEnabled = true,
         )
 
         val decoded = CameraSettingsData.fromRaw(
@@ -57,9 +59,25 @@ class CameraSettingsDataTest {
             nightModeEnabled = original.nightModeEnabled,
             superResolutionEnabled = original.superResolutionEnabled,
             finishingPresetName = original.finishingPreset.name,
+            hdrVideoEnabled = original.hdrVideoEnabled,
         )
 
         assertEquals(original, decoded)
+    }
+
+    @Test
+    fun fromRawFallsBackToHdrVideoDisabledWhenMissing() {
+        val decoded = CameraSettingsData.fromRaw(
+            burstFrameCount = 6,
+            applyFinishingToMergedPhotos = true,
+            defaultCinematicLookName = null,
+            hdrBurstEnabled = false,
+            saveComparisonPair = false,
+            nightModeEnabled = false,
+            superResolutionEnabled = false,
+        )
+
+        assertEquals(CameraSettingsData.DEFAULT.hdrVideoEnabled, decoded.hdrVideoEnabled)
     }
 
     @Test

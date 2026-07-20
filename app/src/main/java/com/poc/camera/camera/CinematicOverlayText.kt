@@ -13,6 +13,11 @@ object CinematicOverlayText {
         fpsDefaultLabel: String,
         stabilizedTemplate: String,
         unstabilizedTemplate: String,
+        // Both null (the default) omits the suffix entirely, matching pre-HDR overlay text -
+        // callers only pass these once HDR video is enabled in settings, so a device/user with
+        // it off never sees a "- SDR" suffix on every cinematic recording.
+        rangeLabel: String? = null,
+        rangeSuffixTemplate: String? = null,
     ): String {
         val fpsLabel = if (config.use24Fps) fps24Label else fpsDefaultLabel
         val template = if (config.stabilization == StabilizationChoice.ON) {
@@ -20,6 +25,11 @@ object CinematicOverlayText {
         } else {
             unstabilizedTemplate
         }
-        return String.format(template, fpsLabel)
+        val base = String.format(template, fpsLabel)
+        return if (rangeLabel != null && rangeSuffixTemplate != null) {
+            String.format(rangeSuffixTemplate, base, rangeLabel)
+        } else {
+            base
+        }
     }
 }

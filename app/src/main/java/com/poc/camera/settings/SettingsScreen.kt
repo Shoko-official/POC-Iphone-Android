@@ -216,6 +216,31 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            SettingsSection(title = stringResource(R.string.settings_section_video)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_hdr_video_label),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            text = stringResource(R.string.settings_hdr_video_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = settings.hdrVideoEnabled,
+                        onCheckedChange = { onSettingsChanged(settings.copy(hdrVideoEnabled = it)) },
+                    )
+                }
+            }
+
+            HorizontalDivider()
+
             SettingsSection(title = stringResource(R.string.settings_section_cinematic)) {
                 Text(
                     text = stringResource(R.string.settings_default_look_label),

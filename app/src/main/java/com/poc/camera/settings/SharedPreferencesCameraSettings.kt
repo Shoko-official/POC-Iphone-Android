@@ -30,6 +30,7 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
             CameraSettingsData.DEFAULT.superResolutionEnabled,
         ),
         finishingPresetName = prefs.getString(KEY_FINISHING_PRESET, null),
+        hdrVideoEnabled = prefs.getBoolean(KEY_HDR_VIDEO_ENABLED, CameraSettingsData.DEFAULT.hdrVideoEnabled),
     )
 
     override fun save(data: CameraSettingsData) {
@@ -42,6 +43,7 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
             putBoolean(KEY_NIGHT_MODE_ENABLED, data.nightModeEnabled)
             putBoolean(KEY_SUPER_RESOLUTION_ENABLED, data.superResolutionEnabled)
             putString(KEY_FINISHING_PRESET, data.finishingPreset.name)
+            putBoolean(KEY_HDR_VIDEO_ENABLED, data.hdrVideoEnabled)
         }
     }
 
@@ -55,5 +57,6 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
         private const val KEY_NIGHT_MODE_ENABLED = "night_mode_enabled"
         private const val KEY_SUPER_RESOLUTION_ENABLED = "super_resolution_enabled"
         private const val KEY_FINISHING_PRESET = "finishing_preset"
+        private const val KEY_HDR_VIDEO_ENABLED = "hdr_video_enabled"
     }
 }

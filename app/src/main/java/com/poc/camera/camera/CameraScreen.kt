@@ -249,6 +249,10 @@ private fun CameraCaptureScreen(
     var recordingStartMillis by remember { mutableLongStateOf(0L) }
     var elapsedMillis by remember { mutableLongStateOf(0L) }
     var cinematicConfig by remember { mutableStateOf<CinematicConfig?>(null) }
+    // Whether the just-bound Video/Cinematic use case actually resolved to HLG10 - see
+    // CameraPreview.onVideoRangeResolved and VideoDynamicRangeResolver. Reset alongside
+    // cinematicConfig below so a stale reading never survives a switch to Photo.
+    var isHlgActive by remember { mutableStateOf(false) }
     var cameraHandle by remember { mutableStateOf<CameraHandle?>(null) }
     var reticleState by remember { mutableStateOf<FocusReticleState>(FocusReticleState.Idle) }
     var focusRequestSeq by remember { mutableLongStateOf(0L) }
@@ -298,6 +302,9 @@ private fun CameraCaptureScreen(
     val cinematicFpsDefaultLabel = stringResource(R.string.cinematic_fps_default)
     val cinematicStabilizedTemplate = stringResource(R.string.cinematic_overlay_stabilized)
     val cinematicUnstabilizedTemplate = stringResource(R.string.cinematic_overlay_unstabilized)
+    val cinematicRangeSuffixTemplate = stringResource(R.string.cinematic_overlay_range_suffix)
+    val videoHdrStatusHlg10Label = stringResource(R.string.video_hdr_status_hlg10)
+    val videoHdrStatusSdrLabel = stringResource(R.string.video_hdr_status_sdr)
     val neutralLookLabel = stringResource(R.string.look_neutral)
     val cinematicLookLabel = stringResource(R.string.look_cinematic)
     val recordingIndicatorContentDescription = stringResource(R.string.recording_indicator_content_description)
@@ -372,6 +379,9 @@ private fun CameraCaptureScreen(
         if (mode != CameraMode.Cinematic) {
             cinematicConfig = null
         }
+        if (!mode.isVideoLike) {
+            isHlgActive = false
+        }
         onDispose {
             activeRecording?.stop()
         }
@@ -435,12 +445,14 @@ private fun CameraCaptureScreen(
             retryToken = previewRetryToken,
             desiredZoomRatio = zoomRatio,
             flashMode = flashMode,
+            hdrVideoEnabled = settings.hdrVideoEnabled,
             modifier = Modifier.fillMaxSize(),
             onImageCaptureReady = { imageCapture = it },
             onVideoCaptureReady = { videoCapture = it },
             onBurstControllerReady = { burstController = it },
             onExposureControllerReady = { exposureController = it },
             onCinematicConfigReady = { cinematicConfig = it },
+            onVideoRangeResolved = { isHlgActive = it },
             onCameraReady = { cameraHandle = it },
             onBindError = { previewBindError = true },
         )
@@ -652,6 +664,25 @@ private fun CameraCaptureScreen(
                 )
             }
 
+            // HDR status is only ever worth showing once the user has opted into it in
+            // settings - with it off every recording is trivially SDR, so a permanent
+            // "SDR" chip/suffix would just be noise on every session.
+            val videoRangeLabel = if (settings.hdrVideoEnabled) {
+                if (isHlgActive) videoHdrStatusHlg10Label else videoHdrStatusSdrLabel
+            } else {
+                null
+            }
+
+            if (mode == CameraMode.Video && videoRangeLabel != null) {
+                OverlayChip {
+                    Text(
+                        text = videoRangeLabel,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
+                    )
+                }
+            }
+
             if (mode == CameraMode.Cinematic) {
                 cinematicConfig?.let { config ->
                     OverlayChip {
@@ -662,6 +693,8 @@ private fun CameraCaptureScreen(
                                 fpsDefaultLabel = cinematicFpsDefaultLabel,
                                 stabilizedTemplate = cinematicStabilizedTemplate,
                                 unstabilizedTemplate = cinematicUnstabilizedTemplate,
+                                rangeLabel = videoRangeLabel,
+                                rangeSuffixTemplate = cinematicRangeSuffixTemplate,
                             ),
                             color = Color.White,
                             style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),

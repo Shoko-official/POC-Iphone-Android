@@ -6,6 +6,7 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.DynamicRange
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.MeteringPointFactory
 import androidx.camera.core.Preview
@@ -60,11 +61,19 @@ fun CameraPreview(
     // read via rememberUpdatedState rather than a DisposableEffect key - cycling the flash
     // control while already bound must never force a camera rebind.
     flashMode: FlashMode = FlashMode.Off,
+    // Video-mode/Cinematic HDR setting. Unlike flashMode/desiredZoomRatio this is a
+    // DisposableEffect key (below) rather than read via rememberUpdatedState: the dynamic
+    // range is baked into VideoCapture at build time (VideoCapture.Builder.setDynamicRange),
+    // so toggling it while already bound requires a rebind to actually take effect.
+    hdrVideoEnabled: Boolean = false,
     onImageCaptureReady: (ImageCapture) -> Unit = {},
     onVideoCaptureReady: (VideoCapture<Recorder>) -> Unit = {},
     onBurstControllerReady: (BurstController) -> Unit = {},
     onExposureControllerReady: (ExposureController?) -> Unit = {},
     onCinematicConfigReady: (CinematicConfig) -> Unit = {},
+    // Reports whether the just-bound Video/Cinematic use case actually resolved to HLG10
+    // (true) or SDR (false) - see VideoDynamicRangeResolver. Never called for Photo.
+    onVideoRangeResolved: (Boolean) -> Unit = {},
     onCameraReady: (CameraHandle?) -> Unit = {},
     onBindError: (Throwable) -> Unit = {},
 ) {
@@ -77,7 +86,6 @@ fun CameraPreview(
             .setQualitySelector(QualitySelector.from(Quality.FHD))
             .build()
     }
-    val videoCapture = remember { VideoCapture.withOutput(recorder) }
     val burstController = remember(burstFrameCount) { BurstController(burstFrameCount) }
     val currentDesiredZoomRatio by rememberUpdatedState(desiredZoomRatio)
     val currentFlashMode by rememberUpdatedState(flashMode)
@@ -85,7 +93,7 @@ fun CameraPreview(
     // Bind per mode rather than all use cases at once: some devices reject the combined
     // Preview + ImageCapture + VideoCapture graph, so each mode only binds what it needs.
     // retryToken carries no data; bumping it from the caller re-runs a failed bind attempt.
-    DisposableEffect(lifecycleOwner, mode, look, burstFrameCount, retryToken) {
+    DisposableEffect(lifecycleOwner, mode, look, burstFrameCount, retryToken, hdrVideoEnabled) {
         var cameraProvider: ProcessCameraProvider? = null
         var activeEffect: LookCameraEffect? = null
         // Torch is a physical light that outlives whichever use case turned it on; tracked
@@ -129,6 +137,25 @@ fun CameraPreview(
                             camera.reapplyPendingZoom(currentDesiredZoomRatio)
                         }
                         CameraMode.Video -> {
+                            // Dynamic range, like the Cinematic fps/stabilization config below,
+                            // depends on what this specific camera reports, so it's resolved
+                            // fresh on each bind rather than baked into a top-level remember.
+                            val cameraInfo = CameraSelector.DEFAULT_BACK_CAMERA
+                                .filter(provider.availableCameraInfos)
+                                .firstOrNull()
+                            val supportedRanges = cameraInfo
+                                ?.let { VideoDynamicRangeCapabilities.resolve(it) }
+                                .orEmpty()
+                            val rangeDecision = VideoDynamicRangeResolver.resolve(supportedRanges, hdrVideoEnabled)
+
+                            val videoCapture = VideoCapture.Builder(recorder)
+                                .apply {
+                                    if (rangeDecision == VideoDynamicRangeDecision.UseHlg10) {
+                                        setDynamicRange(DynamicRange.HLG_10_BIT)
+                                    }
+                                }
+                                .build()
+
                             val camera = provider.bindToLifecycle(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
@@ -137,6 +164,7 @@ fun CameraPreview(
                             )
                             boundCamera = camera
                             onVideoCaptureReady(videoCapture)
+                            onVideoRangeResolved(rangeDecision == VideoDynamicRangeDecision.UseHlg10)
                             onCameraReady(camera.cameraHandle(previewView))
                             camera.reapplyPendingZoom(currentDesiredZoomRatio)
                         }
@@ -150,11 +178,30 @@ fun CameraPreview(
                                 ?.let { CinematicCameraCharacteristics.resolve(it) }
                                 ?: CinematicConfig(use24Fps = false, stabilization = StabilizationChoice.OFF)
 
+                            val supportedRanges = cameraInfo
+                                ?.let { VideoDynamicRangeCapabilities.resolve(it) }
+                                .orEmpty()
+                            val rawRangeDecision = VideoDynamicRangeResolver.resolve(supportedRanges, hdrVideoEnabled)
+                            // Precedence: the GL LUT path (LookCameraEffect/LutSurfaceProcessor)
+                            // is an OES/SDR-oriented pipeline with no 10-bit HLG support in this
+                            // POC, so a non-neutral look always wins over HDR - HLG is only ever
+                            // requested when the look is Neutral. onVideoRangeResolved below
+                            // reports this effective decision, never the raw one, so the overlay
+                            // can never claim HLG while the effect actually forces SDR.
+                            val rangeDecision = if (look != VideoLook.Neutral) {
+                                VideoDynamicRangeDecision.UseSdr
+                            } else {
+                                rawRangeDecision
+                            }
+
                             val cinematicVideoCapture = VideoCapture.Builder(recorder)
                                 .apply {
                                     if (cinematicConfig.use24Fps) {
                                         val fps = CinematicConfigResolver.TARGET_FPS
                                         setTargetFrameRate(Range(fps, fps))
+                                    }
+                                    if (rangeDecision == VideoDynamicRangeDecision.UseHlg10) {
+                                        setDynamicRange(DynamicRange.HLG_10_BIT)
                                     }
                                 }
                                 .setVideoStabilizationEnabled(cinematicConfig.stabilization == StabilizationChoice.ON)
@@ -197,6 +244,7 @@ fun CameraPreview(
                             boundCamera = camera
                             onVideoCaptureReady(cinematicVideoCapture)
                             onCinematicConfigReady(cinematicConfig)
+                            onVideoRangeResolved(rangeDecision == VideoDynamicRangeDecision.UseHlg10)
                             onCameraReady(camera.cameraHandle(previewView))
                             camera.reapplyPendingZoom(currentDesiredZoomRatio)
                         }

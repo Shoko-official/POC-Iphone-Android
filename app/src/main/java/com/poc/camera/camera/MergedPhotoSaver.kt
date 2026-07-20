@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import com.poc.camera.imaging.BitmapFrameConverter
 import com.poc.camera.pipeline.Frame
 import java.io.IOException
 
@@ -13,23 +14,21 @@ import java.io.IOException
  * Persists a merged [Frame] as a JPEG via MediaStore, reusing the single-shot
  * photo value builders but with a distinct display-name prefix - "MRG_" for the
  * finished/processed result, "RAW_" for the unprocessed comparison reference (the
- * merge input frame, saved as-is when "Save comparison pair" is enabled). When [save]
- * is given [exif], it is written onto the file via [ExifMetadataWriter] before the
- * MediaStore row is unpended - a failure there is logged and swallowed rather than
- * failing the save. Thin Android adapter (untested); the deterministic pixel work
- * lives in the pipeline package and is covered by unit tests.
+ * merge input frame, saved as-is when "Save comparison pair" is enabled), "PRT_" for
+ * a Portrait-mode result (issue #80, whether or not a subject mask was actually found -
+ * see CameraScreen's Portrait capture flow). When [save] is given [exif], it is written
+ * onto the file via [ExifMetadataWriter] before the MediaStore row is unpended - a
+ * failure there is logged and swallowed rather than failing the save. Thin Android
+ * adapter (untested); the deterministic pixel work lives in the pipeline package and
+ * is covered by unit tests.
  */
 object MergedPhotoSaver {
 
     const val RAW_PREFIX = "RAW_"
+    const val PORTRAIT_PREFIX = "PRT_"
 
     fun save(context: Context, frame: Frame, prefix: String = MERGED_PREFIX, exif: ExifMetadata? = null): Uri {
-        val bitmap = Bitmap.createBitmap(
-            frame.argb,
-            frame.width,
-            frame.height,
-            Bitmap.Config.ARGB_8888,
-        )
+        val bitmap = BitmapFrameConverter.fromFrame(frame)
         val supportsPendingFlag = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
         val values = PhotoMediaStoreValuesFactory.create(
             timestampMillis = frame.timestampMillis,

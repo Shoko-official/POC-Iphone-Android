@@ -20,4 +20,9 @@ class CameraModeTest {
     fun photoIsNotVideoLike() {
         assertFalse(CameraMode.Photo.isVideoLike)
     }
+
+    @Test
+    fun portraitIsNotVideoLike() {
+        assertFalse(CameraMode.Portrait.isVideoLike)
+    }
 }

@@ -25,6 +25,10 @@ android {
             // Signed with the debug key until a real upload key exists, so the
             // release APK stays installable for POC validation.
             signingConfig = signingConfigs.getByName("debug")
+            // MediaPipe (MLKit segmentation) bundles ~20 MB of native code per ABI.
+            // Real phones are arm64; shipping one ABI keeps the monolithic POC APK
+            // small. Debug keeps all ABIs so x86_64 emulators still work.
+            ndk { abiFilters += "arm64-v8a" }
         }
     }
 
@@ -65,6 +69,7 @@ dependencies {
     implementation(libs.androidx.camera.view)
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.exifinterface)
+    implementation(libs.mlkit.segmentation.selfie)
 
     testImplementation(libs.junit)
 }

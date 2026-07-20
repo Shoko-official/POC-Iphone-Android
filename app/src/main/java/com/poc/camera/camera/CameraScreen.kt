@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -74,8 +75,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.poc.camera.R
 import com.poc.camera.compare.ComparePair
+import com.poc.camera.compare.GuidedCompareStep
 import com.poc.camera.pipeline.BurstMergePipeline
-import com.poc.camera.pipeline.FinishingParams
 import com.poc.camera.pipeline.FinishingPipeline
 import com.poc.camera.pipeline.Frame
 import com.poc.camera.pipeline.HdrMergePipeline
@@ -103,6 +104,9 @@ fun CameraScreen(
     onOpenCompare: () -> Unit,
     onComparePairCaptured: (ComparePair) -> Unit,
     modifier: Modifier = Modifier,
+    guidedStep: GuidedCompareStep = GuidedCompareStep.Idle,
+    onGuidedCaptureCompleted: () -> Unit = {},
+    onGuidedCancel: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var permissionState by rememberSaveable {
@@ -148,6 +152,9 @@ fun CameraScreen(
             comparePair = comparePair,
             onOpenCompare = onOpenCompare,
             onComparePairCaptured = onComparePairCaptured,
+            guidedStep = guidedStep,
+            onGuidedCaptureCompleted = onGuidedCaptureCompleted,
+            onGuidedCancel = onGuidedCancel,
             modifier = modifier,
         )
         CameraPermissionState.Denied -> CameraPermissionRationale(
@@ -165,6 +172,9 @@ private fun CameraCaptureScreen(
     comparePair: ComparePair?,
     onOpenCompare: () -> Unit,
     onComparePairCaptured: (ComparePair) -> Unit,
+    guidedStep: GuidedCompareStep,
+    onGuidedCaptureCompleted: () -> Unit,
+    onGuidedCancel: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -219,6 +229,9 @@ private fun CameraCaptureScreen(
     val compareActionLabel = stringResource(R.string.compare_action)
     val previewBindFailureMessage = stringResource(R.string.preview_bind_failure_message)
     val previewRetryLabel = stringResource(R.string.preview_bind_retry)
+    val guidedCaptureBannerMessage = stringResource(R.string.guided_comparison_camera_banner)
+    val guidedCaptureBannerDetail = stringResource(R.string.guided_comparison_camera_banner_detail)
+    val guidedCancelContentDescription = stringResource(R.string.guided_comparison_cancel_content_description)
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -279,6 +292,15 @@ private fun CameraCaptureScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (guidedStep == GuidedCompareStep.AwaitingCapture) {
+                GuidedCaptureBanner(
+                    message = guidedCaptureBannerMessage,
+                    detail = guidedCaptureBannerDetail,
+                    cancelContentDescription = guidedCancelContentDescription,
+                    onCancel = onGuidedCancel,
+                )
+            }
+
             if (mode == CameraMode.Cinematic) {
                 cinematicConfig?.let { config ->
                     OverlayChip {
@@ -405,17 +427,21 @@ private fun CameraCaptureScreen(
                             // Merge (single-EV or HDR) off the main thread, then finish,
                             // persist and report; shared by both burst paths.
                             val mergeAndSave: (suspend () -> Pair<Frame, String>) -> Unit = { produce ->
+                                // Snapshot once at merge start: if the user dismisses the guided
+                                // banner mid-burst, this capture finishes as a normal one.
+                                val guidedCaptureActive = guidedStep == GuidedCompareStep.AwaitingCapture
                                 scope.launch(Dispatchers.Default) {
                                     try {
                                         val (merged, message) = produce()
                                         // Finishing (tone/saturation/contrast) is optional and
                                         // only ever applies to the merged burst frame.
-                                        // Night captures use the night finishing profile;
-                                        // every other merge (standard or HDR) uses DEFAULT.
+                                        // Night captures use the night finishing profile,
+                                        // regardless of preset; every other merge (standard or
+                                        // HDR) uses the user's chosen rendition preset.
                                         val finishingParams = if (settings.nightModeEnabled) {
                                             NightPipeline.FINISHING_PARAMS
                                         } else {
-                                            FinishingParams.DEFAULT
+                                            settings.finishingPreset.params
                                         }
                                         val output = if (settings.applyFinishingToMergedPhotos) {
                                             FinishingPipeline.apply(merged, finishingParams)
@@ -423,9 +449,14 @@ private fun CameraCaptureScreen(
                                             merged
                                         }
                                         val processedUri = MergedPhotoSaver.save(context, output)
-                                        // Also persist the unprocessed merge input, as-is, for
-                                        // on-device A/B comparison when the user opted in.
-                                        val capturedPair = if (settings.saveComparisonPair) {
+                                        // A guided-comparison capture always fills slot A with the
+                                        // processed result and leaves slot B unset until the user
+                                        // picks the reference photo on the Compare screen. Otherwise,
+                                        // persist the unprocessed merge input, as-is, for on-device
+                                        // A/B comparison when the user opted in via settings.
+                                        val capturedPair = if (guidedCaptureActive) {
+                                            ComparePair(processedUri = processedUri, referenceUri = null)
+                                        } else if (settings.saveComparisonPair) {
                                             val referenceUri = MergedPhotoSaver.save(
                                                 context,
                                                 merged,
@@ -437,7 +468,10 @@ private fun CameraCaptureScreen(
                                         }
                                         withContext(Dispatchers.Main) {
                                             isBurstInProgress = false
-                                            if (capturedPair != null) {
+                                            if (guidedCaptureActive && capturedPair != null) {
+                                                onComparePairCaptured(capturedPair)
+                                                onGuidedCaptureCompleted()
+                                            } else if (capturedPair != null) {
                                                 onComparePairCaptured(capturedPair)
                                                 val result = snackbarHostState.showSnackbar(
                                                     message = message,
@@ -636,6 +670,48 @@ private fun OverlayChip(
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         content()
+    }
+}
+
+/**
+ * Step-1 instruction for the guided comparison flow: shown while the user is back on
+ * Camera to capture the shot that will fill slot A. [onCancel] resets the whole guided
+ * flow (see [GuidedCompareFlow.advance]) rather than just hiding this banner, so the
+ * next burst goes back to behaving like a normal capture.
+ */
+@Composable
+private fun GuidedCaptureBanner(
+    message: String,
+    detail: String,
+    cancelContentDescription: String,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    OverlayChip(modifier = modifier.widthIn(max = 320.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = message,
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyLarge.copy(shadow = OverlayTextShadow),
+                )
+                Text(
+                    text = detail,
+                    color = Color.White.copy(alpha = 0.85f),
+                    style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
+                )
+            }
+            IconButton(
+                onClick = onCancel,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = cancelContentDescription,
+                    tint = Color.White,
+                )
+            }
+        }
     }
 }
 

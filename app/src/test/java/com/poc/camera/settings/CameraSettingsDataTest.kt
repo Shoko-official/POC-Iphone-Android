@@ -16,6 +16,7 @@ class CameraSettingsDataTest {
         assertEquals(false, default.hdrBurstEnabled)
         assertEquals(false, default.saveComparisonPair)
         assertEquals(false, default.nightModeEnabled)
+        assertEquals(false, default.superResolutionEnabled)
         assertEquals(FinishingPreset.Natural, default.finishingPreset)
     }
 
@@ -43,6 +44,7 @@ class CameraSettingsDataTest {
             hdrBurstEnabled = true,
             saveComparisonPair = true,
             nightModeEnabled = true,
+            superResolutionEnabled = true,
             finishingPreset = FinishingPreset.Vivid,
         )
 
@@ -53,6 +55,7 @@ class CameraSettingsDataTest {
             hdrBurstEnabled = original.hdrBurstEnabled,
             saveComparisonPair = original.saveComparisonPair,
             nightModeEnabled = original.nightModeEnabled,
+            superResolutionEnabled = original.superResolutionEnabled,
             finishingPresetName = original.finishingPreset.name,
         )
 
@@ -69,6 +72,7 @@ class CameraSettingsDataTest {
                 hdrBurstEnabled = false,
                 saveComparisonPair = false,
                 nightModeEnabled = false,
+                superResolutionEnabled = false,
                 finishingPresetName = preset.name,
             )
 
@@ -85,6 +89,7 @@ class CameraSettingsDataTest {
             hdrBurstEnabled = false,
             saveComparisonPair = false,
             nightModeEnabled = false,
+            superResolutionEnabled = false,
             finishingPresetName = null,
         )
         val invalid = CameraSettingsData.fromRaw(
@@ -94,6 +99,7 @@ class CameraSettingsDataTest {
             hdrBurstEnabled = false,
             saveComparisonPair = false,
             nightModeEnabled = false,
+            superResolutionEnabled = false,
             finishingPresetName = "not-a-real-preset",
         )
 
@@ -111,6 +117,7 @@ class CameraSettingsDataTest {
                 hdrBurstEnabled = false,
                 saveComparisonPair = false,
                 nightModeEnabled = false,
+                superResolutionEnabled = false,
             )
 
             assertEquals(look, decoded.defaultCinematicLook)
@@ -126,6 +133,7 @@ class CameraSettingsDataTest {
             hdrBurstEnabled = true,
             saveComparisonPair = true,
             nightModeEnabled = true,
+            superResolutionEnabled = true,
         )
 
         assertEquals(CameraSettingsData.DEFAULT_BURST_FRAME_COUNT, decoded.burstFrameCount)
@@ -134,6 +142,7 @@ class CameraSettingsDataTest {
         assertEquals(true, decoded.hdrBurstEnabled)
         assertEquals(true, decoded.saveComparisonPair)
         assertEquals(true, decoded.nightModeEnabled)
+        assertEquals(true, decoded.superResolutionEnabled)
     }
 
     @Test
@@ -145,6 +154,7 @@ class CameraSettingsDataTest {
             hdrBurstEnabled = false,
             saveComparisonPair = false,
             nightModeEnabled = false,
+            superResolutionEnabled = false,
         )
 
         assertEquals(CameraSettingsData.DEFAULT.defaultCinematicLook, decoded.defaultCinematicLook)

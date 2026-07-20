@@ -123,6 +123,31 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            SettingsSection(title = stringResource(R.string.settings_section_super_resolution)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_super_resolution_label),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            text = stringResource(R.string.settings_super_resolution_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = settings.superResolutionEnabled,
+                        onCheckedChange = { onSettingsChanged(settings.copy(superResolutionEnabled = it)) },
+                    )
+                }
+            }
+
+            HorizontalDivider()
+
             SettingsSection(title = stringResource(R.string.settings_section_merged_photos)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),

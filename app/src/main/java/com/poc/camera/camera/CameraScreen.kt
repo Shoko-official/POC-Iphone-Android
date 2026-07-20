@@ -81,6 +81,7 @@ import com.poc.camera.pipeline.FinishingPipeline
 import com.poc.camera.pipeline.Frame
 import com.poc.camera.pipeline.HdrMergePipeline
 import com.poc.camera.pipeline.NightPipeline
+import com.poc.camera.pipeline.SuperResolution
 import com.poc.camera.settings.CameraSettingsData
 import java.util.concurrent.Executors
 import kotlinx.coroutines.Dispatchers
@@ -217,6 +218,7 @@ private fun CameraCaptureScreen(
     val burstButtonLabel = stringResource(R.string.burst_button)
     val burstMergeSuccessMessage = stringResource(R.string.burst_merge_success)
     val hdrBurstMergeSuccessMessage = stringResource(R.string.burst_hdr_merge_success)
+    val superResolutionSuccessMessage = stringResource(R.string.burst_super_resolution_success)
     val burstMergeFailureMessage = stringResource(R.string.burst_merge_failure)
     val cinematicFps24Label = stringResource(R.string.cinematic_fps_24)
     val cinematicFpsDefaultLabel = stringResource(R.string.cinematic_fps_default)
@@ -542,6 +544,26 @@ private fun CameraCaptureScreen(
                                                     result.usedFrameCount,
                                                     result.fused.width,
                                                     result.fused.height,
+                                                )
+                                            }
+                                        }
+                                    } else if (settings.superResolutionEnabled) {
+                                        // Standard single-EV burst super-resolved onto a
+                                        // doubled grid. Night and HDR are handled above and
+                                        // take priority; SR runs only on the plain still path.
+                                        controller.arm(frameCapture) { burst ->
+                                            Log.d(
+                                                TAG,
+                                                "SR burst captured ${burst.frames.size} frames " +
+                                                    "in ${burst.captureSpanMillis} ms",
+                                            )
+                                            mergeAndSave {
+                                                val result = SuperResolution.superResolve(burst.frames)
+                                                result.superResolved to String.format(
+                                                    superResolutionSuccessMessage,
+                                                    result.usedFrameCount,
+                                                    result.superResolved.width,
+                                                    result.superResolved.height,
                                                 )
                                             }
                                         }

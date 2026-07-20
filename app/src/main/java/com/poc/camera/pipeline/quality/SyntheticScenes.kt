@@ -117,7 +117,40 @@ object SyntheticScenes {
     fun burst(name: String, baseSeed: Long, count: Int): List<Frame> {
         require(count >= 1) { "count must be >= 1" }
         val clean = clean(name)
+        return burstOf(clean, baseSeed, count)
+    }
+
+    /**
+     * A [count]-frame noisy burst of an arbitrary [clean] frame, using the same
+     * per-frame seed derivation as [burst]. Lets the AWB gate build a burst from a
+     * colour-cast ground truth without touching the named-scene set.
+     */
+    fun burstOf(clean: Frame, baseSeed: Long, count: Int): List<Frame> {
+        require(count >= 1) { "count must be >= 1" }
         return (0 until count).map { i -> noisy(clean, baseSeed + i * SEED_STRIDE) }
+    }
+
+    /**
+     * Simulates a scene lit by a coloured illuminant: multiplies each channel of
+     * [frame] by the per-channel gains ([rGain], [gGain], [bGain]) and clamps to
+     * [0, 255], leaving alpha opaque and the timestamp intact. Applied to a CLEAN
+     * frame (before the sensor-noise model) it models a real illuminant cast, e.g. a
+     * warm 1.25/1.0/0.8 tungsten cast or a cool 0.85/1.0/1.2 shade cast.
+     */
+    fun withColorCast(frame: Frame, rGain: Double, gGain: Double, bGain: Double): Frame {
+        val src = frame.argb
+        val out = IntArray(src.size)
+        for (i in src.indices) {
+            val pixel = src[i]
+            val r = ((pixel shr 16) and 0xFF)
+            val g = ((pixel shr 8) and 0xFF)
+            val b = (pixel and 0xFF)
+            val nr = (r * rGain).roundToInt().coerceIn(0, 255)
+            val ng = (g * gGain).roundToInt().coerceIn(0, 255)
+            val nb = (b * bGain).roundToInt().coerceIn(0, 255)
+            out[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+        }
+        return Frame(frame.width, frame.height, out, frame.timestampMillis)
     }
 
     /** A bracketed HDR burst: [HDR_FRAMES_PER_EV] noisy captures at each of [HDR_EVS]. */

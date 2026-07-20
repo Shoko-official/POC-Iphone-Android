@@ -112,4 +112,6 @@
     <string name="guided_comparison_reference_banner">Now pick the reference shot of the same scene</string>
     <string name="guided_comparison_reference_banner_detail">Pick the same scene shot on your other phone using Load reference below.</string>
     <string name="guided_comparison_cancel_content_description">Cancel guided comparison</string>
+    <string name="last_capture_content_description">View last capture</string>
+    <string name="last_capture_open_failure">Couldn\'t find an app to open this.</string>
 </resources>

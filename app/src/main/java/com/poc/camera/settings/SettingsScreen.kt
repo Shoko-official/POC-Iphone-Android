@@ -237,6 +237,25 @@ fun SettingsScreen(
                         onCheckedChange = { onSettingsChanged(settings.copy(hdrVideoEnabled = it)) },
                     )
                 }
+                Text(
+                    text = stringResource(R.string.settings_video_quality_label),
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                // Honest UI (issue #72): this screen has no bound camera session, so there is
+                // no device-supported quality set to probe (VideoQualityLogic.supportedChoices
+                // exists for a hypothetical device-aware settings screen, but wiring it here
+                // would mean binding a camera just to populate Settings - out of scope). Every
+                // option is always shown and selectable; the description below states the
+                // actual fallback behaviour instead of faking per-option availability.
+                VideoQualityControl(
+                    selected = settings.videoQuality,
+                    onSelected = { onSettingsChanged(settings.copy(videoQuality = it)) },
+                )
+                Text(
+                    text = stringResource(R.string.settings_video_quality_description),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             HorizontalDivider()
@@ -326,6 +345,26 @@ private fun finishingPresetDescription(preset: FinishingPreset): Int = when (pre
     FinishingPreset.Natural -> R.string.finishing_preset_natural_description
     FinishingPreset.Vivid -> R.string.finishing_preset_vivid_description
     FinishingPreset.Detail -> R.string.finishing_preset_detail_description
+}
+
+@Composable
+private fun VideoQualityControl(
+    selected: VideoQualityChoice,
+    onSelected: (VideoQualityChoice) -> Unit,
+) {
+    val options = VideoQualityChoice.entries.toList()
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        options.forEachIndexed { index, quality ->
+            SegmentedButton(
+                modifier = Modifier.heightIn(min = 48.dp),
+                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                selected = selected == quality,
+                onClick = { onSelected(quality) },
+                label = { Text(text = quality.displayLabel) },
+                icon = {},
+            )
+        }
+    }
 }
 
 @Composable

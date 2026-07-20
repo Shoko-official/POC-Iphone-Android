@@ -57,6 +57,23 @@ class FinishingPipelineTest {
     }
 
     @Test
+    fun localContrastIsWiredAndOnByDefault() {
+        // The DEFAULT ships local tone mapping on (kept conservative so the quality
+        // floors stay green), and the strength field must genuinely feed through the
+        // pipeline: a clearly non-zero strength changes the output.
+        assertTrue("DEFAULT should ship local tone mapping on", FinishingParams.DEFAULT.localContrast > 0.0)
+
+        val input = naturalFrame()
+        val withLocal = FinishingPipeline.apply(input, FinishingParams.DEFAULT.copy(localContrast = 0.6))
+        val withoutLocal = FinishingPipeline.apply(input, FinishingParams.DEFAULT.copy(localContrast = 0.0))
+
+        assertFalse(
+            "local contrast strength must actually change the output",
+            withLocal.argb.contentEquals(withoutLocal.argb),
+        )
+    }
+
+    @Test
     fun pipelineIsDeterministic() {
         val input = naturalFrame()
         val first = FinishingPipeline.apply(input)

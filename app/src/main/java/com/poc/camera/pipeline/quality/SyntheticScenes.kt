@@ -224,8 +224,17 @@ object SyntheticScenes {
         return frame(out)
     }
 
-    private fun texture(): Frame =
-        frame(texturedCanvas(seed = 0x7E57L, cell = 4, low = 0, high = 255))
+    private fun texture(): Frame {
+        // Gray-pack the raw intensity lattice into opaque R=G=B pixels. Every other
+        // scene routes its values through [gray]; texture historically passed the raw
+        // canvas straight to [frame], leaving intensity in the blue channel only
+        // (R=G=0), which violates this fixture's grayscale invariant and gives every
+        // pixel a tiny Rec.601 luma (0.114*B). That was invisible to per-channel
+        // finishing but breaks any luma-based op (e.g. [LocalToneMapper]); fixed and
+        // re-baselined 2026-07-20.
+        val canvas = texturedCanvas(seed = 0x7E57L, cell = 4, low = 0, high = 255)
+        return frame(IntArray(canvas.size) { gray(canvas[it]) })
+    }
 
     private fun gradients(): Frame {
         val out = IntArray(SIZE * SIZE)

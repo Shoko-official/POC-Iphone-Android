@@ -63,11 +63,14 @@ class HdrGoldenPipelineRegressionTest {
         const val SEED = 0xDEC1L
 
         // MEASURED BASELINES, 2026-07-20 (seed 0xDEC1, HdrMergePipeline + Finishing).
-        // Full-frame actuals: psnr 20.815  ssim 0.6692  mae 18.333.
-        // Floors = actual * 0.98 (PSNR/SSIM); ceiling = actual * 1.02 (MAE).
+        // RE-MEASURED after local tone mapping (LocalToneMapper on at
+        // FinishingParams.DEFAULT.localContrast); the changes stay within the existing
+        // tolerance, so the floors are kept.
+        // Full-frame actuals: psnr 20.834  ssim 0.6679  mae 18.198 (was 20.815 / 0.6692
+        // / 18.333). Floors = actual * 0.98 (PSNR/SSIM); ceiling = actual * 1.02 (MAE).
         // Dynamic-range actuals over the tone-mapped truth's deciles:
-        //   shadow:    fused 15.045  vs best single 20.032  (fusion wins by 4.99)
-        //   highlight: fused 4.691   vs best single 5.486   (fusion wins by 0.80)
+        //   shadow:    fused 15.045  vs best single 20.027  (fusion wins by 4.98)
+        //   highlight: fused 4.379   vs best single 5.435   (fusion wins by 1.06)
         const val MIN_PSNR = 20.39
         const val MIN_SSIM = 0.655
         const val MAX_MAE = 18.70

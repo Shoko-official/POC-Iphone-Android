@@ -20,8 +20,8 @@
     <string name="video_capture_success">Video saved: %1$s</string>
     <string name="video_capture_failure">Failed to save video. Please try again.</string>
     <string name="burst_button">Burst</string>
-    <string name="burst_merge_success">Merged %1$d frames</string>
-    <string name="burst_hdr_merge_success">HDR merged %1$d frames</string>
+    <string name="burst_merge_success">Merged %1$d frames at %2$d×%3$d</string>
+    <string name="burst_hdr_merge_success">HDR merged %1$d frames at %2$d×%3$d</string>
     <string name="burst_merge_failure">Failed to merge burst. Please try again.</string>
     <string name="look_neutral">Neutral</string>
     <string name="look_cinematic">Cinematic look</string>

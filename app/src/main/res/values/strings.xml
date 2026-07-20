@@ -41,4 +41,26 @@
     <string name="settings_apply_finishing_description">Adds tone, saturation and contrast finishing when a burst is merged and saved.</string>
     <string name="settings_section_cinematic">Cinematic mode</string>
     <string name="settings_default_look_label">Default look</string>
+    <string name="settings_section_comparison">Comparison</string>
+    <string name="settings_save_comparison_pair_label">Save comparison pair</string>
+    <string name="settings_save_comparison_pair_description">Also saves the unprocessed merge input alongside the processed photo (RAW_ prefix) so it can be opened in the Compare viewer.</string>
+    <string name="compare_action">Compare</string>
+    <string name="compare_title">Compare</string>
+    <string name="compare_back_content_description">Back</string>
+    <string name="compare_mode_side_by_side">Side by side</string>
+    <string name="compare_mode_swipe">Swipe</string>
+    <string name="compare_label_processed">Processed</string>
+    <string name="compare_label_reference">Reference</string>
+    <string name="compare_empty_processed">No processed capture yet. Capture a burst with \"Save comparison pair\" enabled in Settings.</string>
+    <string name="compare_empty_reference">No reference photo. Load one below.</string>
+    <string name="compare_load_failure">Couldn\'t load this image.</string>
+    <string name="compare_load_reference_label">Load reference</string>
+    <string name="compare_metrics_show">Show metrics</string>
+    <string name="compare_metrics_hide">Hide metrics</string>
+    <string name="compare_metrics_psnr">PSNR</string>
+    <string name="compare_metrics_ssim">SSIM</string>
+    <string name="compare_metrics_mae">MAE</string>
+    <string name="compare_metrics_not_comparable">Different dimensions - metrics unavailable. When the reference is an external photo, framing and resolution rarely match exactly, so any numbers shown are indicative only.</string>
+    <string name="compare_metrics_computing">Computing metrics…</string>
+    <string name="compare_swipe_divider_content_description">Comparison divider position</string>
 </resources>

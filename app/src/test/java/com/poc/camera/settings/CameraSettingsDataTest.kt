@@ -14,6 +14,7 @@ class CameraSettingsDataTest {
         assertEquals(true, default.applyFinishingToMergedPhotos)
         assertEquals(VideoLook.Neutral, default.defaultCinematicLook)
         assertEquals(false, default.hdrBurstEnabled)
+        assertEquals(false, default.saveComparisonPair)
     }
 
     @Test
@@ -38,6 +39,7 @@ class CameraSettingsDataTest {
             applyFinishingToMergedPhotos = false,
             defaultCinematicLook = VideoLook.Cinematic,
             hdrBurstEnabled = true,
+            saveComparisonPair = true,
         )
 
         val decoded = CameraSettingsData.fromRaw(
@@ -45,6 +47,7 @@ class CameraSettingsDataTest {
             applyFinishingToMergedPhotos = original.applyFinishingToMergedPhotos,
             defaultCinematicLookName = original.defaultCinematicLook.name,
             hdrBurstEnabled = original.hdrBurstEnabled,
+            saveComparisonPair = original.saveComparisonPair,
         )
 
         assertEquals(original, decoded)
@@ -58,6 +61,7 @@ class CameraSettingsDataTest {
                 applyFinishingToMergedPhotos = true,
                 defaultCinematicLookName = look.name,
                 hdrBurstEnabled = false,
+                saveComparisonPair = false,
             )
 
             assertEquals(look, decoded.defaultCinematicLook)
@@ -71,12 +75,14 @@ class CameraSettingsDataTest {
             applyFinishingToMergedPhotos = false,
             defaultCinematicLookName = "not-a-real-look",
             hdrBurstEnabled = true,
+            saveComparisonPair = true,
         )
 
         assertEquals(CameraSettingsData.DEFAULT_BURST_FRAME_COUNT, decoded.burstFrameCount)
         assertEquals(false, decoded.applyFinishingToMergedPhotos)
         assertEquals(CameraSettingsData.DEFAULT.defaultCinematicLook, decoded.defaultCinematicLook)
         assertEquals(true, decoded.hdrBurstEnabled)
+        assertEquals(true, decoded.saveComparisonPair)
     }
 
     @Test
@@ -86,6 +92,7 @@ class CameraSettingsDataTest {
             applyFinishingToMergedPhotos = true,
             defaultCinematicLookName = null,
             hdrBurstEnabled = false,
+            saveComparisonPair = false,
         )
 
         assertEquals(CameraSettingsData.DEFAULT.defaultCinematicLook, decoded.defaultCinematicLook)

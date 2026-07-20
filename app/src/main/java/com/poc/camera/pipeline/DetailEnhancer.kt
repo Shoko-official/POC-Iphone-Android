@@ -128,8 +128,45 @@ object DetailEnhancer {
     /** MAD-to-sigma scaling for Gaussian noise (matches [GhostRejector]). */
     private const val MAD_TO_SIGMA = 1.4826
 
-    /** Applies detail enhancement to [frame], preserving its dimensions and alpha. */
-    fun apply(frame: Frame, params: DetailParams = DetailParams()): Frame {
+    /**
+     * Applies detail enhancement to [frame], preserving its dimensions and alpha. The
+     * coring knee is derived from the whole-frame detail-plane noise sigma
+     * ([computeKnee]).
+     */
+    fun apply(frame: Frame, params: DetailParams = DetailParams()): Frame =
+        applyInternal(frame, params, knee = null)
+
+    /**
+     * Detail enhancement with a PRE-COMPUTED coring [knee] (see [computeKnee]) instead of
+     * estimating the noise sigma from this frame's own detail plane. This is the tiled
+     * finishing entry point: the knee is a GLOBAL statistic, so estimating it per tile
+     * would give each tile a different sharpen and leave seams. The whole-frame path
+     * ([apply]) estimates the knee from the same detail plane it then sharpens, so passing
+     * `computeKnee(frame, params)` here reproduces [apply] exactly.
+     */
+    fun apply(frame: Frame, params: DetailParams, knee: Double): Frame =
+        applyInternal(frame, params, knee)
+
+    /**
+     * The coring knee `coringSigmaFactor * robustSigma(detail)` for [frame] under
+     * [params] -- the global statistic [apply] computes internally, exposed so the tiled
+     * path can compute it once (on a downsampled analysis frame, or the whole frame for a
+     * bit-identity reference) and feed it to the per-tile [apply] overload.
+     */
+    fun computeKnee(frame: Frame, params: DetailParams = DetailParams()): Double {
+        val src = frame.argb
+        val luma = DoubleArray(src.size) { i ->
+            val pixel = src[i]
+            R_WEIGHT * ((pixel shr 16) and 0xFF) +
+                G_WEIGHT * ((pixel shr 8) and 0xFF) +
+                B_WEIGHT * (pixel and 0xFF)
+        }
+        val base = GuidedFilter.selfGuided(luma, frame.width, frame.height, params.radius, params.eps)
+        val detail = DoubleArray(src.size) { luma[it] - base[it] }
+        return params.coringSigmaFactor * robustSigma(detail)
+    }
+
+    private fun applyInternal(frame: Frame, params: DetailParams, knee: Double?): Frame {
         val src = frame.argb
         val luma = DoubleArray(src.size) { i ->
             val pixel = src[i]
@@ -140,7 +177,7 @@ object DetailEnhancer {
 
         val base = GuidedFilter.selfGuided(luma, frame.width, frame.height, params.radius, params.eps)
         val detail = DoubleArray(src.size) { luma[it] - base[it] }
-        val knee = params.coringSigmaFactor * robustSigma(detail)
+        val effectiveKnee = knee ?: params.coringSigmaFactor * robustSigma(detail)
 
         // Local range of the ORIGINAL luma for the anti-overshoot clamp.
         val lo = erode3x3(luma, frame.width, frame.height)
@@ -152,7 +189,7 @@ object DetailEnhancer {
         PipelineParallel.parallelRows(src.size) { start, end ->
             for (i in start until end) {
                 val inLuma = luma[i]
-                val sharp = inLuma + params.gain * coring(detail[i], knee)
+                val sharp = inLuma + params.gain * coring(detail[i], effectiveKnee)
                 val clamped = sharp.coerceIn(lo[i] - params.overshootAllowance, hi[i] + params.overshootAllowance)
                 val ratio = ((clamped + RATIO_EPS) / (inLuma + RATIO_EPS)).coerceIn(RATIO_MIN, RATIO_MAX)
 

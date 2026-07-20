@@ -20,6 +20,7 @@ object BurstImageCapture {
     fun capture(
         imageCapture: ImageCapture,
         executor: java.util.concurrent.Executor,
+        maxBurstPixels: Int = BurstImageGeometry.MAX_BURST_PIXELS,
         onResult: (Result<Frame>) -> Unit,
     ) {
         imageCapture.takePicture(
@@ -27,7 +28,7 @@ object BurstImageCapture {
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
                     val result = try {
-                        Result.success(JpegBurstFrameDecoder.decode(image))
+                        Result.success(JpegBurstFrameDecoder.decode(image, maxBurstPixels))
                     } catch (t: Throwable) {
                         Result.failure(t)
                     } finally {

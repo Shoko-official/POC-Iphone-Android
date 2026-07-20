@@ -13,41 +13,67 @@ package com.poc.camera.camera
 object BurstImageGeometry {
 
     /**
-     * Upper bound on decoded pixels per burst frame (~8 MP).
+     * Default upper bound on decoded pixels per burst frame (~12.5 MP), i.e. native
+     * resolution for a typical 12 MP sensor. This is the HIGH-memory-class value; a
+     * low-memory device gets the conservative ~8 MP bound instead via
+     * [maxBurstPixelsFor]. Callers that know the device memory class should prefer that
+     * helper; this constant is the ceiling and the default for the pure geometry tests.
      *
-     * Raised from the former ~3.5 MP interim bound after the issue #42 pipeline work
-     * made the pure merge + finishing stages row-parallel with deterministic (bit-
-     * identical) output, so the per-frame CPU cost of a larger frame now scales
-     * near-linearly across cores instead of serially. Measured on the pure pipeline,
-     * finishing scales ~4.3x from 3 MP to 12 MP (a 4x pixel jump), confirming there is
-     * headroom above the old bound.
+     * Raised from the former ~8 MP bound once issue #54 moved finishing to a bounded-
+     * memory tiled path ([com.poc.camera.pipeline.TiledFinishing]): the finishing
+     * guided-filter intermediates -- previously the dominant transient allocation, near a
+     * gigabyte of `DoubleArray`s at 12.5 MP if run whole-frame -- are now capped at a
+     * per-tile working set independent of frame size. That removes the finishing peak
+     * that had held the decode bound down, leaving the resident burst frames as the
+     * governing cost.
      *
      * ## Memory math (the real constraint, honestly)
      *
      * An ARGB frame costs 4 bytes/pixel, so at this bound one decoded frame is
-     * ~8 MP * 4 = ~32 MB. Decoding is one-in-flight (each JPEG is decoded and downscaled
-     * before the next), so decode itself peaks at ~32 MB, but the MERGE holds all N
-     * frames at once: a 6-frame burst is ~6 * 32 = ~192 MB of IntArrays resident, plus
-     * the merge accumulators (four DoubleArrays over the pixel count, ~256 MB at 8 MP)
-     * and the finishing guided-filter intermediates (several transient DoubleArrays).
-     * That is a heavy but workable footprint on a mid-range device and a deliberate step
-     * DOWN from a full 12 MP bound, where six frames alone would be ~288 MB of IntArrays
-     * before any working memory -- too aggressive for low-RAM devices.
+     * ~12.5 MP * 4 = ~50 MB. Decoding is one-in-flight (each JPEG is decoded and
+     * downscaled before the next), so decode itself peaks at ~50 MB, but the MERGE holds
+     * all N frames at once: a 6-frame burst is ~6 * 50 = ~300 MB of IntArrays resident,
+     * plus the merge accumulators (four `DoubleArray`s over the pixel count, ~400 MB at
+     * 12.5 MP). The finishing stage no longer adds a full-resolution float peak on top --
+     * [com.poc.camera.pipeline.TiledFinishing] keeps it near ~180 MB regardless -- so the
+     * merge itself is now the peak. ~300 MB of resident frame data plus the merge
+     * accumulators is why this native bound is gated to high-memory devices only.
      *
-     * ## Chosen compromise and the device-side follow-up
+     * ## Device-class gating
      *
-     * 8 MP is a measured compromise: it roughly doubles usable resolution over the old
-     * 3.5 MP bound while keeping the resident merge footprint under ~200 MB of frame
-     * data. A larger 4032x3024 sensor therefore still decodes at inSampleSize 2 to
-     * ~3.0 MP (unchanged), but sensors between ~8 and ~12 MP now decode at full (sample
-     * 1) instead of being halved. The proper device-side fix -- picking the bound from
-     * the device's memory class ([android.app.ActivityManager.getMemoryClass], so a
-     * high-RAM phone can go to native 12 MP while a low-RAM phone stays conservative),
-     * and/or tiled/streaming merge to drop the "all frames resident" cost -- is the
-     * remaining issue #42 follow-up and intentionally out of scope for this pure-pipeline
-     * change.
+     * [maxBurstPixelsFor] picks the bound from the device memory class: a device below
+     * [HIGH_MEMORY_CLASS_MB] stays at the conservative [CONSERVATIVE_MAX_BURST_PIXELS]
+     * (~8 MP, ~192 MB of resident frames for a 6-frame burst), while a higher-RAM device
+     * takes this native bound. A 4032x3024 (~12.2 MP) sensor now decodes at full (sample
+     * 1) on a high-memory device and at inSampleSize 2 (~3.0 MP) on a low-memory one.
      */
-    const val MAX_BURST_PIXELS: Int = 8_000_000
+    const val MAX_BURST_PIXELS: Int = 12_500_000
+
+    /**
+     * Conservative decoded-pixel bound (~8 MP) for low-memory-class devices, keeping the
+     * resident 6-frame burst footprint near ~192 MB. This is the previous default bound;
+     * [maxBurstPixelsFor] returns it below [HIGH_MEMORY_CLASS_MB].
+     */
+    const val CONSERVATIVE_MAX_BURST_PIXELS: Int = 8_000_000
+
+    /**
+     * Memory class (MB, from [android.app.ActivityManager.getMemoryClass]) at or above
+     * which the native [MAX_BURST_PIXELS] bound is used. A 256 MB (or larger) per-app
+     * heap comfortably holds the ~300 MB resident + accumulator peak of a native 12.5 MP
+     * burst; below it the conservative bound applies. (Devices frequently expose a larger
+     * effective heap than the reported class, so gating on 256 is deliberately safe.)
+     */
+    const val HIGH_MEMORY_CLASS_MB: Int = 256
+
+    /**
+     * The per-frame decoded-pixel bound for a device whose [android.app.ActivityManager]
+     * reports [memoryClassMb] MB: [MAX_BURST_PIXELS] (~12.5 MP native) at or above
+     * [HIGH_MEMORY_CLASS_MB], else [CONSERVATIVE_MAX_BURST_PIXELS] (~8 MP). Pure step
+     * function so it is unit tested without Android. A non-positive class is treated as
+     * unknown and gets the conservative bound.
+     */
+    fun maxBurstPixelsFor(memoryClassMb: Int): Int =
+        if (memoryClassMb >= HIGH_MEMORY_CLASS_MB) MAX_BURST_PIXELS else CONSERVATIVE_MAX_BURST_PIXELS
 
     /**
      * Smallest power-of-two `inSampleSize` for which a [sourceWidth] x [sourceHeight]

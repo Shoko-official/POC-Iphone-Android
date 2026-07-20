@@ -26,12 +26,12 @@ import java.nio.ByteBuffer
  */
 object JpegBurstFrameDecoder {
 
-    fun decode(image: ImageProxy): Frame {
+    fun decode(image: ImageProxy, maxBurstPixels: Int = BurstImageGeometry.MAX_BURST_PIXELS): Frame {
         val jpegBytes = image.planes[0].buffer.toByteArray()
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, bounds)
-        val sampleSize = BurstImageGeometry.inSampleSizeFor(bounds.outWidth, bounds.outHeight)
+        val sampleSize = BurstImageGeometry.inSampleSizeFor(bounds.outWidth, bounds.outHeight, maxBurstPixels)
 
         val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
         val decoded = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, options)

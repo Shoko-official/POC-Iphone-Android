@@ -74,6 +74,22 @@ class FinishingPipelineTest {
     }
 
     @Test
+    fun chromaDenoiseIsWiredAndOnByDefault() {
+        // The DEFAULT ships chroma denoise on, and the strength field must genuinely
+        // feed through: a clearly non-zero strength changes the output.
+        assertTrue("DEFAULT should ship chroma denoise on", FinishingParams.DEFAULT.chromaDenoise > 0.0)
+
+        val input = naturalFrame()
+        val withDenoise = FinishingPipeline.apply(input, FinishingParams.DEFAULT.copy(chromaDenoise = 0.8))
+        val withoutDenoise = FinishingPipeline.apply(input, FinishingParams.DEFAULT.copy(chromaDenoise = 0.0))
+
+        assertFalse(
+            "chroma denoise strength must actually change the output",
+            withDenoise.argb.contentEquals(withoutDenoise.argb),
+        )
+    }
+
+    @Test
     fun pipelineIsDeterministic() {
         val input = naturalFrame()
         val first = FinishingPipeline.apply(input)

@@ -71,8 +71,15 @@ class HdrGoldenPipelineRegressionTest {
         // Dynamic-range actuals over the tone-mapped truth's deciles:
         //   shadow:    fused 15.045  vs best single 20.027  (fusion wins by 4.98)
         //   highlight: fused 4.379   vs best single 5.435   (fusion wins by 1.06)
-        const val MIN_PSNR = 20.39
+        //
+        // RE-MEASURED after luma-guided chroma denoise (ChromaDenoiser on at
+        // FinishingParams.DEFAULT.chromaDenoise = 0.6), 2026-07-20. The HDR scene is
+        // grayscale, so the denoiser strips residual per-channel chroma speckle:
+        // psnr 20.834->20.931, mae 18.198->18.027 (ssim 0.6679->0.6662, a hair softer
+        // from chroma-reconstruction rounding but far above the floor). PSNR floor
+        // raised and MAE ceiling tightened to the new actuals; SSIM floor kept.
+        const val MIN_PSNR = 20.5
         const val MIN_SSIM = 0.655
-        const val MAX_MAE = 18.70
+        const val MAX_MAE = 18.39
     }
 }

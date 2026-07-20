@@ -9,6 +9,9 @@ package com.poc.camera.pipeline
  * disables it). The strength linearly scales the local base compression and detail
  * gain from an identity (0) up to [LocalToneParams] defaults (1), so a modest value
  * gives a gentle local lift without over-cooking scene-referred detail.
+ *
+ * [chromaDenoise] is the strength of the luma-guided [ChromaDenoiser] pass in [0, 1]
+ * (0 disables it), blending filtered chroma over the original.
  */
 data class FinishingParams(
     val shadowsLift: Double,
@@ -16,6 +19,7 @@ data class FinishingParams(
     val saturation: Double,
     val contrast: Double,
     val localContrast: Double = 0.0,
+    val chromaDenoise: Double = 0.0,
 ) {
     companion object {
         /**
@@ -24,7 +28,9 @@ data class FinishingParams(
          * are hand-tuned defaults for this proof-of-concept, not a colour-calibrated
          * look. [localContrast] is kept modest so every quality-harness scene
          * (including pure gradients, where any local contrast deviates from the ideal
-         * ramp) stays within its committed regression floor.
+         * ramp) stays within its committed regression floor. [chromaDenoise] ships on
+         * at a modest-but-effective strength, tuned against the colorchart golden so it
+         * clearly improves chroma metrics without violating any existing floor.
          */
         val DEFAULT = FinishingParams(
             shadowsLift = 0.12,
@@ -32,6 +38,7 @@ data class FinishingParams(
             saturation = 1.08,
             contrast = 1.05,
             localContrast = 0.03,
+            chromaDenoise = 0.6,
         )
     }
 }
@@ -41,10 +48,13 @@ data class FinishingParams(
  * curve, then luma-preserving saturation, then pivot contrast. Returns a new [Frame]
  * with the source dimensions and timestamp and alpha forced opaque.
  *
- * Ordering rationale: [LocalToneMapper] runs FIRST, on the still scene-referred-ish
- * merged data, so its guided base/detail split sees the untouched local contrast and
- * its shadow lift / highlight taming operate before the global curve redistributes
- * tones. The global [ToneCurve] then runs last of the tonal stages, shaping the
+ * Ordering rationale: [ChromaDenoiser] runs FIRST, on the merged data, so chroma
+ * speckle is cleaned before any rendition stage can amplify it -- in particular before
+ * [Saturation] boosts colour and before [LocalToneMapper]'s per-channel luma ratio
+ * redistributes it. [LocalToneMapper] then runs on the denoised, still
+ * scene-referred-ish data, so its guided base/detail split sees the untouched local
+ * contrast and its shadow lift / highlight taming operate before the global curve
+ * redistributes tones. The global [ToneCurve] then runs last of the tonal stages, shaping the
  * overall response after local adjustments are baked in; putting the global curve
  * first would feed the guided filter an already-compressed signal and blunt the local
  * pass. Saturation and contrast follow, as pure per-pixel colour finishing.
@@ -54,10 +64,15 @@ data class FinishingParams(
 object FinishingPipeline {
 
     fun apply(frame: Frame, params: FinishingParams = FinishingParams.DEFAULT): Frame {
-        val locallyMapped = if (params.localContrast > 0.0) {
-            LocalToneMapper.apply(frame, localToneParams(params.localContrast))
+        val denoised = if (params.chromaDenoise > 0.0) {
+            ChromaDenoiser.apply(frame, params.chromaDenoise)
         } else {
             frame
+        }
+        val locallyMapped = if (params.localContrast > 0.0) {
+            LocalToneMapper.apply(denoised, localToneParams(params.localContrast))
+        } else {
+            denoised
         }
         val toned = ToneCurve(params.shadowsLift, params.highlightRolloff).apply(locallyMapped)
         val saturated = Saturation.apply(toned, params.saturation)

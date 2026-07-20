@@ -85,4 +85,67 @@ class GuidedFilterTest {
             GuidedFilter.selfGuided(DoubleArray(16), 4, 4, 1, 0.0)
         }
     }
+
+    @Test
+    fun crossGuidedWithGuideEqualToInputMatchesSelfGuided() {
+        // The cross-guided estimator reduces to the self-guided one when guide == input
+        // (cov(I,I) = var(I)), so the two must agree to within float rounding.
+        var state = 12345L
+        val image = DoubleArray(48 * 40) {
+            state = (state * 1664525L + 1013904223L) and 0xFFFFFFFFL
+            ((state ushr 8) and 0xFF).toDouble()
+        }
+        val self = GuidedFilter.selfGuided(image, 48, 40, 8, eps)
+        val cross = GuidedFilter.guided(image, image, 48, 40, 8, eps)
+        for (i in image.indices) assertEquals(self[i], cross[i], 1e-6)
+    }
+
+    @Test
+    fun flatGuideReducesToBoxMeanOfInput() {
+        // With a flat guide, varG = 0 and covIG = 0 everywhere, so a = 0 and b = meanI:
+        // the output carries no guide structure and collapses to boxMean(b) =
+        // boxMean(boxMean(input)) (the standard guided-filter form, mean of a and b).
+        val width = 40
+        val height = 32
+        var state = 777L
+        val input = DoubleArray(width * height) {
+            state = (state * 1664525L + 1013904223L) and 0xFFFFFFFFL
+            ((state ushr 8) and 0xFF).toDouble()
+        }
+        val flatGuide = DoubleArray(width * height) { 91.0 }
+        val out = GuidedFilter.guided(input, flatGuide, width, height, 6, eps)
+        val doubleMean = BoxBlur.blur(BoxBlur.blur(input, width, height, 6), width, height, 6)
+        for (i in input.indices) assertEquals(doubleMean[i], out[i], 1e-6)
+    }
+
+    @Test
+    fun lumaGuidedChromaEdgeIsPreserved() {
+        // A colour edge whose chroma step co-occurs with a luma step: the luma guide
+        // steps, so the guided filter must carry the chroma step through nearly intact
+        // (the same edge-preservation the self-guided halo test asserts).
+        val width = 128
+        val height = 24
+        val half = width / 2
+        // Luma steps 60 -> 180; chroma steps +80 -> -80 across the same boundary.
+        val luma = DoubleArray(width * height) { i -> if ((i % width) < half) 60.0 else 180.0 }
+        val chroma = DoubleArray(width * height) { i -> if ((i % width) < half) 80.0 else -80.0 }
+        val chromaStep = 160.0
+
+        val out = GuidedFilter.guided(chroma, luma, width, height, 16, eps)
+
+        // Interior of each side (away from the boundary) keeps its chroma value, and no
+        // sample overshoots the true chroma range.
+        for (i in out.indices) {
+            assertTrue("chroma ${out[i]} overshoots below -80", out[i] >= -80.0 - 0.01)
+            assertTrue("chroma ${out[i]} overshoots above 80", out[i] <= 80.0 + 0.01)
+        }
+        // The full step survives across the boundary (sampled a few px on each side).
+        val y = height / 2
+        val leftChroma = out[y * width + (half - 4)]
+        val rightChroma = out[y * width + (half + 4)]
+        assertTrue(
+            "preserved chroma step ${leftChroma - rightChroma} should keep >=94% of $chromaStep",
+            (leftChroma - rightChroma) >= 0.94 * chromaStep,
+        )
+    }
 }

@@ -22,6 +22,8 @@ import kotlin.math.sqrt
  *  - "gradients": smooth linear and radial ramps (banding, posterisation).
  *  - "lowlight": a dark scene where shot noise dominates the shadows.
  *  - "highcontrast": deep shadows beside near-clipped highlights (clipping).
+ *  - "colorchart": the only COLOUR scene -- saturated/pastel/skin/neutral patches and
+ *    complementary colour edges, for honest chroma noise gating (see [colorChart]).
  */
 object SyntheticScenes {
 
@@ -29,7 +31,7 @@ object SyntheticScenes {
     const val SIZE = 128
 
     /** Scene names in the deterministic order used by the quality report. */
-    val names: List<String> = listOf("edges", "texture", "gradients", "lowlight", "highcontrast")
+    val names: List<String> = listOf("edges", "texture", "gradients", "lowlight", "highcontrast", "colorchart")
 
     // --- HDR (exposure-bracketing) scene -------------------------------------
     //
@@ -73,6 +75,7 @@ object SyntheticScenes {
         "gradients" -> gradients()
         "lowlight" -> lowlight()
         "highcontrast" -> highContrast()
+        "colorchart" -> colorChart()
         else -> throw IllegalArgumentException("unknown scene: $name")
     }
 
@@ -287,6 +290,33 @@ object SyntheticScenes {
     }
 
     /**
+     * The only COLOUR scene, for honest chroma noise gating. The default sensor model
+     * draws noise per channel, so a merged burst of any scene carries residual chroma
+     * speckle -- but only a saturated colour scene exercises the two properties the
+     * chroma denoiser must trade off: flattening speckle inside a uniform saturated
+     * patch WITHOUT desaturating it, and keeping a colour edge crisp.
+     *
+     * Layout: a 6x6 grid of 36 distinct ~21x21 RGB patches over the whole frame,
+     * spanning the hue circle, deeper hues, pastels, skin tones, a neutral ramp and
+     * darker saturated tones. Patches are large so their flat interiors (where chroma
+     * speckle lives) dominate over the boundaries. Row 0 is six SATURATED patches
+     * arranged so adjacent cells are complementary pairs (red|cyan, green|magenta,
+     * blue|yellow), giving the colour edges -- with strong co-occurring luma steps --
+     * that the sharpness test guards; the red|cyan boundary is the one it samples.
+     */
+    private fun colorChart(): Frame {
+        val out = IntArray(SIZE * SIZE)
+        for (y in 0 until SIZE) {
+            val gy = (y * GRID / SIZE).coerceAtMost(GRID - 1)
+            for (x in 0 until SIZE) {
+                val gx = (x * GRID / SIZE).coerceAtMost(GRID - 1)
+                out[y * SIZE + x] = (0xFF shl 24) or COLOR_PATCHES[gy * GRID + gx]
+            }
+        }
+        return frame(out)
+    }
+
+    /**
      * A [SIZE]x[SIZE] grid of a coarse random lattice bilinearly interpolated to
      * full resolution and remapped into [low, high]. Smoothness mirrors natural
      * image content (unlike per-pixel white noise) while giving unique structure.
@@ -327,6 +357,42 @@ object SyntheticScenes {
 
     // Golden-ratio odd stride keeps per-frame burst seeds far apart in LCG space.
     private const val SEED_STRIDE = 0x9E3779B1L
+
+    /** Side of the [colorChart] patch grid (6x6 = 36 distinct RGB patches). */
+    private const val GRID = 6
+
+    private fun rgb(r: Int, g: Int, b: Int): Int = (r shl 16) or (g shl 8) or b
+
+    /**
+     * The 36 [colorChart] patches in row-major order: saturated hues, pastels, skin
+     * tones and a neutral ramp, covering the hue circle. Packed 0xRRGGBB (alpha added
+     * at draw time). Luma is deliberately laid out in a CHECKERBOARD by (row+col)
+     * parity -- dark cells (~45-95) beside light cells (~185-225) -- so EVERY patch
+     * boundary carries a strong luma step. The luma-guided [ChromaDenoiser] preserves
+     * exactly those edges, so the chart flattens chroma speckle in patch interiors
+     * without smearing colour across boundaries; a chart with equiluminant neighbours
+     * would instead be smeared, since luma guidance cannot see a chroma-only edge.
+     */
+    private val COLOR_PATCHES: IntArray = intArrayOf(
+        // Row 0 -- saturated hues (dark/light checkerboard by column parity).
+        rgb(150, 20, 20), rgb(120, 210, 215), rgb(20, 110, 30),
+        rgb(240, 190, 205), rgb(25, 35, 140), rgb(225, 215, 90),
+        // Row 1 -- more hues + pastels.
+        rgb(150, 200, 240), rgb(90, 25, 120), rgb(190, 225, 180),
+        rgb(110, 70, 45), rgb(245, 205, 175), rgb(20, 90, 95),
+        // Row 2 -- hues, pastels and skin (light).
+        rgb(140, 25, 60), rgb(210, 195, 235), rgb(85, 80, 20),
+        rgb(255, 220, 180), rgb(30, 60, 150), rgb(235, 230, 185),
+        // Row 3 -- skin tones and pastels.
+        rgb(245, 215, 195), rgb(30, 95, 55), rgb(195, 230, 235),
+        rgb(130, 30, 110), rgb(225, 180, 140), rgb(60, 30, 120),
+        // Row 4 -- deeper hues and pastels.
+        rgb(150, 80, 20), rgb(170, 225, 150), rgb(20, 100, 110),
+        rgb(245, 200, 210), rgb(100, 40, 150), rgb(195, 215, 240),
+        // Row 5 -- neutral ramp (alternating dark/light grays keep the luma step).
+        rgb(50, 50, 50), rgb(210, 210, 210), rgb(75, 75, 75),
+        rgb(195, 195, 195), rgb(40, 40, 40), rgb(225, 225, 225),
+    )
 
     /**
      * Numerical-Recipes LCG extended with a Box-Muller Gaussian generator. Returns

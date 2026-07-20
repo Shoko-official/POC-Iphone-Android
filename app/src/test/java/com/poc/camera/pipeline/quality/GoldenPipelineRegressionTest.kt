@@ -118,6 +118,20 @@ class GoldenPipelineRegressionTest {
         // SSIM dips a hair on the gray scenes (chroma reconstruction rounds RGB, so
         // integer luma shifts by <=1 code value); it stays far above each committed
         // SSIM floor, and per the never-lower rule those SSIM floors are kept.
+        //
+        // UNCHANGED after detail enhancement (DetailEnhancer on at
+        // FinishingParams.DEFAULT.detailEnhance = 0.08), 2026-07-20. Sharpening a merged
+        // step that still carries residual noise deviates from the CLEAN truth, so the
+        // DEFAULT strength is gated to keep every scene inside its committed tolerance
+        // rather than re-baselining. Actuals (off -> on at 0.08):
+        //   edges        39.514->39.346  mae 1.918->1.951  (sensitive: +1.7% MAE, within tol)
+        //   texture      39.370->39.338  mae 2.005->2.012
+        //   gradients    41.333->41.327  mae 1.694->1.695
+        //   lowlight     40.403->40.397  mae 1.918->1.919
+        //   highcontrast 37.989->37.989  mae 2.564->2.564  (flat)
+        //   colorchart   33.032->33.036  mae 4.125->4.123  (a hair better: crisper luma edges)
+        // No floor moved: the sensitive "edges" scene stays within its 2% ceiling
+        // (1.951 < 1.96) and nothing improved beyond tolerance, so no floor is raised.
         val FLOORS = listOf(
             Floor("edges", minPsnr = 38.7, minSsim = 0.972, maxMae = 1.96),
             Floor("texture", minPsnr = 38.5, minSsim = 0.977, maxMae = 2.05),

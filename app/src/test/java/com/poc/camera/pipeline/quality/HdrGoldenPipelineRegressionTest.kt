@@ -78,6 +78,12 @@ class HdrGoldenPipelineRegressionTest {
         // psnr 20.834->20.931, mae 18.198->18.027 (ssim 0.6679->0.6662, a hair softer
         // from chroma-reconstruction rounding but far above the floor). PSNR floor
         // raised and MAE ceiling tightened to the new actuals; SSIM floor kept.
+        //
+        // UNCHANGED after detail enhancement (DetailEnhancer on at
+        // FinishingParams.DEFAULT.detailEnhance = 0.08), 2026-07-20. The HDR scene is a
+        // smooth radiance ramp with fine texture; at the conservative DEFAULT strength
+        // the fused actuals barely move (psnr 20.931->20.930, ssim 0.6662->0.6660, mae
+        // 18.027->18.027) and stay well within the committed floors, so none are moved.
         const val MIN_PSNR = 20.5
         const val MIN_SSIM = 0.655
         const val MAX_MAE = 18.39

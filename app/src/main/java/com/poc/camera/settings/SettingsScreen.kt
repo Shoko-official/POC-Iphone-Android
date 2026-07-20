@@ -123,6 +123,31 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            SettingsSection(title = stringResource(R.string.settings_section_comparison)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_save_comparison_pair_label),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            text = stringResource(R.string.settings_save_comparison_pair_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = settings.saveComparisonPair,
+                        onCheckedChange = { onSettingsChanged(settings.copy(saveComparisonPair = it)) },
+                    )
+                }
+            }
+
+            HorizontalDivider()
+
             SettingsSection(title = stringResource(R.string.settings_section_cinematic)) {
                 Text(
                     text = stringResource(R.string.settings_default_look_label),

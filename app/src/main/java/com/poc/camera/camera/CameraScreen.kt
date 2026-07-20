@@ -41,6 +41,7 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -71,6 +72,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.poc.camera.R
+import com.poc.camera.compare.ComparePair
 import com.poc.camera.pipeline.BurstMergePipeline
 import com.poc.camera.pipeline.FinishingParams
 import com.poc.camera.pipeline.FinishingPipeline
@@ -93,6 +95,9 @@ private val SecondaryControlSlotWidth = 88.dp
 fun CameraScreen(
     settings: CameraSettingsData,
     onOpenSettings: () -> Unit,
+    comparePair: ComparePair?,
+    onOpenCompare: () -> Unit,
+    onComparePairCaptured: (ComparePair) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -136,6 +141,9 @@ fun CameraScreen(
         CameraPermissionState.Granted -> CameraCaptureScreen(
             settings = settings,
             onOpenSettings = onOpenSettings,
+            comparePair = comparePair,
+            onOpenCompare = onOpenCompare,
+            onComparePairCaptured = onComparePairCaptured,
             modifier = modifier,
         )
         CameraPermissionState.Denied -> CameraPermissionRationale(
@@ -150,6 +158,9 @@ fun CameraScreen(
 private fun CameraCaptureScreen(
     settings: CameraSettingsData,
     onOpenSettings: () -> Unit,
+    comparePair: ComparePair?,
+    onOpenCompare: () -> Unit,
+    onComparePairCaptured: (ComparePair) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -194,6 +205,7 @@ private fun CameraCaptureScreen(
     val cinematicLookLabel = stringResource(R.string.look_cinematic)
     val recordingIndicatorContentDescription = stringResource(R.string.recording_indicator_content_description)
     val openSettingsContentDescription = stringResource(R.string.open_settings_content_description)
+    val compareActionLabel = stringResource(R.string.compare_action)
     val previewBindFailureMessage = stringResource(R.string.preview_bind_failure_message)
     val previewRetryLabel = stringResource(R.string.preview_bind_retry)
 
@@ -307,6 +319,21 @@ private fun CameraCaptureScreen(
             )
         }
 
+        // Only offered once this session has actually produced a processed/reference
+        // pair (i.e. "Save comparison pair" was on for at least one burst).
+        if (comparePair != null) {
+            Button(
+                onClick = onOpenCompare,
+                enabled = !isRecording,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(16.dp)
+                    .heightIn(min = 48.dp),
+            ) {
+                Text(text = compareActionLabel)
+            }
+        }
+
         if (previewBindError) {
             OverlayChip(modifier = Modifier.align(Alignment.Center)) {
                 Column(
@@ -371,10 +398,33 @@ private fun CameraCaptureScreen(
                                         } else {
                                             merged
                                         }
-                                        MergedPhotoSaver.save(context, output)
+                                        val processedUri = MergedPhotoSaver.save(context, output)
+                                        // Also persist the unprocessed merge input, as-is, for
+                                        // on-device A/B comparison when the user opted in.
+                                        val capturedPair = if (settings.saveComparisonPair) {
+                                            val referenceUri = MergedPhotoSaver.save(
+                                                context,
+                                                merged,
+                                                prefix = MergedPhotoSaver.RAW_PREFIX,
+                                            )
+                                            ComparePair(processedUri = processedUri, referenceUri = referenceUri)
+                                        } else {
+                                            null
+                                        }
                                         withContext(Dispatchers.Main) {
                                             isBurstInProgress = false
-                                            snackbarHostState.showSnackbar(message)
+                                            if (capturedPair != null) {
+                                                onComparePairCaptured(capturedPair)
+                                                val result = snackbarHostState.showSnackbar(
+                                                    message = message,
+                                                    actionLabel = compareActionLabel,
+                                                )
+                                                if (result == SnackbarResult.ActionPerformed) {
+                                                    onOpenCompare()
+                                                }
+                                            } else {
+                                                snackbarHostState.showSnackbar(message)
+                                            }
                                         }
                                     } catch (e: Exception) {
                                         withContext(Dispatchers.Main) {

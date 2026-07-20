@@ -11,13 +11,17 @@ import java.io.IOException
 
 /**
  * Persists a merged [Frame] as a JPEG via MediaStore, reusing the single-shot
- * photo value builders but with a distinct "MRG_" display-name prefix. Thin
+ * photo value builders but with a distinct display-name prefix - "MRG_" for the
+ * finished/processed result, "RAW_" for the unprocessed comparison reference (the
+ * merge input frame, saved as-is when "Save comparison pair" is enabled). Thin
  * Android adapter (untested); the deterministic pixel work lives in the pipeline
  * package and is covered by unit tests.
  */
 object MergedPhotoSaver {
 
-    fun save(context: Context, frame: Frame): Uri {
+    const val RAW_PREFIX = "RAW_"
+
+    fun save(context: Context, frame: Frame, prefix: String = MERGED_PREFIX): Uri {
         val bitmap = Bitmap.createBitmap(
             frame.argb,
             frame.width,
@@ -28,7 +32,7 @@ object MergedPhotoSaver {
         val values = PhotoMediaStoreValuesFactory.create(
             timestampMillis = frame.timestampMillis,
             supportsPendingFlag = supportsPendingFlag,
-            prefix = MERGED_PREFIX,
+            prefix = prefix,
         )
         val contentValues = PhotoContentValuesAdapter.toContentValues(values)
         val resolver = context.contentResolver

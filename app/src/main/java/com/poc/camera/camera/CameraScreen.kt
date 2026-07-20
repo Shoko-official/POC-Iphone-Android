@@ -14,6 +14,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
+import androidx.camera.core.ZoomState
 import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
@@ -24,6 +25,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,6 +39,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
@@ -57,6 +62,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -90,6 +96,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.Observer
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.poc.camera.R
 import com.poc.camera.compare.ComparePair
@@ -241,10 +248,19 @@ private fun CameraCaptureScreen(
     var recordingStartMillis by remember { mutableLongStateOf(0L) }
     var elapsedMillis by remember { mutableLongStateOf(0L) }
     var cinematicConfig by remember { mutableStateOf<CinematicConfig?>(null) }
-    var focusMeteringHandle by remember { mutableStateOf<FocusMeteringHandle?>(null) }
+    var cameraHandle by remember { mutableStateOf<CameraHandle?>(null) }
     var reticleState by remember { mutableStateOf<FocusReticleState>(FocusReticleState.Idle) }
     var focusRequestSeq by remember { mutableLongStateOf(0L) }
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
+    // Desired zoom ratio, carried across mode switches (CameraPreview re-applies it, clamped
+    // to the new camera's range, on every rebind - see CameraPreview.reapplyPendingZoom).
+    var zoomRatio by rememberSaveable { mutableFloatStateOf(1f) }
+    var isPinching by remember { mutableStateOf(false) }
+    // Mirrors the bound camera's live androidx.camera.core.ZoomState (min/max/current ratio
+    // actually in effect), observed via a plain Observer rather than
+    // androidx.compose.runtime.livedata - that module isn't a project dependency and adding
+    // it for a single LiveData would be a new dependency for one call site.
+    var liveZoomState by remember { mutableStateOf<ZoomState?>(null) }
     // Settings only seed the initial look for a fresh session; once the user picks a
     // look in Cinematic mode it stays under their control for the rest of the session.
     var videoLook by rememberSaveable { mutableStateOf(settings.defaultCinematicLook) }
@@ -275,6 +291,7 @@ private fun CameraCaptureScreen(
     val recordingIndicatorContentDescription = stringResource(R.string.recording_indicator_content_description)
     val openSettingsContentDescription = stringResource(R.string.open_settings_content_description)
     val tapToFocusContentDescription = stringResource(R.string.tap_to_focus_content_description)
+    val zoomResetContentDescriptionTemplate = stringResource(R.string.zoom_reset_content_description)
     val compareActionLabel = stringResource(R.string.compare_action)
     val previewBindFailureMessage = stringResource(R.string.preview_bind_failure_message)
     val previewRetryLabel = stringResource(R.string.preview_bind_retry)
@@ -313,6 +330,26 @@ private fun CameraCaptureScreen(
         }
     }
 
+    // Mirrors the bound camera's ZoomState into Compose state. observeForever (rather than
+    // observe(lifecycleOwner, ...)) ties this purely to cameraHandle's own lifetime - a fresh
+    // handle from a rebind always gets a fresh observer, and the stale one is removed
+    // in onDispose rather than relying on the LiveData/LifecycleOwner machinery to do it.
+    DisposableEffect(cameraHandle) {
+        val handle = cameraHandle
+        if (handle == null) {
+            onDispose {}
+        } else {
+            val observer = Observer<ZoomState> { liveZoomState = it }
+            handle.cameraInfo.zoomState.observeForever(observer)
+            onDispose {
+                handle.cameraInfo.zoomState.removeObserver(observer)
+                // Bind is tearing down (mode switch/retry/leaving composition); the value
+                // is stale until the next handle's observer fires.
+                liveZoomState = null
+            }
+        }
+    }
+
     Box(modifier = modifier) {
         CameraPreview(
             mode = mode,
@@ -325,13 +362,14 @@ private fun CameraCaptureScreen(
                 settings.burstFrameCount
             },
             retryToken = previewRetryToken,
+            desiredZoomRatio = zoomRatio,
             modifier = Modifier.fillMaxSize(),
             onImageCaptureReady = { imageCapture = it },
             onVideoCaptureReady = { videoCapture = it },
             onBurstControllerReady = { burstController = it },
             onExposureControllerReady = { exposureController = it },
             onCinematicConfigReady = { cinematicConfig = it },
-            onFocusMeteringReady = { focusMeteringHandle = it },
+            onCameraReady = { cameraHandle = it },
             onBindError = { previewBindError = true },
         )
 
@@ -343,9 +381,9 @@ private fun CameraCaptureScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .onSizeChanged { previewSize = it }
-                .pointerInput(focusMeteringHandle) {
+                .pointerInput(cameraHandle) {
                     detectTapGestures { tapOffset ->
-                        val handle = focusMeteringHandle ?: return@detectTapGestures
+                        val handle = cameraHandle ?: return@detectTapGestures
                         val bounds = previewSize
                         if (bounds.width <= 0 || bounds.height <= 0) return@detectTapGestures
 
@@ -392,6 +430,45 @@ private fun CameraCaptureScreen(
                             },
                             ContextCompat.getMainExecutor(context),
                         )
+                    }
+                }
+                // Pinch-to-zoom as a second, independent pointerInput layer rather than
+                // folding it into detectTapGestures above (which only ever sees taps) or
+                // reusing the stock detectTransformGestures (which also tracks single-pointer
+                // pan/zoom past touch slop - that would intermittently consume and steal a
+                // slightly-moved single-finger tap from the detector above). This detector
+                // only starts tracking, and only ever consumes pointer changes, once a second
+                // pointer is down, so a one-finger tap is always left fully unconsumed for the
+                // tap detector's own (default requireUnconsumed = true) awaitFirstDown to see.
+                // Verified by reasoning over Compose's consumption model rather than an
+                // instrumented/device test - see final report for the residual risk.
+                .pointerInput(cameraHandle) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        do {
+                            val event = awaitPointerEvent()
+                            val pressedChanges = event.changes.filter { it.pressed }
+                            if (pressedChanges.size >= 2) {
+                                val zoomChange = event.calculateZoom()
+                                if (zoomChange != 1f) {
+                                    isPinching = true
+                                    val zoomState = liveZoomState
+                                    val newRatio = ZoomLogic.computeNewRatio(
+                                        current = zoomRatio,
+                                        gestureFactor = zoomChange,
+                                        min = zoomState?.minZoomRatio ?: 1f,
+                                        max = zoomState?.maxZoomRatio ?: 1f,
+                                    )
+                                    zoomRatio = newRatio
+                                    // Fire-and-forget: CameraX coalesces rapid setZoomRatio
+                                    // calls, so awaiting each future here would only add
+                                    // needless per-frame latency to the gesture.
+                                    cameraHandle?.cameraControl?.setZoomRatio(newRatio)
+                                    pressedChanges.forEach { it.consume() }
+                                }
+                            }
+                        } while (event.changes.any { it.pressed })
+                        isPinching = false
                     }
                 }
                 .semantics {
@@ -445,6 +522,27 @@ private fun CameraCaptureScreen(
                     detail = guidedCaptureBannerDetail,
                     cancelContentDescription = guidedCancelContentDescription,
                     onCancel = onGuidedCancel,
+                )
+            }
+
+            if (ZoomLogic.shouldShowChip(zoomRatio, isPinching)) {
+                ZoomChip(
+                    ratio = zoomRatio,
+                    resetContentDescription = String.format(
+                        zoomResetContentDescriptionTemplate,
+                        ZoomLogic.formatLabel(zoomRatio),
+                    ),
+                    onReset = {
+                        val zoomState = liveZoomState
+                        val resetRatio = ZoomLogic.computeNewRatio(
+                            current = 1f,
+                            gestureFactor = 1f,
+                            min = zoomState?.minZoomRatio ?: 1f,
+                            max = zoomState?.maxZoomRatio ?: 1f,
+                        )
+                        zoomRatio = resetRatio
+                        cameraHandle?.cameraControl?.setZoomRatio(resetRatio)
+                    },
                 )
             }
 
@@ -837,6 +935,40 @@ private fun OverlayChip(
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         content()
+    }
+}
+
+/**
+ * Current-zoom indicator: an [OverlayChip] that's also a 48dp tap target resetting zoom to
+ * 1x (clamped to the device's own floor - see [ZoomLogic]). The visible label is the actual
+ * clamped ratio, never an aspirational "1.0x", so a device whose minimum sits above 1x is
+ * never misrepresented. Callers gate visibility with [ZoomLogic.shouldShowChip] - this
+ * composable itself has no opinion on when it should be shown.
+ */
+@Composable
+private fun ZoomChip(
+    ratio: Float,
+    resetContentDescription: String,
+    onReset: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .background(OverlayScrimColor, shape = RoundedCornerShape(16.dp))
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .clickable(onClick = onReset)
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                contentDescription = resetContentDescription
+            }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = ZoomLogic.formatLabel(ratio),
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
+        )
     }
 }
 

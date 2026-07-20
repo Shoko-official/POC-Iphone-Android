@@ -3,11 +3,14 @@ package com.poc.camera.camera
 import android.Manifest
 import android.app.Activity
 import android.app.ActivityManager
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -23,6 +26,7 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -69,21 +73,26 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -97,6 +106,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.Observer
@@ -104,6 +114,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.poc.camera.R
 import com.poc.camera.compare.ComparePair
 import com.poc.camera.compare.GuidedCompareStep
+import com.poc.camera.compare.ReferenceImageLoader
 import com.poc.camera.pipeline.BurstMergePipeline
 import com.poc.camera.pipeline.FinishingPipeline
 import com.poc.camera.pipeline.Frame
@@ -148,6 +159,36 @@ private val FocusReticleStrokeWidthResolved = 3.dp
 private val FocusReticleFocusingColor = Color.White
 private val FocusReticleSuccessColor = Color(0xFF7CFF7A)
 private val FocusReticleFailureColor = Color(0xFFFF6B57)
+
+// Last-capture thumbnail (issue #74): ~56dp visual size doubles as the touch target
+// (already clears the 48dp minimum used elsewhere on this screen, e.g. ZoomChip), so no
+// extra padding is needed just to satisfy touch-target size. The decode target is smaller
+// than the visual size to keep the async load cheap - it only ever needs to fill a 56dp
+// tile, never a full-screen preview like ReferenceImageLoader's other call site in
+// CompareScreen.
+private val LastCaptureThumbnailSize = 56.dp
+private val LastCaptureThumbnailCornerRadius = 12.dp
+private const val LAST_CAPTURE_THUMBNAIL_DECODE_PX = 112
+
+/** Round-trips [LastCapture] through its URI and media type as strings, the same pattern
+ * MainActivity's ComparePairSaver uses for ComparePair, so the thumbnail survives a
+ * rotation without being written to disk - see [LastCapture]'s own doc for why. */
+private val LastCaptureSaver: Saver<LastCapture?, List<String>> = Saver(
+    save = { capture ->
+        if (capture == null) {
+            emptyList()
+        } else {
+            listOf(capture.uri.toString(), capture.mediaType.name)
+        }
+    },
+    restore = { saved ->
+        if (saved.size == 2) {
+            LastCapture(uri = saved[0].toUri(), mediaType = CaptureMediaType.valueOf(saved[1]))
+        } else {
+            null
+        }
+    },
+)
 
 @Composable
 fun CameraScreen(
@@ -323,6 +364,12 @@ private fun CameraCaptureScreen(
     var videoLook by rememberSaveable { mutableStateOf(settings.defaultCinematicLook) }
     var previewBindError by remember { mutableStateOf(false) }
     var previewRetryToken by remember { mutableIntStateOf(0) }
+    // Last-capture thumbnail (issue #74): set on every successful capture path below
+    // (single photo, merged burst/HDR/night/SR, video finalize) - session-scoped only,
+    // see LastCapture's doc for why this is rememberSaveable rather than persisted.
+    var lastCapture by rememberSaveable(stateSaver = LastCaptureSaver) {
+        mutableStateOf<LastCapture?>(null)
+    }
 
     val captureSuccessMessage = stringResource(R.string.capture_success)
     val captureFailureMessage = stringResource(R.string.capture_failure)
@@ -374,6 +421,8 @@ private fun CameraCaptureScreen(
     val guidedCaptureBannerMessage = stringResource(R.string.guided_comparison_camera_banner)
     val guidedCaptureBannerDetail = stringResource(R.string.guided_comparison_camera_banner_detail)
     val guidedCancelContentDescription = stringResource(R.string.guided_comparison_cancel_content_description)
+    val lastCaptureContentDescription = stringResource(R.string.last_capture_content_description)
+    val lastCaptureOpenFailureMessage = stringResource(R.string.last_capture_open_failure)
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -503,11 +552,13 @@ private fun CameraCaptureScreen(
                                 snackbarHostState.showSnackbar(videoFailureMessage)
                             }
                         } else {
+                            val savedUri = event.outputResults.outputUri
+                            lastCapture = LastCapture(savedUri, CaptureMediaType.Video)
                             scope.launch {
                                 snackbarHostState.showSnackbar(
                                     String.format(
                                         videoSuccessMessage,
-                                        event.outputResults.outputUri,
+                                        savedUri,
                                     ),
                                 )
                             }
@@ -525,6 +576,7 @@ private fun CameraCaptureScreen(
                 context = context,
                 imageCapture = capture,
                 onSuccess = { uri ->
+                    lastCapture = LastCapture(uri, CaptureMediaType.Photo)
                     scope.launch {
                         snackbarHostState.showSnackbar(
                             String.format(captureSuccessMessage, uri),
@@ -938,6 +990,37 @@ private fun CameraCaptureScreen(
             }
         }
 
+        // Last-capture thumbnail (issue #74): bottom-start, clear of the shutter cluster
+        // (bottom-center) and its flanking burst/look controls, and clear of the top-start
+        // Compare button/top-end Settings gear. Absent entirely until the first capture
+        // this session - no empty placeholder box - per lastCapture's own nullability.
+        lastCapture?.let { capture ->
+            LastCaptureThumbnail(
+                capture = capture,
+                contentDescription = lastCaptureContentDescription,
+                onTap = {
+                    val queriedMimeType = context.contentResolver.getType(capture.uri)
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(
+                            capture.uri,
+                            LastCaptureMimeType.resolve(queriedMimeType, capture.mediaType),
+                        )
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    try {
+                        context.startActivity(intent)
+                    } catch (e: ActivityNotFoundException) {
+                        scope.launch {
+                            snackbarHostState.showSnackbar(lastCaptureOpenFailureMessage)
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(16.dp),
+            )
+        }
+
         OverlayChip(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -1042,6 +1125,7 @@ private fun CameraCaptureScreen(
                                         }
                                         withContext(Dispatchers.Main) {
                                             isBurstInProgress = false
+                                            lastCapture = LastCapture(processedUri, CaptureMediaType.Photo)
                                             if (guidedCaptureActive && capturedPair != null) {
                                                 onComparePairCaptured(capturedPair)
                                                 onGuidedCaptureCompleted()
@@ -1248,6 +1332,109 @@ private fun ZoomChip(
             color = Color.White,
             style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
         )
+    }
+}
+
+/**
+ * Last-capture thumbnail (issue #74): a 56dp rounded-corner tile showing the most recent
+ * capture this session, tappable to open it in the system viewer. The tile itself is
+ * always the [OverlayScrimColor] dark scrim so there is no flash of white/blank content
+ * before the async decode in [rememberLastCaptureThumbnailBitmap] resolves; a video
+ * capture always gets the small play-triangle overlay, whether or not a real decoded
+ * frame loaded underneath it (see [loadVideoThumbnail] for the pre-API-29 fallback that
+ * leaves the bitmap null).
+ */
+@Composable
+private fun LastCaptureThumbnail(
+    capture: LastCapture,
+    contentDescription: String,
+    onTap: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val bitmap = rememberLastCaptureThumbnailBitmap(capture)
+    Box(
+        modifier = modifier
+            .size(LastCaptureThumbnailSize)
+            .clip(RoundedCornerShape(LastCaptureThumbnailCornerRadius))
+            .background(OverlayScrimColor)
+            .clickable(onClick = onTap)
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                this.contentDescription = contentDescription
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        bitmap?.let {
+            Image(
+                bitmap = it.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        if (capture.mediaType == CaptureMediaType.Video) {
+            Canvas(modifier = Modifier.size(18.dp)) {
+                val path = Path().apply {
+                    moveTo(0f, 0f)
+                    lineTo(size.width, size.height / 2f)
+                    lineTo(0f, size.height)
+                    close()
+                }
+                drawPath(path, color = Color.White)
+            }
+        }
+    }
+}
+
+/**
+ * Decodes [capture]'s thumbnail off the main thread, cached per URI (the `remember`/
+ * `LaunchedEffect` both key on it, matching the pattern CompareScreen uses for its own
+ * reference/processed slots) so switching back to an already-seen capture never
+ * re-decodes. Photo URIs reuse [ReferenceImageLoader] - the same downsample-then-decode
+ * path CompareScreen's slots use - just with a much smaller target size. Video URIs have
+ * no equivalent decoder in this project, so they go through [loadVideoThumbnail] instead;
+ * see its doc for the pre-API-29 fallback.
+ */
+@Composable
+private fun rememberLastCaptureThumbnailBitmap(capture: LastCapture): Bitmap? {
+    val context = LocalContext.current
+    var bitmap by remember(capture.uri) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(capture.uri) {
+        bitmap = withContext(Dispatchers.IO) {
+            when (capture.mediaType) {
+                CaptureMediaType.Photo -> ReferenceImageLoader.loadDownsampled(
+                    context = context,
+                    uri = capture.uri,
+                    maxDimensionPx = LAST_CAPTURE_THUMBNAIL_DECODE_PX,
+                )
+                CaptureMediaType.Video -> loadVideoThumbnail(context, capture.uri)
+            }
+        }
+    }
+    return bitmap
+}
+
+/**
+ * `ContentResolver.loadThumbnail` (the only generic, codec-agnostic MediaStore video
+ * thumbnail API) only exists from API 29 onward - minSdk for this project is 26, so
+ * below that this always returns null and [LastCaptureThumbnail] falls back to its plain
+ * dark tile plus the play-triangle overlay instead of a decoded frame. Any decode failure
+ * (revoked grant, missing row, codec error) is swallowed the same way
+ * [ReferenceImageLoader] swallows its own failures - a missing thumbnail is a normal,
+ * recoverable UI state, not an exceptional one.
+ */
+private fun loadVideoThumbnail(context: Context, uri: Uri): Bitmap? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+        return null
+    }
+    return try {
+        context.contentResolver.loadThumbnail(
+            uri,
+            android.util.Size(LAST_CAPTURE_THUMBNAIL_DECODE_PX, LAST_CAPTURE_THUMBNAIL_DECODE_PX),
+            null,
+        )
+    } catch (e: Exception) {
+        null
     }
 }
 

@@ -79,6 +79,7 @@ import com.poc.camera.pipeline.FinishingParams
 import com.poc.camera.pipeline.FinishingPipeline
 import com.poc.camera.pipeline.Frame
 import com.poc.camera.pipeline.HdrMergePipeline
+import com.poc.camera.pipeline.NightPipeline
 import com.poc.camera.settings.CameraSettingsData
 import java.util.concurrent.Executors
 import kotlinx.coroutines.Dispatchers
@@ -254,7 +255,13 @@ private fun CameraCaptureScreen(
         CameraPreview(
             mode = mode,
             look = videoLook,
-            burstFrameCount = settings.burstFrameCount,
+            // Night mode always captures a longer burst, regardless of the user's normal
+            // frame-count preference, since low light needs the extra frames.
+            burstFrameCount = if (settings.nightModeEnabled) {
+                NightPipeline.NIGHT_BURST_FRAME_COUNT
+            } else {
+                settings.burstFrameCount
+            },
             retryToken = previewRetryToken,
             modifier = Modifier.fillMaxSize(),
             onImageCaptureReady = { imageCapture = it },
@@ -403,8 +410,15 @@ private fun CameraCaptureScreen(
                                         val (merged, message) = produce()
                                         // Finishing (tone/saturation/contrast) is optional and
                                         // only ever applies to the merged burst frame.
+                                        // Night captures use the night finishing profile;
+                                        // every other merge (standard or HDR) uses DEFAULT.
+                                        val finishingParams = if (settings.nightModeEnabled) {
+                                            NightPipeline.FINISHING_PARAMS
+                                        } else {
+                                            FinishingParams.DEFAULT
+                                        }
                                         val output = if (settings.applyFinishingToMergedPhotos) {
-                                            FinishingPipeline.apply(merged, FinishingParams.DEFAULT)
+                                            FinishingPipeline.apply(merged, finishingParams)
                                         } else {
                                             merged
                                         }
@@ -454,7 +468,28 @@ private fun CameraCaptureScreen(
                                         BurstImageCapture.capture(capture, burstCaptureExecutor, onResult)
                                     }
                                     val exposure = exposureController
-                                    if (settings.hdrBurstEnabled && exposure != null) {
+                                    if (settings.nightModeEnabled) {
+                                        // Night mode takes priority over HDR: a single-EV
+                                        // long burst merged with the night profile. When both
+                                        // switches are on, HDR is skipped for this capture and
+                                        // the standard merge snackbar reflects that night ran.
+                                        controller.arm(frameCapture) { burst ->
+                                            Log.d(
+                                                TAG,
+                                                "Night burst captured ${burst.frames.size} frames " +
+                                                    "in ${burst.captureSpanMillis} ms",
+                                            )
+                                            mergeAndSave {
+                                                val result = NightPipeline.merge(burst.frames)
+                                                result.merged to String.format(
+                                                    burstMergeSuccessMessage,
+                                                    result.usedFrameCount,
+                                                    result.merged.width,
+                                                    result.merged.height,
+                                                )
+                                            }
+                                        }
+                                    } else if (settings.hdrBurstEnabled && exposure != null) {
                                         controller.armBracketed(
                                             steps = exposure.steps,
                                             framesPerEv = exposure.framesPerEv,

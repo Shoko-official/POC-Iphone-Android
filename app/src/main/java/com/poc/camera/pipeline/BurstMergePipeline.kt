@@ -32,7 +32,16 @@ object BurstMergePipeline {
     private val tileAligner = TileAligner()
     private val ghostRejector = GhostRejector()
 
-    fun merge(frames: List<Frame>): MergeResult {
+    /**
+     * Merges [frames] into a single noise-reduced frame.
+     *
+     * @param nightParams optional high-gain low-light profile. When supplied the merge
+     *   brightness-matches each frame to the reference before aligning
+     *   ([BrightnessNormalizer]), rejects ghosts with the profile's widened thresholds,
+     *   and applies motion-adaptive per-frame global weighting in the accumulation. When
+     *   null the standard 3-8 sigma merge runs unchanged.
+     */
+    fun merge(frames: List<Frame>, nightParams: NightMergeParams? = null): MergeResult {
         require(frames.isNotEmpty()) { "frames must not be empty" }
         if (frames.size == 1) {
             return MergeResult(
@@ -42,12 +51,26 @@ object BurstMergePipeline {
             )
         }
 
-        val alignments = aligner.align(frames)
+        // Night: normalise exposure to the reference before anything reads luma, so both
+        // alignment and merge see a brightness-consistent burst. The reference (frame 0)
+        // is the match target and is left untouched.
+        val working = if (nightParams != null && nightParams.gainMatchEnabled) {
+            val reference = frames.first()
+            frames.mapIndexed { index, frame ->
+                if (index == 0) frame else BrightnessNormalizer.normalize(frame, reference, nightParams)
+            }
+        } else {
+            frames
+        }
+
+        val rejector = if (nightParams != null) nightParams.ghostRejector() else ghostRejector
+
+        val alignments = aligner.align(working)
         val offsets = alignments.map { it.dx to it.dy }
         val accepted = alignments.map { it.accepted }
 
-        val referenceLuma = Luminance.extract(frames.first())
-        val tileOffsets = frames.mapIndexed { index, frame ->
+        val referenceLuma = Luminance.extract(working.first())
+        val tileOffsets = working.mapIndexed { index, frame ->
             if (index == 0 || !accepted[index]) {
                 null
             } else {
@@ -56,7 +79,7 @@ object BurstMergePipeline {
             }
         }
 
-        val merged = RobustFrameMerger.merge(frames, accepted, tileOffsets, ghostRejector)
+        val merged = RobustFrameMerger.merge(working, accepted, tileOffsets, rejector, nightParams)
 
         return MergeResult(
             merged = merged,

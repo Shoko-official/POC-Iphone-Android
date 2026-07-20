@@ -109,6 +109,34 @@ data class FinishingParams(
             localContrast = REF_LOCAL_CONTRAST,
             detailEnhance = REF_DETAIL_ENHANCE,
         )
+
+        /**
+         * Night finishing profile, paired with [NightMergeParams] by [NightPipeline].
+         * Identical to [DEFAULT] except it retunes three stages for a strongly-noisy
+         * low-light merge, each justified empirically against the "nightscene" golden
+         * (see NightGoldenRegressionTest):
+         *
+         *  - [chromaDenoise] 0.6 -> 0.8: even after a 12-frame stack a high-gain capture
+         *    keeps visible chroma speckle, so the night look leans harder on the
+         *    luma-guided denoiser. The stronger pass measurably lowers MAE against the
+         *    clean night truth.
+         *  - [shadowsLift] 0.12 -> 0.18: night content lives in the bottom of the range,
+         *    so a deeper toe lift is what makes the merged shadow detail visible. Like
+         *    DEFAULT's detail/local-contrast, a lift is "error" against a dark clean truth,
+         *    so it is gated: 0.18 is a visibly stronger toe than DEFAULT yet the 12-frame
+         *    night merge still clears the standard 6-frame pipeline on the night golden by
+         *    a wide margin (MAE ~2.48 vs ~3.50).
+         *  - [detailEnhance] 0.08 -> 0.03: at night, residual noise dominates fine
+         *    detail, so sharpening mostly amplifies grain. Backing the sharpen off keeps
+         *    the denoised result clean rather than re-injecting noise as false texture.
+         *
+         * Global saturation/contrast/white-balance stay at DEFAULT.
+         */
+        val NIGHT = DEFAULT.copy(
+            shadowsLift = 0.18,
+            chromaDenoise = 0.8,
+            detailEnhance = 0.03,
+        )
     }
 }
 

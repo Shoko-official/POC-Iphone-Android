@@ -98,6 +98,31 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            SettingsSection(title = stringResource(R.string.settings_section_night)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_night_mode_label),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            text = stringResource(R.string.settings_night_mode_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = settings.nightModeEnabled,
+                        onCheckedChange = { onSettingsChanged(settings.copy(nightModeEnabled = it)) },
+                    )
+                }
+            }
+
+            HorizontalDivider()
+
             SettingsSection(title = stringResource(R.string.settings_section_merged_photos)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),

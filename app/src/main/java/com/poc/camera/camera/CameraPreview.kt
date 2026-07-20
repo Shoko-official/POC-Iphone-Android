@@ -166,7 +166,12 @@ fun CameraPreview(
 
                     provider.unbindAll()
                     when (mode) {
-                        CameraMode.Photo -> {
+                        // Portrait (issue #80) binds identically to Photo - Preview +
+                        // ImageCapture is all it ever needs, since its capture path always
+                        // goes through the same full-resolution burst (see CameraScreen's
+                        // Portrait capture flow, which ignores the HDR/night/SR toggles
+                        // Photo's burst button honours).
+                        CameraMode.Photo, CameraMode.Portrait -> {
                             // Burst now captures sequential full-resolution ImageCapture
                             // frames (driven from CameraScreen), so no ImageAnalysis use
                             // case is bound; Preview + ImageCapture cover both the single

@@ -90,6 +90,23 @@ class FinishingPipelineTest {
     }
 
     @Test
+    fun detailEnhanceIsWiredAndOnByDefault() {
+        // The DEFAULT ships detail enhancement on (kept conservative so the quality
+        // floors stay green), and the strength field must genuinely feed through: a
+        // clearly non-zero strength changes the output.
+        assertTrue("DEFAULT should ship detail enhancement on", FinishingParams.DEFAULT.detailEnhance > 0.0)
+
+        val input = naturalFrame()
+        val withDetail = FinishingPipeline.apply(input, FinishingParams.DEFAULT.copy(detailEnhance = 0.8))
+        val withoutDetail = FinishingPipeline.apply(input, FinishingParams.DEFAULT.copy(detailEnhance = 0.0))
+
+        assertFalse(
+            "detail enhance strength must actually change the output",
+            withDetail.argb.contentEquals(withoutDetail.argb),
+        )
+    }
+
+    @Test
     fun pipelineIsDeterministic() {
         val input = naturalFrame()
         val first = FinishingPipeline.apply(input)

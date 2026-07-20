@@ -9,6 +9,9 @@ class CinematicOverlayTextTest {
     private val fpsDefaultLabel = "Default fps"
     private val stabilizedTemplate = "%1\$s - stabilized"
     private val unstabilizedTemplate = "%1\$s - unstabilized"
+    private val rangeSuffixTemplate = "%1\$s - %2\$s"
+    private val hlg10Label = "HLG10"
+    private val sdrLabel = "SDR"
 
     @Test
     fun formatsTwentyFourFpsStabilized() {
@@ -60,5 +63,48 @@ class CinematicOverlayTextTest {
         )
 
         assertEquals("Default fps - stabilized", text)
+    }
+
+    @Test
+    fun omitsRangeSuffixWhenRangeLabelIsNull() {
+        val text = CinematicOverlayText.format(
+            config = CinematicConfig(use24Fps = true, stabilization = StabilizationChoice.ON),
+            fps24Label = fps24Label,
+            fpsDefaultLabel = fpsDefaultLabel,
+            stabilizedTemplate = stabilizedTemplate,
+            unstabilizedTemplate = unstabilizedTemplate,
+        )
+
+        assertEquals("24 fps - stabilized", text)
+    }
+
+    @Test
+    fun appendsHlg10SuffixWhenRangeLabelIsHlg10() {
+        val text = CinematicOverlayText.format(
+            config = CinematicConfig(use24Fps = true, stabilization = StabilizationChoice.ON),
+            fps24Label = fps24Label,
+            fpsDefaultLabel = fpsDefaultLabel,
+            stabilizedTemplate = stabilizedTemplate,
+            unstabilizedTemplate = unstabilizedTemplate,
+            rangeLabel = hlg10Label,
+            rangeSuffixTemplate = rangeSuffixTemplate,
+        )
+
+        assertEquals("24 fps - stabilized - HLG10", text)
+    }
+
+    @Test
+    fun appendsSdrSuffixWhenRangeLabelIsSdr() {
+        val text = CinematicOverlayText.format(
+            config = CinematicConfig(use24Fps = false, stabilization = StabilizationChoice.OFF),
+            fps24Label = fps24Label,
+            fpsDefaultLabel = fpsDefaultLabel,
+            stabilizedTemplate = stabilizedTemplate,
+            unstabilizedTemplate = unstabilizedTemplate,
+            rangeLabel = sdrLabel,
+            rangeSuffixTemplate = rangeSuffixTemplate,
+        )
+
+        assertEquals("Default fps - unstabilized - SDR", text)
     }
 }

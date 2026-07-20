@@ -102,12 +102,29 @@ class GoldenPipelineRegressionTest {
         // baseline and made luma-based ops meaningless. edges is marginally softer
         // (thin-line detail gain) but holds; highcontrast improves (local shadow lift
         // and highlight taming). gradients/lowlight are unmoved at this strength.
+        //
+        // RE-BASELINED after luma-guided chroma denoise (ChromaDenoiser on at
+        // FinishingParams.DEFAULT.chromaDenoise = 0.6, radius 4), 2026-07-20, and the
+        // new COLOUR "colorchart" scene added. The sensor model draws noise per
+        // channel, so every merged burst carries residual chroma speckle that the
+        // denoiser removes; PSNR/MAE improve on every scene (off -> on):
+        //   edges        36.628->39.514  mae 2.554->1.918
+        //   texture      36.520->39.370  mae 2.628->2.005
+        //   gradients    39.066->41.333  mae 2.211->1.694
+        //   lowlight     39.007->40.403  mae 2.251->1.918
+        //   highcontrast 36.646->37.989  mae 2.950->2.564
+        //   colorchart   32.483->33.032  mae 4.533->4.125  (NEW colour scene)
+        // PSNR floors raised to actual*0.98 and MAE ceilings tightened to actual*1.02.
+        // SSIM dips a hair on the gray scenes (chroma reconstruction rounds RGB, so
+        // integer luma shifts by <=1 code value); it stays far above each committed
+        // SSIM floor, and per the never-lower rule those SSIM floors are kept.
         val FLOORS = listOf(
-            Floor("edges", minPsnr = 35.9, minSsim = 0.972, maxMae = 2.59),
-            Floor("texture", minPsnr = 35.7, minSsim = 0.977, maxMae = 2.68),
-            Floor("gradients", minPsnr = 38.2, minSsim = 0.944, maxMae = 2.26),
-            Floor("lowlight", minPsnr = 38.2, minSsim = 0.943, maxMae = 2.30),
-            Floor("highcontrast", minPsnr = 35.9, minSsim = 0.883, maxMae = 3.01),
+            Floor("edges", minPsnr = 38.7, minSsim = 0.972, maxMae = 1.96),
+            Floor("texture", minPsnr = 38.5, minSsim = 0.977, maxMae = 2.05),
+            Floor("gradients", minPsnr = 40.5, minSsim = 0.944, maxMae = 1.73),
+            Floor("lowlight", minPsnr = 39.5, minSsim = 0.943, maxMae = 1.96),
+            Floor("highcontrast", minPsnr = 37.2, minSsim = 0.883, maxMae = 2.62),
+            Floor("colorchart", minPsnr = 32.3, minSsim = 0.938, maxMae = 4.21),
         )
     }
 }

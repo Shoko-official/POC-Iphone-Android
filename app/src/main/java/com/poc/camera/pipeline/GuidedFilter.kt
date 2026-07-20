@@ -63,4 +63,61 @@ object GuidedFilter {
         val meanB = BoxBlur.blur(b, width, height, radius)
         return DoubleArray(image.size) { meanA[it] * image[it] + meanB[it] }
     }
+
+    /**
+     * Returns the cross-guided filtering of [input] steered by a separate [guide]
+     * plane (both [width]x[height]). This is the standard guided-filter estimator with
+     * an independent guide, of which [selfGuided] is the special case guide == input:
+     *
+     *   meanI  = boxMean(input)
+     *   meanG  = boxMean(guide)
+     *   covIG  = boxMean(input*guide) - meanI*meanG
+     *   varG   = boxMean(guide*guide) - meanG^2
+     *   a      = covIG / (varG + eps)
+     *   b      = meanI - a*meanG
+     *   out    = boxMean(a)*guide + boxMean(b)
+     *
+     * The output is a locally linear function of the GUIDE, so it inherits the guide's
+     * edges: where the guide is flat (varG << eps) a -> 0 and the output collapses to
+     * the local mean of [input] (strong smoothing), while where the guide steps
+     * (varG >> eps) the transfer preserves the transition. Used by [ChromaDenoiser] to
+     * flatten chroma speckle while keeping chroma edges that co-occur with luma edges.
+     *
+     * @param radius smoothing window half-width.
+     * @param eps regulariser in squared GUIDE-intensity units; larger treats bigger
+     *   guide swings as "flat" and smooths [input] through them.
+     */
+    fun guided(
+        input: DoubleArray,
+        guide: DoubleArray,
+        width: Int,
+        height: Int,
+        radius: Int,
+        eps: Double,
+    ): DoubleArray {
+        require(radius >= 0) { "radius must be >= 0" }
+        require(eps > 0.0) { "eps must be > 0" }
+        require(input.size == guide.size) { "input and guide must have the same size" }
+
+        val meanI = BoxBlur.blur(input, width, height, radius)
+        val meanG = BoxBlur.blur(guide, width, height, radius)
+        val corrIG = BoxBlur.blur(DoubleArray(input.size) { input[it] * guide[it] }, width, height, radius)
+        val corrGG = BoxBlur.blur(DoubleArray(guide.size) { guide[it] * guide[it] }, width, height, radius)
+
+        val a = DoubleArray(input.size)
+        val b = DoubleArray(input.size)
+        for (i in input.indices) {
+            val covIG = corrIG[i] - meanI[i] * meanG[i]
+            // Clamp guide variance to >= 0 (non-negative in exact arithmetic; rounding
+            // on flat runs can push it slightly negative). Covariance is left signed.
+            val varG = max(0.0, corrGG[i] - meanG[i] * meanG[i])
+            val ai = covIG / (varG + eps)
+            a[i] = ai
+            b[i] = meanI[i] - ai * meanG[i]
+        }
+
+        val meanA = BoxBlur.blur(a, width, height, radius)
+        val meanB = BoxBlur.blur(b, width, height, radius)
+        return DoubleArray(input.size) { meanA[it] * guide[it] + meanB[it] }
+    }
 }

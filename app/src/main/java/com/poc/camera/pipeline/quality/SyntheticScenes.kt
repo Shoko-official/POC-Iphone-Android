@@ -1,6 +1,7 @@
 package com.poc.camera.pipeline.quality
 
 import com.poc.camera.pipeline.Frame
+import com.poc.camera.pipeline.SubPixelSampler
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.ln
@@ -366,6 +367,184 @@ object SyntheticScenes {
         LAMP_CX + LAMP_HALF,
         LAMP_CY + LAMP_HALF,
     )
+
+    // --- Super-resolution resolution chart ------------------------------------
+    //
+    // A synthetic resolution chart for the multi-frame super-resolution gate, kept OUT of
+    // [names] so the existing golden report is unaffected. The chart is authored at the 2x
+    // output grid ([SR_TRUTH_SIZE]); each burst frame is an aliased, sub-pixel-shifted
+    // impulse sampling of it back down to input resolution ([SR_INPUT_SIZE]).
+    //
+    // It carries three layers:
+    //  - a smooth coarse BASE (low frequency, survives input sampling) that gives every
+    //    tile real gradient for sub-pixel alignment -- the flat high-frequency bands offer
+    //    no alignment signal on their own, so without this the aligner could not recover
+    //    the fractional shift that IS the super-resolution signal;
+    //  - an ABOVE-input-Nyquist sinusoidal bar band a single frame cannot represent (it
+    //    aliases to a lower frequency) but a phase-diverse burst reconstructs on the 2x
+    //    grid;
+    //  - a NEAR-input-Nyquist control band, resolvable by a single frame.
+    //
+    // Impulse (point) sampling is used deliberately rather than a box/area average: an area
+    // pre-filter would attenuate the very super-Nyquist content the proof must recover, so
+    // a box downsample of these bands would erase the signal instead of aliasing it.
+    // Impulse sampling models an ideal small-aperture sensor and yields honest aliasing.
+
+    /** Side of the 2x super-resolution ground-truth chart (the output-grid resolution). */
+    const val SR_TRUTH_SIZE = 256
+
+    /** Side of each super-resolution INPUT frame; SR doubles it back to [SR_TRUTH_SIZE]. */
+    const val SR_INPUT_SIZE = SR_TRUTH_SIZE / 2
+
+    /** Frames in a super-resolution burst. */
+    const val SR_BURST_COUNT = 6
+
+    /**
+     * Period, in truth (2x-grid) pixels, of the ABOVE-input-Nyquist bar band. 8/3 px is
+     * 0.375 cyc/truth-px = 0.75 cyc/input-px, above the 0.5 input Nyquist; it aliases to a
+     * distinct lower frequency (0.25 cyc/input-px) rather than to DC, so it is genuinely
+     * unresolvable by one frame yet does not collapse to a per-frame brightness offset.
+     */
+    const val SR_ABOVE_NYQUIST_PERIOD = 8.0 / 3.0
+
+    /** Period, in truth pixels, of the NEAR-input-Nyquist control band (resolvable by one frame). */
+    const val SR_NEAR_NYQUIST_PERIOD = 5.0
+
+    private const val SR_BAR_AMPLITUDE = 34.0
+    private const val SR_BASE_MID = 120.0
+    private const val SR_ABOVE_BAND_Y0 = 96
+    private const val SR_ABOVE_BAND_Y1 = 160
+    private const val SR_NEAR_BAND_Y0 = 24
+    private const val SR_NEAR_BAND_Y1 = 88
+
+    // Light sensor noise for the SR burst: present so alignment, ghost gating and merge do
+    // real work, but well below the bar amplitude so it does not swamp the recovered detail.
+    private const val SR_READ_NOISE = 2.5
+    private const val SR_SHOT_GAIN = 0.08
+
+    // Ghost-test bright block: a solid square that sits at "home" in the reference frame and
+    // jumps to a disjoint "moved" region in every other frame (object motion, not global
+    // shift), so the SR ghost gate must keep it out of the moved region.
+    private const val SR_GHOST_BLOCK = 24
+    private const val SR_GHOST_BLOCK_VALUE = 235
+
+    // Per-frame sub-pixel phases in TRUTH pixels. Frame 0 is (0,0) = the reference. The x
+    // phases span even and odd truth columns ({0,1}), so the burst populates both the even
+    // and odd output texels of the vertical bar bands; the half-pixel members add finer
+    // sub-pixel diversity. y phases are small (the bars are vertical) but non-zero so 2D
+    // alignment is exercised.
+    private val SR_PHASES_TRUTH: List<Pair<Double, Double>> = listOf(
+        0.0 to 0.0,
+        1.0 to 0.0,
+        0.0 to 1.0,
+        1.0 to 1.0,
+        0.5 to 0.5,
+        1.5 to 0.5,
+    )
+
+    /** Measurement window (x0, y0, x1, y1) of the above-Nyquist band, in 2x output coords. */
+    fun srAboveNyquistBandBounds(): IntArray =
+        intArrayOf(32, SR_ABOVE_BAND_Y0, SR_TRUTH_SIZE - 32, SR_ABOVE_BAND_Y1)
+
+    /** Measurement window (x0, y0, x1, y1) of the near-Nyquist band, in 2x output coords. */
+    fun srNearNyquistBandBounds(): IntArray =
+        intArrayOf(32, SR_NEAR_BAND_Y0, SR_TRUTH_SIZE - 32, SR_NEAR_BAND_Y1)
+
+    /** The 2x super-resolution ground truth: coarse base plus the two sinusoidal bar bands. */
+    fun resolutionChartTruth(): Frame {
+        val n = SR_TRUTH_SIZE
+        val out = IntArray(n * n)
+        for (y in 0 until n) {
+            val row = y * n
+            for (x in 0 until n) {
+                var v = srBase(x, y)
+                if (y in SR_ABOVE_BAND_Y0 until SR_ABOVE_BAND_Y1) {
+                    v += SR_BAR_AMPLITUDE * cos(2.0 * PI * x / SR_ABOVE_NYQUIST_PERIOD)
+                } else if (y in SR_NEAR_BAND_Y0 until SR_NEAR_BAND_Y1) {
+                    v += SR_BAR_AMPLITUDE * cos(2.0 * PI * x / SR_NEAR_NYQUIST_PERIOD)
+                }
+                out[row + x] = gray(v.roundToInt().coerceIn(0, 255))
+            }
+        }
+        return Frame(n, n, out, timestampMillis = 0L)
+    }
+
+    /** Smooth, gradient-rich, band-limited base so no alignment tile is flat. */
+    private fun srBase(x: Int, y: Int): Double {
+        val sx = 34.0 * sin(2.0 * PI * x / 53.0)
+        val sy = 20.0 * sin(2.0 * PI * y / 47.0 + 0.7)
+        val ramp = 16.0 * (x + y).toDouble() / (2 * (SR_TRUTH_SIZE - 1))
+        return SR_BASE_MID + sx + sy + ramp
+    }
+
+    /**
+     * A [count]-frame super-resolution burst: each frame is [resolutionChartTruth] impulse
+     * sampled at a distinct sub-pixel phase ([SR_PHASES_TRUTH]) back to input resolution,
+     * then captured under the light SR sensor-noise model. Frame 0 (phase (0,0)) is the
+     * reference. Per-frame seeds derive from [baseSeed] so the burst is reproducible.
+     */
+    fun resolutionChartBurst(baseSeed: Long, count: Int = SR_BURST_COUNT): List<Frame> {
+        require(count >= 1) { "count must be >= 1" }
+        val truth = resolutionChartTruth()
+        return (0 until count).map { k ->
+            val (dxTruth, dyTruth) = SR_PHASES_TRUTH[k % SR_PHASES_TRUTH.size]
+            val input = srDownsampleWithPhase(truth, dxTruth, dyTruth)
+            noisy(input, baseSeed + k * SEED_STRIDE, SR_READ_NOISE, SR_SHOT_GAIN)
+        }
+    }
+
+    /** Impulse (bilinear) sampling of [truth] at stride 2 with a truth-pixel phase offset. */
+    private fun srDownsampleWithPhase(truth: Frame, dxTruth: Double, dyTruth: Double): Frame {
+        val outW = truth.width / 2
+        val outH = truth.height / 2
+        val out = IntArray(outW * outH)
+        val scratch = DoubleArray(3)
+        for (yy in 0 until outH) {
+            val row = yy * outW
+            for (xx in 0 until outW) {
+                SubPixelSampler.sampleRgb(truth, 2.0 * xx + dxTruth, 2.0 * yy + dyTruth, scratch)
+                out[row + xx] = gray(scratch[0].roundToInt().coerceIn(0, 255))
+            }
+        }
+        return Frame(outW, outH, out, timestampMillis = 0L)
+    }
+
+    /** Home block bounds (x0, y0, x1, y1) in INPUT coords: where the reference's block sits. */
+    fun srGhostBlockHomeBounds(): IntArray =
+        intArrayOf(18, 52, 18 + SR_GHOST_BLOCK, 52 + SR_GHOST_BLOCK)
+
+    /** Moved block bounds (x0, y0, x1, y1) in INPUT coords: where non-reference frames' block sits. */
+    fun srGhostBlockMovedBounds(): IntArray =
+        intArrayOf(86, 52, 86 + SR_GHOST_BLOCK, 52 + SR_GHOST_BLOCK)
+
+    /**
+     * A [count]-frame burst over a static, alignable background with a bright block that is
+     * at [srGhostBlockHomeBounds] in the reference (frame 0) and at [srGhostBlockMovedBounds]
+     * in every other frame. The global motion is zero (the background is static), so the
+     * block is pure local motion the SR ghost gate must reject from the moved region.
+     */
+    fun resolutionChartMovedObjectBurst(baseSeed: Long, count: Int = SR_BURST_COUNT): List<Frame> {
+        require(count >= 1) { "count must be >= 1" }
+        val n = SR_INPUT_SIZE
+        val background = texturedCanvas(seed = 0x5111L, cell = 20, low = 70, high = 150)
+        val home = srGhostBlockHomeBounds()
+        val moved = srGhostBlockMovedBounds()
+        return (0 until count).map { k ->
+            val out = IntArray(n * n) { gray(background[it]) }
+            drawBlock(out, n, if (k == 0) home else moved)
+            noisy(Frame(n, n, out, timestampMillis = 0L), baseSeed + k * SEED_STRIDE, SR_READ_NOISE, SR_SHOT_GAIN)
+        }
+    }
+
+    private fun drawBlock(out: IntArray, n: Int, bounds: IntArray) {
+        for (y in bounds[1] until bounds[3]) {
+            if (y < 0 || y >= n) continue
+            for (x in bounds[0] until bounds[2]) {
+                if (x < 0 || x >= n) continue
+                out[y * n + x] = gray(SR_GHOST_BLOCK_VALUE)
+            }
+        }
+    }
 
     private fun edges(): Frame {
         val out = IntArray(SIZE * SIZE)

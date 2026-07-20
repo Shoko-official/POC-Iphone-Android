@@ -22,6 +22,7 @@
     <string name="burst_button">Burst</string>
     <string name="burst_merge_success">Merged %1$d frames at %2$d×%3$d</string>
     <string name="burst_hdr_merge_success">HDR merged %1$d frames at %2$d×%3$d</string>
+    <string name="burst_super_resolution_success">Super-resolved %1$d frames to %2$d×%3$d</string>
     <string name="burst_merge_failure">Failed to merge burst. Please try again.</string>
     <string name="look_neutral">Neutral</string>
     <string name="look_cinematic">Cinematic look</string>
@@ -39,6 +40,9 @@
     <string name="settings_section_night">Night mode</string>
     <string name="settings_night_mode_label">Night mode</string>
     <string name="settings_night_mode_description">Captures a longer 12-frame burst and merges it for strong low-light noise. Takes priority over HDR burst when both are on.</string>
+    <string name="settings_section_super_resolution">Super resolution</string>
+    <string name="settings_super_resolution_label">Super resolution</string>
+    <string name="settings_super_resolution_description">Combines the standard burst onto a doubled-resolution grid to recover fine detail, saving a 2x larger photo. Applies to standard bursts only; Night and HDR take priority when on.</string>
     <string name="settings_section_merged_photos">Merged photos</string>
     <string name="settings_apply_finishing_label">Apply finishing to merged photos</string>
     <string name="settings_apply_finishing_description">Adds tone, saturation and contrast finishing when a burst is merged and saved.</string>

@@ -173,6 +173,24 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            SettingsSection(title = stringResource(R.string.settings_section_rendering)) {
+                Text(
+                    text = stringResource(R.string.settings_finishing_preset_label),
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                FinishingPresetControl(
+                    selected = settings.finishingPreset,
+                    onSelected = { onSettingsChanged(settings.copy(finishingPreset = it)) },
+                )
+                Text(
+                    text = stringResource(finishingPresetDescription(settings.finishingPreset)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            HorizontalDivider()
+
             SettingsSection(title = stringResource(R.string.settings_section_cinematic)) {
                 Text(
                     text = stringResource(R.string.settings_default_look_label),
@@ -226,6 +244,38 @@ private fun BurstFrameCountControl(
             )
         }
     }
+}
+
+@Composable
+private fun FinishingPresetControl(
+    selected: FinishingPreset,
+    onSelected: (FinishingPreset) -> Unit,
+) {
+    val options = FinishingPreset.entries.toList()
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        options.forEachIndexed { index, preset ->
+            SegmentedButton(
+                modifier = Modifier.heightIn(min = 48.dp),
+                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                selected = selected == preset,
+                onClick = { onSelected(preset) },
+                label = { Text(text = stringResource(finishingPresetLabel(preset))) },
+                icon = {},
+            )
+        }
+    }
+}
+
+private fun finishingPresetLabel(preset: FinishingPreset): Int = when (preset) {
+    FinishingPreset.Natural -> R.string.finishing_preset_natural
+    FinishingPreset.Vivid -> R.string.finishing_preset_vivid
+    FinishingPreset.Detail -> R.string.finishing_preset_detail
+}
+
+private fun finishingPresetDescription(preset: FinishingPreset): Int = when (preset) {
+    FinishingPreset.Natural -> R.string.finishing_preset_natural_description
+    FinishingPreset.Vivid -> R.string.finishing_preset_vivid_description
+    FinishingPreset.Detail -> R.string.finishing_preset_detail_description
 }
 
 @Composable

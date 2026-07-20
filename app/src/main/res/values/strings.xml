@@ -42,6 +42,14 @@
     <string name="settings_section_merged_photos">Merged photos</string>
     <string name="settings_apply_finishing_label">Apply finishing to merged photos</string>
     <string name="settings_apply_finishing_description">Adds tone, saturation and contrast finishing when a burst is merged and saved.</string>
+    <string name="settings_section_rendering">Rendering</string>
+    <string name="settings_finishing_preset_label">Photo look</string>
+    <string name="finishing_preset_natural">Natural</string>
+    <string name="finishing_preset_vivid">Vivid</string>
+    <string name="finishing_preset_detail">Detail</string>
+    <string name="finishing_preset_natural_description">Balanced tone and colour - the reference rendition every burst is tuned against.</string>
+    <string name="finishing_preset_vivid_description">Punchier colour and contrast, with a stronger local-contrast lift.</string>
+    <string name="finishing_preset_detail_description">Extra sharpening for texture, with colour kept close to Natural.</string>
     <string name="settings_section_cinematic">Cinematic mode</string>
     <string name="settings_default_look_label">Default look</string>
     <string name="settings_section_comparison">Comparison</string>
@@ -66,4 +74,13 @@
     <string name="compare_metrics_not_comparable">Different dimensions - metrics unavailable. When the reference is an external photo, framing and resolution rarely match exactly, so any numbers shown are indicative only.</string>
     <string name="compare_metrics_computing">Computing metrics…</string>
     <string name="compare_swipe_divider_content_description">Comparison divider position</string>
+    <string name="guided_comparison_button">Guided comparison</string>
+    <string name="guided_comparison_empty_title">Compare with your other phone</string>
+    <string name="guided_comparison_empty_description">Capture a shot in this app, then pick the same scene from your other phone to see them side by side.</string>
+    <string name="guided_comparison_start">Start guided comparison</string>
+    <string name="guided_comparison_camera_banner">Guided comparison: take your shot</string>
+    <string name="guided_comparison_camera_banner_detail">Take a burst photo of your scene. It fills the processed side once merging finishes.</string>
+    <string name="guided_comparison_reference_banner">Now pick the reference shot of the same scene</string>
+    <string name="guided_comparison_reference_banner_detail">Pick the same scene shot on your other phone using Load reference below.</string>
+    <string name="guided_comparison_cancel_content_description">Cancel guided comparison</string>
 </resources>

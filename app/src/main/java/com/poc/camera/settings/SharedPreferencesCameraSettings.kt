@@ -25,6 +25,7 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
             CameraSettingsData.DEFAULT.saveComparisonPair,
         ),
         nightModeEnabled = prefs.getBoolean(KEY_NIGHT_MODE_ENABLED, CameraSettingsData.DEFAULT.nightModeEnabled),
+        finishingPresetName = prefs.getString(KEY_FINISHING_PRESET, null),
     )
 
     override fun save(data: CameraSettingsData) {
@@ -35,6 +36,7 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
             putBoolean(KEY_HDR_BURST_ENABLED, data.hdrBurstEnabled)
             putBoolean(KEY_SAVE_COMPARISON_PAIR, data.saveComparisonPair)
             putBoolean(KEY_NIGHT_MODE_ENABLED, data.nightModeEnabled)
+            putString(KEY_FINISHING_PRESET, data.finishingPreset.name)
         }
     }
 
@@ -46,5 +48,6 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
         private const val KEY_HDR_BURST_ENABLED = "hdr_burst_enabled"
         private const val KEY_SAVE_COMPARISON_PAIR = "save_comparison_pair"
         private const val KEY_NIGHT_MODE_ENABLED = "night_mode_enabled"
+        private const val KEY_FINISHING_PRESET = "finishing_preset"
     }
 }

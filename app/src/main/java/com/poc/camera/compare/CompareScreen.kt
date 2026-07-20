@@ -19,10 +19,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -35,6 +38,7 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -98,6 +102,10 @@ fun CompareScreen(
     pair: ComparePair?,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    guidedStep: GuidedCompareStep = GuidedCompareStep.Idle,
+    onStartGuidedComparison: () -> Unit = {},
+    onGuidedReferencePicked: () -> Unit = {},
+    onGuidedCancel: () -> Unit = {},
 ) {
     val context = LocalContext.current
 
@@ -116,7 +124,14 @@ fun CompareScreen(
 
     val pickReferenceLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
-    ) { uri -> if (uri != null) referenceUri = uri }
+    ) { uri ->
+        if (uri != null) {
+            referenceUri = uri
+            // No-op unless a guided flow is actually waiting on this pick (see
+            // GuidedCompareFlow.advance), so it is safe to call unconditionally.
+            onGuidedReferencePicked()
+        }
+    }
 
     LaunchedEffect(pair?.processedUri) {
         val uri = pair?.processedUri
@@ -179,6 +194,13 @@ fun CompareScreen(
     val notComparableMessage = stringResource(R.string.compare_metrics_not_comparable)
     val computingMessage = stringResource(R.string.compare_metrics_computing)
     val dividerContentDescription = stringResource(R.string.compare_swipe_divider_content_description)
+    val guidedButtonLabel = stringResource(R.string.guided_comparison_button)
+    val guidedEmptyTitle = stringResource(R.string.guided_comparison_empty_title)
+    val guidedEmptyDescription = stringResource(R.string.guided_comparison_empty_description)
+    val guidedStartLabel = stringResource(R.string.guided_comparison_start)
+    val guidedReferenceBannerMessage = stringResource(R.string.guided_comparison_reference_banner)
+    val guidedReferenceBannerDetail = stringResource(R.string.guided_comparison_reference_banner_detail)
+    val guidedCancelContentDescription = stringResource(R.string.guided_comparison_cancel_content_description)
 
     Scaffold(
         modifier = modifier,
@@ -194,6 +216,14 @@ fun CompareScreen(
                         )
                     }
                 },
+                actions = {
+                    TextButton(
+                        onClick = onStartGuidedComparison,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) {
+                        Text(text = guidedButtonLabel, color = Color.White)
+                    }
+                },
             )
         },
     ) { contentPadding ->
@@ -202,6 +232,24 @@ fun CompareScreen(
                 .padding(contentPadding)
                 .fillMaxSize(),
         ) {
+            if (pair == null && guidedStep == GuidedCompareStep.Idle) {
+                GuidedComparisonEmptyState(
+                    title = guidedEmptyTitle,
+                    description = guidedEmptyDescription,
+                    startLabel = guidedStartLabel,
+                    onStart = onStartGuidedComparison,
+                )
+            }
+
+            if (guidedStep == GuidedCompareStep.AwaitingReference) {
+                GuidedReferenceBanner(
+                    message = guidedReferenceBannerMessage,
+                    detail = guidedReferenceBannerDetail,
+                    cancelContentDescription = guidedCancelContentDescription,
+                    onCancel = onGuidedCancel,
+                )
+            }
+
             SingleChoiceSegmentedButtonRow(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -471,6 +519,67 @@ private fun SwipeComparison(
                 .padding(horizontal = 24.dp, vertical = 8.dp)
                 .semantics { contentDescription = dividerContentDescription },
         )
+    }
+}
+
+/**
+ * Purpose-giving empty state shown instead of the default "no capture yet" panes when
+ * no pair has been captured this session at all: explains the guided flow in one
+ * sentence and offers the single action that starts it.
+ */
+@Composable
+private fun GuidedComparisonEmptyState(
+    title: String,
+    description: String,
+    startLabel: String,
+    onStart: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 16.dp)
+            .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(8.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(text = title, color = Color.White, style = MaterialTheme.typography.titleMedium)
+        Text(text = description, color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.bodyMedium)
+        Button(onClick = onStart, modifier = Modifier.heightIn(min = 48.dp)) {
+            Text(text = startLabel)
+        }
+    }
+}
+
+/** Step-2 instruction for the guided flow: slot A is filled, prompting the "Load
+ * reference" action below to pick the matching shot from the other phone. */
+@Composable
+private fun GuidedReferenceBanner(
+    message: String,
+    detail: String,
+    cancelContentDescription: String,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 8.dp)
+            .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(8.dp))
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = message, color = Color.White, style = MaterialTheme.typography.bodyLarge)
+            Text(text = detail, color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.bodySmall)
+        }
+        IconButton(onClick = onCancel, modifier = Modifier.size(48.dp)) {
+            Icon(
+                imageVector = Icons.Filled.Close,
+                contentDescription = cancelContentDescription,
+                tint = Color.White,
+            )
+        }
     }
 }
 

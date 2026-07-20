@@ -19,6 +19,9 @@ import androidx.core.net.toUri
 import com.poc.camera.camera.CameraScreen
 import com.poc.camera.compare.ComparePair
 import com.poc.camera.compare.CompareScreen
+import com.poc.camera.compare.GuidedCompareEvent
+import com.poc.camera.compare.GuidedCompareFlow
+import com.poc.camera.compare.GuidedCompareStep
 import com.poc.camera.settings.CameraSettings
 import com.poc.camera.settings.SettingsScreen
 import com.poc.camera.settings.SharedPreferencesCameraSettings
@@ -30,11 +33,31 @@ private enum class AppDestination {
     Compare,
 }
 
-/** Round-trips [ComparePair] through the two URIs as strings, so the last pair
+/** Sentinel standing in for a null [ComparePair.referenceUri] in the flat string list
+ * [ComparePairSaver] round-trips through `rememberSaveable`. */
+private const val NoReferenceUriMarker = ""
+
+/** Round-trips [ComparePair] through its two URIs as strings (empty string standing in
+ * for a not-yet-picked reference, see [NoReferenceUriMarker]), so the last pair
  * captured this session survives a configuration change (e.g. rotation). */
 private val ComparePairSaver: Saver<ComparePair?, List<String>> = Saver(
-    save = { pair -> if (pair == null) emptyList() else listOf(pair.processedUri.toString(), pair.referenceUri.toString()) },
-    restore = { saved -> if (saved.size == 2) ComparePair(saved[0].toUri(), saved[1].toUri()) else null },
+    save = { pair ->
+        if (pair == null) {
+            emptyList()
+        } else {
+            listOf(pair.processedUri.toString(), pair.referenceUri?.toString() ?: NoReferenceUriMarker)
+        }
+    },
+    restore = { saved ->
+        if (saved.size == 2) {
+            ComparePair(
+                processedUri = saved[0].toUri(),
+                referenceUri = saved[1].takeIf { it != NoReferenceUriMarker }?.toUri(),
+            )
+        } else {
+            null
+        }
+    },
 )
 
 class MainActivity : ComponentActivity() {
@@ -50,9 +73,18 @@ class MainActivity : ComponentActivity() {
             var comparePair by rememberSaveable(stateSaver = ComparePairSaver) {
                 mutableStateOf<ComparePair?>(null)
             }
+            var guidedStep by rememberSaveable { mutableStateOf(GuidedCompareStep.Idle) }
+            val onGuidedEvent: (GuidedCompareEvent) -> Unit = { event ->
+                guidedStep = GuidedCompareFlow.advance(guidedStep, event)
+            }
 
-            BackHandler(enabled = destination != AppDestination.Camera) {
-                destination = AppDestination.Camera
+            BackHandler(enabled = destination != AppDestination.Camera || guidedStep != GuidedCompareStep.Idle) {
+                if (guidedStep != GuidedCompareStep.Idle) {
+                    onGuidedEvent(GuidedCompareEvent.Cancelled)
+                }
+                if (destination != AppDestination.Camera) {
+                    destination = AppDestination.Camera
+                }
             }
 
             PocCameraTheme {
@@ -68,6 +100,12 @@ class MainActivity : ComponentActivity() {
                             comparePair = comparePair,
                             onOpenCompare = { destination = AppDestination.Compare },
                             onComparePairCaptured = { comparePair = it },
+                            guidedStep = guidedStep,
+                            onGuidedCaptureCompleted = {
+                                onGuidedEvent(GuidedCompareEvent.CaptureCompleted)
+                                destination = AppDestination.Compare
+                            },
+                            onGuidedCancel = { onGuidedEvent(GuidedCompareEvent.Cancelled) },
                         )
                         AppDestination.Settings -> SettingsScreen(
                             modifier = Modifier.fillMaxSize(),
@@ -82,6 +120,13 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxSize(),
                             pair = comparePair,
                             onBack = { destination = AppDestination.Camera },
+                            guidedStep = guidedStep,
+                            onStartGuidedComparison = {
+                                onGuidedEvent(GuidedCompareEvent.Start)
+                                destination = AppDestination.Camera
+                            },
+                            onGuidedReferencePicked = { onGuidedEvent(GuidedCompareEvent.ReferencePicked) },
+                            onGuidedCancel = { onGuidedEvent(GuidedCompareEvent.Cancelled) },
                         )
                     }
                 }

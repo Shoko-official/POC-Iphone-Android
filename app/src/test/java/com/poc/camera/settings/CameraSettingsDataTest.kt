@@ -16,6 +16,7 @@ class CameraSettingsDataTest {
         assertEquals(false, default.hdrBurstEnabled)
         assertEquals(false, default.saveComparisonPair)
         assertEquals(false, default.nightModeEnabled)
+        assertEquals(FinishingPreset.Natural, default.finishingPreset)
     }
 
     @Test
@@ -42,6 +43,7 @@ class CameraSettingsDataTest {
             hdrBurstEnabled = true,
             saveComparisonPair = true,
             nightModeEnabled = true,
+            finishingPreset = FinishingPreset.Vivid,
         )
 
         val decoded = CameraSettingsData.fromRaw(
@@ -51,9 +53,52 @@ class CameraSettingsDataTest {
             hdrBurstEnabled = original.hdrBurstEnabled,
             saveComparisonPair = original.saveComparisonPair,
             nightModeEnabled = original.nightModeEnabled,
+            finishingPresetName = original.finishingPreset.name,
         )
 
         assertEquals(original, decoded)
+    }
+
+    @Test
+    fun fromRawRoundTripsEveryFinishingPreset() {
+        for (preset in FinishingPreset.entries) {
+            val decoded = CameraSettingsData.fromRaw(
+                burstFrameCount = 3,
+                applyFinishingToMergedPhotos = true,
+                defaultCinematicLookName = null,
+                hdrBurstEnabled = false,
+                saveComparisonPair = false,
+                nightModeEnabled = false,
+                finishingPresetName = preset.name,
+            )
+
+            assertEquals(preset, decoded.finishingPreset)
+        }
+    }
+
+    @Test
+    fun fromRawFallsBackToDefaultPresetForMissingOrInvalidName() {
+        val missing = CameraSettingsData.fromRaw(
+            burstFrameCount = 6,
+            applyFinishingToMergedPhotos = true,
+            defaultCinematicLookName = null,
+            hdrBurstEnabled = false,
+            saveComparisonPair = false,
+            nightModeEnabled = false,
+            finishingPresetName = null,
+        )
+        val invalid = CameraSettingsData.fromRaw(
+            burstFrameCount = 6,
+            applyFinishingToMergedPhotos = true,
+            defaultCinematicLookName = null,
+            hdrBurstEnabled = false,
+            saveComparisonPair = false,
+            nightModeEnabled = false,
+            finishingPresetName = "not-a-real-preset",
+        )
+
+        assertEquals(CameraSettingsData.DEFAULT.finishingPreset, missing.finishingPreset)
+        assertEquals(CameraSettingsData.DEFAULT.finishingPreset, invalid.finishingPreset)
     }
 
     @Test

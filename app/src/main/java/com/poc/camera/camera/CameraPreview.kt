@@ -4,6 +4,7 @@ import android.util.Log
 import android.util.Range
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraControl
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.MeteringPointFactory
@@ -18,7 +19,9 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -29,13 +32,15 @@ import com.poc.camera.pipeline.Looks
 private const val TAG = "CameraPreview"
 
 /**
- * What tap-to-focus needs from the current bind: the bound camera's control surface and
- * the PreviewView's coordinate-to-[androidx.camera.core.MeteringPoint] factory. Re-supplied
- * on every successful bind (mode switch, retry) and cleared to null while unbound, so a
- * stale [CameraControl] from a previous bind is never used for metering.
+ * What tap-to-focus and pinch-to-zoom need from the current bind: the bound camera's
+ * control surface, its info/zoom-state source, and the PreviewView's
+ * coordinate-to-[androidx.camera.core.MeteringPoint] factory. Re-supplied on every
+ * successful bind (mode switch, retry) and cleared to null while unbound, so a stale
+ * [CameraControl]/[CameraInfo] from a previous bind is never used.
  */
-data class FocusMeteringHandle(
+data class CameraHandle(
     val cameraControl: CameraControl,
+    val cameraInfo: CameraInfo,
     val meteringPointFactory: MeteringPointFactory,
 )
 
@@ -46,12 +51,17 @@ fun CameraPreview(
     look: VideoLook = VideoLook.Neutral,
     burstFrameCount: Int = BurstController.DEFAULT_FRAME_COUNT,
     retryToken: Int = 0,
+    // Zoom ratio the caller wants applied as soon as a (new) camera binds - e.g. the ratio
+    // the user had dialed in before switching modes. Read once per bind via
+    // rememberUpdatedState below, not a DisposableEffect key: changing it while already
+    // bound (every pinch delta) must never force a camera rebind.
+    desiredZoomRatio: Float = 1f,
     onImageCaptureReady: (ImageCapture) -> Unit = {},
     onVideoCaptureReady: (VideoCapture<Recorder>) -> Unit = {},
     onBurstControllerReady: (BurstController) -> Unit = {},
     onExposureControllerReady: (ExposureController?) -> Unit = {},
     onCinematicConfigReady: (CinematicConfig) -> Unit = {},
-    onFocusMeteringReady: (FocusMeteringHandle?) -> Unit = {},
+    onCameraReady: (CameraHandle?) -> Unit = {},
     onBindError: (Throwable) -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -65,6 +75,7 @@ fun CameraPreview(
     }
     val videoCapture = remember { VideoCapture.withOutput(recorder) }
     val burstController = remember(burstFrameCount) { BurstController(burstFrameCount) }
+    val currentDesiredZoomRatio by rememberUpdatedState(desiredZoomRatio)
 
     // Bind per mode rather than all use cases at once: some devices reject the combined
     // Preview + ImageCapture + VideoCapture graph, so each mode only binds what it needs.
@@ -100,7 +111,8 @@ fun CameraPreview(
                             onImageCaptureReady(imageCapture)
                             onBurstControllerReady(burstController)
                             onExposureControllerReady(camera.exposureController())
-                            onFocusMeteringReady(camera.focusMeteringHandle(previewView))
+                            onCameraReady(camera.cameraHandle(previewView))
+                            camera.reapplyPendingZoom(currentDesiredZoomRatio)
                         }
                         CameraMode.Video -> {
                             val camera = provider.bindToLifecycle(
@@ -110,7 +122,8 @@ fun CameraPreview(
                                 videoCapture,
                             )
                             onVideoCaptureReady(videoCapture)
-                            onFocusMeteringReady(camera.focusMeteringHandle(previewView))
+                            onCameraReady(camera.cameraHandle(previewView))
+                            camera.reapplyPendingZoom(currentDesiredZoomRatio)
                         }
                         CameraMode.Cinematic -> {
                             // Characteristics vary per device, so the config is resolved fresh
@@ -168,7 +181,8 @@ fun CameraPreview(
                             }
                             onVideoCaptureReady(cinematicVideoCapture)
                             onCinematicConfigReady(cinematicConfig)
-                            onFocusMeteringReady(camera.focusMeteringHandle(previewView))
+                            onCameraReady(camera.cameraHandle(previewView))
+                            camera.reapplyPendingZoom(currentDesiredZoomRatio)
                         }
                     }
                 } catch (t: Throwable) {
@@ -182,9 +196,9 @@ fun CameraPreview(
         onDispose {
             cameraProvider?.unbindAll()
             activeEffect?.release()
-            // Invalidates any in-flight focus/metering handle from this bind so a mode
-            // switch or retry never lets a tap reach a torn-down CameraControl.
-            onFocusMeteringReady(null)
+            // Invalidates any in-flight camera handle from this bind so a mode switch or
+            // retry never lets a tap or pinch reach a torn-down CameraControl.
+            onCameraReady(null)
         }
     }
 
@@ -223,5 +237,26 @@ private fun Camera.exposureController(): ExposureController? {
     )
 }
 
-private fun Camera.focusMeteringHandle(previewView: PreviewView): FocusMeteringHandle =
-    FocusMeteringHandle(cameraControl, previewView.meteringPointFactory)
+private fun Camera.cameraHandle(previewView: PreviewView): CameraHandle =
+    CameraHandle(cameraControl, cameraInfo, previewView.meteringPointFactory)
+
+/**
+ * Re-applies a zoom ratio carried over from a previous bind (e.g. the ratio the user had
+ * dialed in before switching mode), clamped to *this* camera's own reported range so state
+ * is preserved across mode switches only where the new camera can actually honour it. A
+ * ratio of 1x or below is never worth an explicit call - every camera already starts at its
+ * own native 1x-equivalent baseline. If the zoom-state LiveData has no value yet (bind
+ * still settling), the previous ratio is simply dropped rather than guessed at; the chip
+ * will reflect whatever the camera actually starts at.
+ */
+private fun Camera.reapplyPendingZoom(desiredZoomRatio: Float) {
+    if (!desiredZoomRatio.isFinite() || desiredZoomRatio <= 1f) return
+    val zoomState = cameraInfo.zoomState.value ?: return
+    val clamped = ZoomLogic.computeNewRatio(
+        current = 1f,
+        gestureFactor = desiredZoomRatio,
+        min = zoomState.minZoomRatio,
+        max = zoomState.maxZoomRatio,
+    )
+    cameraControl.setZoomRatio(clamped)
+}

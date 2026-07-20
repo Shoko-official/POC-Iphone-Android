@@ -28,12 +28,18 @@ object RobustFrameMerger {
      * @param accepted per-frame acceptance from the global aligner.
      * @param tileOffsets per-frame refined offsets; null for the reference and any
      *   rejected frame (both are skipped as supporting frames).
+     * @param nightParams when non-null, enables motion-adaptive per-frame global
+     *   weighting (see [NightMergeParams.globalMotionWeight]): each supporting frame's
+     *   contribution is scaled by a weight derived from how far its aligned residual
+     *   sigma exceeds the burst's baseline noise. When null the merge is unchanged and
+     *   every frame carries a global weight of exactly 1.0.
      */
     fun merge(
         frames: List<Frame>,
         accepted: List<Boolean>,
         tileOffsets: List<TileAligner.TileOffsets?>,
         ghostRejector: GhostRejector = GhostRejector(),
+        nightParams: NightMergeParams? = null,
     ): Frame {
         require(frames.isNotEmpty()) { "frames must not be empty" }
         require(frames.size == accepted.size && frames.size == tileOffsets.size) {
@@ -69,11 +75,40 @@ object RobustFrameMerger {
             }
         }
 
+        // Per-frame aligned residual sigma, computed up front so the motion-adaptive
+        // baseline (below) can see every supporting frame's sigma. This is the SAME
+        // value the merge would compute inline, just hoisted, so the non-night path
+        // stays bit-identical.
+        val sigmas = DoubleArray(frames.size)
+        for (index in frames.indices) {
+            if (index == 0 || !accepted[index]) continue
+            val offsets = tileOffsets[index] ?: continue
+            sigmas[index] = estimateSigma(frames[index], offsets, refLuma, width, height, ghostRejector)
+        }
+
+        // Motion-adaptive per-frame global weights (night profile only). The baseline
+        // noise is the median residual sigma of the supporting frames; a frame whose
+        // residual exceeds that baseline carries un-cancellable motion and is
+        // down-weighted everywhere. Without a profile every weight is exactly 1.0, so
+        // the accumulation is identical to the standard merge.
+        val globalWeights = DoubleArray(frames.size) { 1.0 }
+        if (nightParams != null) {
+            val supporting = frames.indices.filter { it != 0 && accepted[it] && tileOffsets[it] != null }
+            if (supporting.isNotEmpty()) {
+                val referenceSigma = medianOf(DoubleArray(supporting.size) { sigmas[supporting[it]] })
+                for (index in supporting) {
+                    val excess = (sigmas[index] - referenceSigma).coerceAtLeast(0.0)
+                    globalWeights[index] = nightParams.globalMotionWeight(excess, referenceSigma)
+                }
+            }
+        }
+
         for (index in frames.indices) {
             if (index == 0 || !accepted[index]) continue
             val offsets = tileOffsets[index] ?: continue
             val frame = frames[index]
-            val sigma = estimateSigma(frame, offsets, refLuma, width, height, ghostRejector)
+            val sigma = sigmas[index]
+            val globalWeight = globalWeights[index]
 
             // Row-parallel per frame: each output row reads arbitrary INPUT rows (via
             // the sub-pixel fetch) but writes only its own accumulators, so rows are
@@ -90,7 +125,7 @@ object RobustFrameMerger {
                         SubPixelSampler.sampleRgb(frame, x + offsetX, y + offsetY, scratch)
                         val luma = 0.299 * scratch[0] + 0.587 * scratch[1] + 0.114 * scratch[2]
                         val i = row + x
-                        val weight = ghostRejector.weight(luma - refLuma[i], sigma)
+                        val weight = globalWeight * ghostRejector.weight(luma - refLuma[i], sigma)
                         if (weight > 0.0) {
                             sumR[i] += weight * scratch[0]
                             sumG[i] += weight * scratch[1]
@@ -148,5 +183,18 @@ object RobustFrameMerger {
             y += SIGMA_SAMPLE_STRIDE
         }
         return ghostRejector.estimateSigma(diffs)
+    }
+
+    /** Median of a copy of [values] (input left untouched); 0.0 for an empty array. */
+    private fun medianOf(values: DoubleArray): Double {
+        if (values.isEmpty()) return 0.0
+        val sorted = values.copyOf()
+        sorted.sort()
+        val mid = sorted.size / 2
+        return if (sorted.size % 2 == 1) {
+            sorted[mid]
+        } else {
+            (sorted[mid - 1] + sorted[mid]) / 2.0
+        }
     }
 }

@@ -36,6 +36,9 @@
     <string name="settings_burst_frame_count_option_description">%1$d frames per burst</string>
     <string name="settings_hdr_burst_label">HDR burst</string>
     <string name="settings_hdr_burst_description">Brackets exposure across -2/0/+2 EV and fuses for extra dynamic range instead of the single-exposure burst.</string>
+    <string name="settings_section_night">Night mode</string>
+    <string name="settings_night_mode_label">Night mode</string>
+    <string name="settings_night_mode_description">Captures a longer 12-frame burst and merges it for strong low-light noise. Takes priority over HDR burst when both are on.</string>
     <string name="settings_section_merged_photos">Merged photos</string>
     <string name="settings_apply_finishing_label">Apply finishing to merged photos</string>
     <string name="settings_apply_finishing_description">Adds tone, saturation and contrast finishing when a burst is merged and saved.</string>

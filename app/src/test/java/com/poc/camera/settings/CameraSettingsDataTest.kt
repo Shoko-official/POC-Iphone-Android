@@ -15,6 +15,7 @@ class CameraSettingsDataTest {
         assertEquals(VideoLook.Neutral, default.defaultCinematicLook)
         assertEquals(false, default.hdrBurstEnabled)
         assertEquals(false, default.saveComparisonPair)
+        assertEquals(false, default.nightModeEnabled)
     }
 
     @Test
@@ -40,6 +41,7 @@ class CameraSettingsDataTest {
             defaultCinematicLook = VideoLook.Cinematic,
             hdrBurstEnabled = true,
             saveComparisonPair = true,
+            nightModeEnabled = true,
         )
 
         val decoded = CameraSettingsData.fromRaw(
@@ -48,6 +50,7 @@ class CameraSettingsDataTest {
             defaultCinematicLookName = original.defaultCinematicLook.name,
             hdrBurstEnabled = original.hdrBurstEnabled,
             saveComparisonPair = original.saveComparisonPair,
+            nightModeEnabled = original.nightModeEnabled,
         )
 
         assertEquals(original, decoded)
@@ -62,6 +65,7 @@ class CameraSettingsDataTest {
                 defaultCinematicLookName = look.name,
                 hdrBurstEnabled = false,
                 saveComparisonPair = false,
+                nightModeEnabled = false,
             )
 
             assertEquals(look, decoded.defaultCinematicLook)
@@ -76,6 +80,7 @@ class CameraSettingsDataTest {
             defaultCinematicLookName = "not-a-real-look",
             hdrBurstEnabled = true,
             saveComparisonPair = true,
+            nightModeEnabled = true,
         )
 
         assertEquals(CameraSettingsData.DEFAULT_BURST_FRAME_COUNT, decoded.burstFrameCount)
@@ -83,6 +88,7 @@ class CameraSettingsDataTest {
         assertEquals(CameraSettingsData.DEFAULT.defaultCinematicLook, decoded.defaultCinematicLook)
         assertEquals(true, decoded.hdrBurstEnabled)
         assertEquals(true, decoded.saveComparisonPair)
+        assertEquals(true, decoded.nightModeEnabled)
     }
 
     @Test
@@ -93,6 +99,7 @@ class CameraSettingsDataTest {
             defaultCinematicLookName = null,
             hdrBurstEnabled = false,
             saveComparisonPair = false,
+            nightModeEnabled = false,
         )
 
         assertEquals(CameraSettingsData.DEFAULT.defaultCinematicLook, decoded.defaultCinematicLook)

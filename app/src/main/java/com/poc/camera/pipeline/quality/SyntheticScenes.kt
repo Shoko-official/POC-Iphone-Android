@@ -238,6 +238,135 @@ object SyntheticScenes {
         return HdrBurst(frames, evs)
     }
 
+    // --- Night (high-gain low-light) scene ------------------------------------
+    //
+    // A dedicated dark scene for the night pipeline gate, kept OUT of [names] so the
+    // existing single-EV golden report is unaffected. It is darker than "lowlight"
+    // (mean luma in the low twenties) and carries a bright hard-edged light source
+    // (a lamp), and it is captured with a heavier noise model and a slight per-frame
+    // drift, simulating a long hand-held high-ISO capture.
+
+    /** Read-noise sigma for the night model: 3x the standard [READ_NOISE]. */
+    const val NIGHT_READ_NOISE = READ_NOISE * 3.0
+
+    /** Shot-noise gain for the night model: 2x the standard [SHOT_GAIN]. */
+    const val NIGHT_SHOT_GAIN = SHOT_GAIN * 2.0
+
+    /** Frames in a night burst (a longer capture than the still default). */
+    const val NIGHT_BURST_COUNT = 12
+
+    /** Cumulative global drift (pixels) across a night burst, simulating hand shake. */
+    const val NIGHT_DRIFT_PX = 3
+
+    /** Half-side of the square lamp region, centred at ([LAMP_CX], [LAMP_CY]). */
+    private const val LAMP_HALF = 9
+    private const val LAMP_CX = 92
+    private const val LAMP_CY = 30
+    private const val LAMP_VALUE = 250
+
+    /** The clean, noise-free night ground truth. */
+    fun nightClean(): Frame = nightScene()
+
+    /**
+     * A [count]-frame night burst of [nightScene]: heavier ([NIGHT_READ_NOISE],
+     * [NIGHT_SHOT_GAIN]) noise with a slight cumulative global drift up to [maxDriftPx]
+     * across the burst (frame 0 is undrifted, so it is the merge reference). Per-frame
+     * seeds derive from [baseSeed], so the burst is reproducible.
+     */
+    fun nightBurst(
+        baseSeed: Long,
+        count: Int = NIGHT_BURST_COUNT,
+        maxDriftPx: Int = NIGHT_DRIFT_PX,
+    ): List<Frame> {
+        require(count >= 1) { "count must be >= 1" }
+        val clean = nightScene()
+        return (0 until count).map { i ->
+            val (dx, dy) = driftAt(i, count, maxDriftPx)
+            noisyShifted(clean, baseSeed + i * SEED_STRIDE, dx, dy, NIGHT_READ_NOISE, NIGHT_SHOT_GAIN)
+        }
+    }
+
+    /**
+     * A single night frame carrying LARGE artificial motion: [nightScene] shifted by
+     * [shiftPx] in both axes (well beyond the merge's alignment range) then captured
+     * under the night noise model with seed [seed]. Used by the robustness proof to
+     * inject an un-mergeable outlier into an otherwise clean burst.
+     */
+    fun nightMotionOutlier(seed: Long, shiftPx: Int = 40): Frame =
+        noisyShifted(nightScene(), seed, shiftPx, shiftPx, NIGHT_READ_NOISE, NIGHT_SHOT_GAIN)
+
+    /** Per-frame integer drift for frame [i] of [count], reaching ~[maxDriftPx] by the last frame. */
+    private fun driftAt(i: Int, count: Int, maxDriftPx: Int): Pair<Int, Int> {
+        if (count <= 1 || maxDriftPx == 0) return 0 to 0
+        val t = i.toDouble() / (count - 1)
+        val dx = (t * maxDriftPx).roundToInt()
+        // Slightly less vertical travel than horizontal, so the drift is not a pure diagonal.
+        val dy = (t * maxDriftPx * 0.5).roundToInt()
+        return dx to dy
+    }
+
+    /**
+     * [clean] translated so that the aligner recovers offset ([dx], [dy]) -- i.e.
+     * output pixel (x, y) samples clean (x - dx, y - dy) with edge clamping -- then
+     * captured under the given noise model with seed [seed].
+     */
+    fun noisyShifted(
+        clean: Frame,
+        seed: Long,
+        dx: Int,
+        dy: Int,
+        readNoise: Double,
+        shotGain: Double,
+    ): Frame = noisy(shift(clean, dx, dy), seed, readNoise, shotGain)
+
+    /** Edge-clamped integer translation: out(x, y) = frame(x - dx, y - dy). */
+    private fun shift(frame: Frame, dx: Int, dy: Int): Frame {
+        if (dx == 0 && dy == 0) return frame
+        val w = frame.width
+        val h = frame.height
+        val src = frame.argb
+        val out = IntArray(src.size)
+        for (y in 0 until h) {
+            val sy = (y - dy).coerceIn(0, h - 1)
+            for (x in 0 until w) {
+                val sx = (x - dx).coerceIn(0, w - 1)
+                out[y * w + x] = src[sy * w + sx]
+            }
+        }
+        return Frame(w, h, out, frame.timestampMillis)
+    }
+
+    /**
+     * The night ground truth: a coarse dark texture compressed into [8, 28] (so the
+     * whole scene sits in the deep shadows) with a bright hard-edged [LAMP_VALUE] lamp
+     * square laid on top (a light source, with a crisp boundary and no bloom halo).
+     * The lamp lifts the overall mean luma into the low twenties.
+     */
+    private fun nightScene(): Frame {
+        val canvas = texturedCanvas(seed = 0x9147L, cell = 16, low = 0, high = 255)
+        val out = IntArray(canvas.size)
+        for (i in canvas.indices) {
+            val base = canvas[i] and 0xFF
+            out[i] = gray(8 + base * 20 / 255)
+        }
+        for (y in LAMP_CY - LAMP_HALF..LAMP_CY + LAMP_HALF) {
+            if (y < 0 || y >= SIZE) continue
+            for (x in LAMP_CX - LAMP_HALF..LAMP_CX + LAMP_HALF) {
+                if (x < 0 || x >= SIZE) continue
+                out[y * SIZE + x] = gray(LAMP_VALUE)
+            }
+        }
+        return frame(out)
+    }
+
+    /** Bounding box (x0, y0, x1, y1) of the lamp region, for the no-bloom golden proof. */
+    fun nightLampBounds(): IntArray = intArrayOf(
+        LAMP_CX - LAMP_HALF,
+        LAMP_CY - LAMP_HALF,
+        LAMP_CX + LAMP_HALF,
+        LAMP_CY + LAMP_HALF,
+    )
+
     private fun edges(): Frame {
         val out = IntArray(SIZE * SIZE)
         val half = SIZE / 2

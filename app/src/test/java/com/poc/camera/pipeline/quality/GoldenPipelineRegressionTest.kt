@@ -87,18 +87,27 @@ class GoldenPipelineRegressionTest {
         // Each floor = measured value * 0.98 (PSNR/SSIM) or measured value * 1.02
         // (MAE ceiling). Floors were raised where the new pipeline improved beyond
         // the tolerance and left unchanged where it held flat; none were lowered.
-        // Old actuals (global integer merge)  ->  New actuals (tile/sub-pixel merge):
-        //   edges        psnr 36.66->36.66  ssim 0.9921->0.9921  mae 2.534->2.535
-        //   texture      psnr 32.98->33.03  ssim 0.9951->0.9953  mae 3.099->3.079
-        //   gradients    psnr 36.78->39.07  ssim 0.9395->0.9638  mae 2.813->2.211
-        //   lowlight     psnr 37.60->39.05  ssim 0.9476->0.9630  mae 2.601->2.246
-        //   highcontrast psnr 34.95->36.22  ssim 0.8763->0.8910  mae 3.529->3.123
+        //
+        // RE-BASELINED after local tone mapping (LocalToneMapper on at the
+        // conservative FinishingParams.DEFAULT.localContrast), 2026-07-20. Local
+        // contrast is a deliberate rendition change measured against the CLEAN truth,
+        // so DEFAULT strength is gated low enough that every floor stays green:
+        //   edges        36.657->36.628  ssim 0.99209  mae 2.535->2.554  (flat: kept)
+        //   texture      33.030->36.520  ssim 0.9953->0.99789 mae 3.079->2.628 (raised*)
+        //   gradients    39.068->39.066  ssim 0.96386  mae 2.211->2.211  (flat: kept)
+        //   lowlight     39.046->39.007  ssim 0.96423  mae 2.246->2.251  (flat: kept)
+        //   highcontrast 36.219->36.646  ssim 0.8910->0.90192 mae 3.123->2.950 (raised)
+        // (*) texture also carries the SyntheticScenes grayscale-invariant fix: the
+        // scene was formerly stored in the blue channel only, which both depressed its
+        // baseline and made luma-based ops meaningless. edges is marginally softer
+        // (thin-line detail gain) but holds; highcontrast improves (local shadow lift
+        // and highlight taming). gradients/lowlight are unmoved at this strength.
         val FLOORS = listOf(
             Floor("edges", minPsnr = 35.9, minSsim = 0.972, maxMae = 2.59),
-            Floor("texture", minPsnr = 32.3, minSsim = 0.975, maxMae = 3.15),
+            Floor("texture", minPsnr = 35.7, minSsim = 0.977, maxMae = 2.68),
             Floor("gradients", minPsnr = 38.2, minSsim = 0.944, maxMae = 2.26),
             Floor("lowlight", minPsnr = 38.2, minSsim = 0.943, maxMae = 2.30),
-            Floor("highcontrast", minPsnr = 35.4, minSsim = 0.873, maxMae = 3.19),
+            Floor("highcontrast", minPsnr = 35.9, minSsim = 0.883, maxMae = 3.01),
         )
     }
 }

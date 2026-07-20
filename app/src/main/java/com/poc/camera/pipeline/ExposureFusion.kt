@@ -5,6 +5,13 @@ import kotlin.math.roundToInt
 /**
  * Mertens-style exposure fusion of a set of ALIGNED frames tagged with relative EV.
  *
+ * SUPERSEDED ON THE HDR PATH: [HdrMergePipeline] now fuses with
+ * [LaplacianExposureFusion], which does true multi-scale Laplacian-pyramid blending
+ * and no longer leaves the residual low-frequency halos the box-blur ramp below can
+ * produce around high-contrast exposure boundaries. This class is retained as the
+ * documented single-scale baseline and as the comparison reference the halo test
+ * measures the pyramid fusion against; see [LaplacianExposureFusion].
+ *
  * Each frame contributes a per-pixel weight from [ExposureFusionWeights]; the fused
  * output is, per pixel and per channel, the weight-normalised sum of the inputs:
  *

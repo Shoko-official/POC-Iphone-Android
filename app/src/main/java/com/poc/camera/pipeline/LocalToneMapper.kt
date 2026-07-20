@@ -84,20 +84,23 @@ object LocalToneMapper {
         }
 
         val base = GuidedFilter.selfGuided(luma, frame.width, frame.height, params.radius, params.eps)
+        // Per-pixel re-application from same-index luma/base: element-wise, row-parallel.
         val out = IntArray(src.size)
-        for (i in src.indices) {
-            val inLuma = luma[i]
-            val detail = inLuma - base[i]
-            val compressedBase = 128.0 + (base[i] - 128.0) * (1.0 - params.baseCompression)
-            val outLuma = compressedBase + params.detailGain * detail
-            val ratio = ((outLuma + RATIO_EPS) / (inLuma + RATIO_EPS)).coerceIn(RATIO_MIN, RATIO_MAX)
+        PipelineParallel.parallelRows(src.size) { start, end ->
+            for (i in start until end) {
+                val inLuma = luma[i]
+                val detail = inLuma - base[i]
+                val compressedBase = 128.0 + (base[i] - 128.0) * (1.0 - params.baseCompression)
+                val outLuma = compressedBase + params.detailGain * detail
+                val ratio = ((outLuma + RATIO_EPS) / (inLuma + RATIO_EPS)).coerceIn(RATIO_MIN, RATIO_MAX)
 
-            val pixel = src[i]
-            val a = (pixel ushr 24) and 0xFF
-            val r = (((pixel shr 16) and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
-            val g = (((pixel shr 8) and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
-            val b = ((pixel and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
-            out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+                val pixel = src[i]
+                val a = (pixel ushr 24) and 0xFF
+                val r = (((pixel shr 16) and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
+                val g = (((pixel shr 8) and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
+                val b = ((pixel and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
+                out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
         }
         return Frame(frame.width, frame.height, out, frame.timestampMillis)
     }

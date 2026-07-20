@@ -146,19 +146,23 @@ object DetailEnhancer {
         val lo = erode3x3(luma, frame.width, frame.height)
         val hi = dilate3x3(luma, frame.width, frame.height)
 
+        // Per-pixel sharpen + clamp + re-application from same-index inputs: element-wise,
+        // row-parallel. The robust-sigma reduction and the 3x3 morphology above stay serial.
         val out = IntArray(src.size)
-        for (i in src.indices) {
-            val inLuma = luma[i]
-            val sharp = inLuma + params.gain * coring(detail[i], knee)
-            val clamped = sharp.coerceIn(lo[i] - params.overshootAllowance, hi[i] + params.overshootAllowance)
-            val ratio = ((clamped + RATIO_EPS) / (inLuma + RATIO_EPS)).coerceIn(RATIO_MIN, RATIO_MAX)
+        PipelineParallel.parallelRows(src.size) { start, end ->
+            for (i in start until end) {
+                val inLuma = luma[i]
+                val sharp = inLuma + params.gain * coring(detail[i], knee)
+                val clamped = sharp.coerceIn(lo[i] - params.overshootAllowance, hi[i] + params.overshootAllowance)
+                val ratio = ((clamped + RATIO_EPS) / (inLuma + RATIO_EPS)).coerceIn(RATIO_MIN, RATIO_MAX)
 
-            val pixel = src[i]
-            val a = (pixel ushr 24) and 0xFF
-            val r = (((pixel shr 16) and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
-            val g = (((pixel shr 8) and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
-            val b = ((pixel and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
-            out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+                val pixel = src[i]
+                val a = (pixel ushr 24) and 0xFF
+                val r = (((pixel shr 16) and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
+                val g = (((pixel shr 8) and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
+                val b = ((pixel and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
+                out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
         }
         return Frame(frame.width, frame.height, out, frame.timestampMillis)
     }

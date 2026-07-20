@@ -10,7 +10,8 @@ class BurstImageGeometryTest {
 
     @Test
     fun twelveMegapixelSensorDownsamplesByTwo() {
-        // 4032x3024 (~12.2 MP) -> inSampleSize 2 -> 2016x1512 (~3.0 MP) <= 3.5 MP bound.
+        // 4032x3024 (~12.2 MP) -> inSampleSize 2 -> 2016x1512 (~3.0 MP) <= 8 MP bound
+        // (full 12.2 MP overshoots the bound, so it is still halved).
         val sample = BurstImageGeometry.inSampleSizeFor(4032, 3024, BurstImageGeometry.MAX_BURST_PIXELS)
         assertEquals(2, sample)
         assertTrue((4032 / sample).toLong() * (3024 / sample) <= BurstImageGeometry.MAX_BURST_PIXELS)

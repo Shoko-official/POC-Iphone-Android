@@ -64,24 +64,30 @@ object ExposureFusion {
             if (blurRadius > 0) BoxBlur.blur(raw, width, height, blurRadius) else raw
         }
 
+        // Per-pixel fuse: each output pixel sums the frames at its own index only, so
+        // pixels are independent and the loop is row-parallel (the per-pixel sum over
+        // frames stays in frame order, so the result is bit-identical to serial).
+        val frameArgb = Array(frames.size) { frames[it].argb }
         val out = IntArray(pixelCount)
-        for (p in 0 until pixelCount) {
-            var sumR = 0.0
-            var sumG = 0.0
-            var sumB = 0.0
-            var sumW = 0.0
-            for (index in frames.indices) {
-                val w = weightMaps[index][p] + WEIGHT_EPS
-                val pixel = frames[index].argb[p]
-                sumR += w * ((pixel shr 16) and 0xFF)
-                sumG += w * ((pixel shr 8) and 0xFF)
-                sumB += w * (pixel and 0xFF)
-                sumW += w
+        PipelineParallel.parallelRows(pixelCount) { start, end ->
+            for (p in start until end) {
+                var sumR = 0.0
+                var sumG = 0.0
+                var sumB = 0.0
+                var sumW = 0.0
+                for (index in frames.indices) {
+                    val w = weightMaps[index][p] + WEIGHT_EPS
+                    val pixel = frameArgb[index][p]
+                    sumR += w * ((pixel shr 16) and 0xFF)
+                    sumG += w * ((pixel shr 8) and 0xFF)
+                    sumB += w * (pixel and 0xFF)
+                    sumW += w
+                }
+                val r = (sumR / sumW).roundToInt().coerceIn(0, 255)
+                val g = (sumG / sumW).roundToInt().coerceIn(0, 255)
+                val b = (sumB / sumW).roundToInt().coerceIn(0, 255)
+                out[p] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
             }
-            val r = (sumR / sumW).roundToInt().coerceIn(0, 255)
-            val g = (sumG / sumW).roundToInt().coerceIn(0, 255)
-            val b = (sumB / sumW).roundToInt().coerceIn(0, 255)
-            out[p] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
         }
 
         return Frame(width, height, out, frames.first().timestampMillis)

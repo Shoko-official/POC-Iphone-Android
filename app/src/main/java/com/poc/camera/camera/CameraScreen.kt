@@ -74,6 +74,8 @@ import com.poc.camera.R
 import com.poc.camera.pipeline.BurstMergePipeline
 import com.poc.camera.pipeline.FinishingParams
 import com.poc.camera.pipeline.FinishingPipeline
+import com.poc.camera.pipeline.Frame
+import com.poc.camera.pipeline.HdrMergePipeline
 import com.poc.camera.settings.CameraSettingsData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -157,6 +159,7 @@ private fun CameraCaptureScreen(
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var videoCapture by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
     var burstController by remember { mutableStateOf<BurstController?>(null) }
+    var exposureController by remember { mutableStateOf<ExposureController?>(null) }
     var isBurstInProgress by remember { mutableStateOf(false) }
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
     var isRecording by remember { mutableStateOf(false) }
@@ -181,6 +184,7 @@ private fun CameraCaptureScreen(
     val cinematicModeLabel = stringResource(R.string.mode_cinematic)
     val burstButtonLabel = stringResource(R.string.burst_button)
     val burstMergeSuccessMessage = stringResource(R.string.burst_merge_success)
+    val hdrBurstMergeSuccessMessage = stringResource(R.string.burst_hdr_merge_success)
     val burstMergeFailureMessage = stringResource(R.string.burst_merge_failure)
     val cinematicFps24Label = stringResource(R.string.cinematic_fps_24)
     val cinematicFpsDefaultLabel = stringResource(R.string.cinematic_fps_default)
@@ -234,6 +238,7 @@ private fun CameraCaptureScreen(
             onImageCaptureReady = { imageCapture = it },
             onVideoCaptureReady = { videoCapture = it },
             onBurstControllerReady = { burstController = it },
+            onExposureControllerReady = { exposureController = it },
             onCinematicConfigReady = { cinematicConfig = it },
             onBindError = { previewBindError = true },
         )
@@ -353,42 +358,65 @@ private fun CameraCaptureScreen(
                         contentAlignment = Alignment.Center,
                     ) {
                         if (mode == CameraMode.Photo) {
+                            // Merge (single-EV or HDR) off the main thread, then finish,
+                            // persist and report; shared by both burst paths.
+                            val mergeAndSave: (suspend () -> Pair<Frame, String>) -> Unit = { produce ->
+                                scope.launch(Dispatchers.Default) {
+                                    try {
+                                        val (merged, message) = produce()
+                                        // Finishing (tone/saturation/contrast) is optional and
+                                        // only ever applies to the merged burst frame.
+                                        val output = if (settings.applyFinishingToMergedPhotos) {
+                                            FinishingPipeline.apply(merged, FinishingParams.DEFAULT)
+                                        } else {
+                                            merged
+                                        }
+                                        MergedPhotoSaver.save(context, output)
+                                        withContext(Dispatchers.Main) {
+                                            isBurstInProgress = false
+                                            snackbarHostState.showSnackbar(message)
+                                        }
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            isBurstInProgress = false
+                                            snackbarHostState.showSnackbar(burstMergeFailureMessage)
+                                        }
+                                    }
+                                }
+                            }
+                            val controllerReady = burstController != null
                             Button(
                                 onClick = {
                                     val controller = burstController ?: return@Button
                                     isBurstInProgress = true
-                                    controller.arm { frames ->
-                                        // Merge off the main thread, then persist and report.
-                                        scope.launch(Dispatchers.Default) {
-                                            try {
+                                    val exposure = exposureController
+                                    if (settings.hdrBurstEnabled && exposure != null) {
+                                        controller.armBracketed(
+                                            steps = exposure.steps,
+                                            framesPerEv = exposure.framesPerEv,
+                                            setExposureIndex = exposure.setIndexAndAwait,
+                                        ) { burst ->
+                                            mergeAndSave {
+                                                val result = HdrMergePipeline.merge(burst.frames, burst.evs)
+                                                result.fused to String.format(
+                                                    hdrBurstMergeSuccessMessage,
+                                                    result.usedFrameCount,
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        controller.arm { frames ->
+                                            mergeAndSave {
                                                 val result = BurstMergePipeline.merge(frames)
-                                                // Finishing (tone/saturation/contrast) is optional and
-                                                // only ever applies to the merged burst frame.
-                                                val output = if (settings.applyFinishingToMergedPhotos) {
-                                                    FinishingPipeline.apply(result.merged, FinishingParams.DEFAULT)
-                                                } else {
-                                                    result.merged
-                                                }
-                                                MergedPhotoSaver.save(context, output)
-                                                withContext(Dispatchers.Main) {
-                                                    isBurstInProgress = false
-                                                    snackbarHostState.showSnackbar(
-                                                        String.format(
-                                                            burstMergeSuccessMessage,
-                                                            result.usedFrameCount,
-                                                        ),
-                                                    )
-                                                }
-                                            } catch (e: Exception) {
-                                                withContext(Dispatchers.Main) {
-                                                    isBurstInProgress = false
-                                                    snackbarHostState.showSnackbar(burstMergeFailureMessage)
-                                                }
+                                                result.merged to String.format(
+                                                    burstMergeSuccessMessage,
+                                                    result.usedFrameCount,
+                                                )
                                             }
                                         }
                                     }
                                 },
-                                enabled = burstController != null && !isBurstInProgress,
+                                enabled = controllerReady && !isBurstInProgress,
                             ) {
                                 Text(text = burstButtonLabel)
                             }

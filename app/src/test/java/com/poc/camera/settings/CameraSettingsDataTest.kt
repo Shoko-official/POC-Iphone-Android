@@ -7,12 +7,13 @@ import org.junit.Test
 class CameraSettingsDataTest {
 
     @Test
-    fun defaultUsesSixFrameBurstFinishingOnAndNeutralLook() {
+    fun defaultUsesSixFrameBurstFinishingOnNeutralLookAndHdrOff() {
         val default = CameraSettingsData.DEFAULT
 
         assertEquals(6, default.burstFrameCount)
         assertEquals(true, default.applyFinishingToMergedPhotos)
         assertEquals(VideoLook.Neutral, default.defaultCinematicLook)
+        assertEquals(false, default.hdrBurstEnabled)
     }
 
     @Test
@@ -36,12 +37,14 @@ class CameraSettingsDataTest {
             burstFrameCount = 9,
             applyFinishingToMergedPhotos = false,
             defaultCinematicLook = VideoLook.Cinematic,
+            hdrBurstEnabled = true,
         )
 
         val decoded = CameraSettingsData.fromRaw(
             burstFrameCount = original.burstFrameCount,
             applyFinishingToMergedPhotos = original.applyFinishingToMergedPhotos,
             defaultCinematicLookName = original.defaultCinematicLook.name,
+            hdrBurstEnabled = original.hdrBurstEnabled,
         )
 
         assertEquals(original, decoded)
@@ -54,6 +57,7 @@ class CameraSettingsDataTest {
                 burstFrameCount = 3,
                 applyFinishingToMergedPhotos = true,
                 defaultCinematicLookName = look.name,
+                hdrBurstEnabled = false,
             )
 
             assertEquals(look, decoded.defaultCinematicLook)
@@ -66,11 +70,13 @@ class CameraSettingsDataTest {
             burstFrameCount = 42,
             applyFinishingToMergedPhotos = false,
             defaultCinematicLookName = "not-a-real-look",
+            hdrBurstEnabled = true,
         )
 
         assertEquals(CameraSettingsData.DEFAULT_BURST_FRAME_COUNT, decoded.burstFrameCount)
         assertEquals(false, decoded.applyFinishingToMergedPhotos)
         assertEquals(CameraSettingsData.DEFAULT.defaultCinematicLook, decoded.defaultCinematicLook)
+        assertEquals(true, decoded.hdrBurstEnabled)
     }
 
     @Test
@@ -79,6 +85,7 @@ class CameraSettingsDataTest {
             burstFrameCount = 6,
             applyFinishingToMergedPhotos = true,
             defaultCinematicLookName = null,
+            hdrBurstEnabled = false,
         )
 
         assertEquals(CameraSettingsData.DEFAULT.defaultCinematicLook, decoded.defaultCinematicLook)

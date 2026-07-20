@@ -109,6 +109,7 @@ import com.poc.camera.pipeline.HdrMergePipeline
 import com.poc.camera.pipeline.NightPipeline
 import com.poc.camera.pipeline.SuperResolution
 import com.poc.camera.settings.CameraSettingsData
+import com.poc.camera.settings.VideoQualityLogic
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
@@ -259,9 +260,15 @@ private fun CameraCaptureScreen(
     var elapsedMillis by remember { mutableLongStateOf(0L) }
     var cinematicConfig by remember { mutableStateOf<CinematicConfig?>(null) }
     // Whether the just-bound Video/Cinematic use case actually resolved to HLG10 - see
-    // CameraPreview.onVideoRangeResolved and VideoDynamicRangeResolver. Reset alongside
+    // CameraPreview.onVideoConfigResolved and VideoDynamicRangeResolver. Reset alongside
     // cinematicConfig below so a stale reading never survives a switch to Photo.
     var isHlgActive by remember { mutableStateOf(false) }
+    // Effective video quality the just-bound Video/Cinematic use case actually resolved to
+    // (issue #72) - see CameraPreview.onVideoConfigResolved and VideoQualityLogic. Seeded
+    // from settings.videoQuality (never null) so the "differs from the user's choice" check
+    // below is trivially false before the first bind reports in, rather than showing a
+    // spurious mismatch chip.
+    var effectiveVideoQuality by remember { mutableStateOf(settings.videoQuality) }
     var cameraHandle by remember { mutableStateOf<CameraHandle?>(null) }
     var reticleState by remember { mutableStateOf<FocusReticleState>(FocusReticleState.Idle) }
     var focusRequestSeq by remember { mutableLongStateOf(0L) }
@@ -314,6 +321,8 @@ private fun CameraCaptureScreen(
     val cinematicRangeSuffixTemplate = stringResource(R.string.cinematic_overlay_range_suffix)
     val videoHdrStatusHlg10Label = stringResource(R.string.video_hdr_status_hlg10)
     val videoHdrStatusSdrLabel = stringResource(R.string.video_hdr_status_sdr)
+    val videoQualityMismatchContentDescriptionTemplate =
+        stringResource(R.string.video_quality_mismatch_content_description)
     val neutralLookLabel = stringResource(R.string.look_neutral)
     val cinematicLookLabel = stringResource(R.string.look_cinematic)
     val recordingIndicatorContentDescription = stringResource(R.string.recording_indicator_content_description)
@@ -392,6 +401,7 @@ private fun CameraCaptureScreen(
         }
         if (!mode.isVideoLike) {
             isHlgActive = false
+            effectiveVideoQuality = settings.videoQuality
         }
         onDispose {
             activeRecording?.stop()
@@ -458,13 +468,17 @@ private fun CameraCaptureScreen(
             desiredZoomRatio = zoomRatio,
             flashMode = flashMode,
             hdrVideoEnabled = settings.hdrVideoEnabled,
+            videoQuality = settings.videoQuality,
             modifier = Modifier.fillMaxSize(),
             onImageCaptureReady = { imageCapture = it },
             onVideoCaptureReady = { videoCapture = it },
             onBurstControllerReady = { burstController = it },
             onExposureControllerReady = { exposureController = it },
             onCinematicConfigReady = { cinematicConfig = it },
-            onVideoRangeResolved = { isHlgActive = it },
+            onVideoConfigResolved = { isHlg, effectiveQuality ->
+                isHlgActive = isHlg
+                effectiveVideoQuality = effectiveQuality
+            },
             onCameraAvailability = { back, front ->
                 hasBackCamera = back
                 hasFrontCamera = front
@@ -688,13 +702,38 @@ private fun CameraCaptureScreen(
             } else {
                 null
             }
+            // Quality mismatch (issue #72): only worth a chip once the Recorder actually
+            // landed somewhere other than the user's own choice - see
+            // VideoQualityLogic.showQualityChip. Reuses the same "%1$s - %2$s" join as the
+            // HDR suffix (VideoOverlayLabel) so a HDR+quality mismatch reads as one chip,
+            // e.g. "HLG10 - 1080p", instead of two.
+            val qualityMismatchLabel = if (VideoQualityLogic.showQualityChip(settings.videoQuality, effectiveVideoQuality)) {
+                effectiveVideoQuality.displayLabel
+            } else {
+                null
+            }
+            val videoOverlayLabel = VideoOverlayLabel.combine(
+                rangeLabel = videoRangeLabel,
+                qualityLabel = qualityMismatchLabel,
+                joinTemplate = cinematicRangeSuffixTemplate,
+            )
+            val qualityMismatchContentDescription = qualityMismatchLabel?.let {
+                String.format(
+                    videoQualityMismatchContentDescriptionTemplate,
+                    effectiveVideoQuality.displayLabel,
+                    settings.videoQuality.displayLabel,
+                )
+            }
 
-            if (mode == CameraMode.Video && videoRangeLabel != null) {
+            if (mode == CameraMode.Video && videoOverlayLabel != null) {
                 OverlayChip {
                     Text(
-                        text = videoRangeLabel,
+                        text = videoOverlayLabel,
                         color = Color.White,
                         style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
+                        modifier = qualityMismatchContentDescription?.let { desc ->
+                            Modifier.semantics { contentDescription = desc }
+                        } ?: Modifier,
                     )
                 }
             }
@@ -709,11 +748,14 @@ private fun CameraCaptureScreen(
                                 fpsDefaultLabel = cinematicFpsDefaultLabel,
                                 stabilizedTemplate = cinematicStabilizedTemplate,
                                 unstabilizedTemplate = cinematicUnstabilizedTemplate,
-                                rangeLabel = videoRangeLabel,
+                                rangeLabel = videoOverlayLabel,
                                 rangeSuffixTemplate = cinematicRangeSuffixTemplate,
                             ),
                             color = Color.White,
                             style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
+                            modifier = qualityMismatchContentDescription?.let { desc ->
+                                Modifier.semantics { contentDescription = desc }
+                            } ?: Modifier,
                         )
                     }
                 }

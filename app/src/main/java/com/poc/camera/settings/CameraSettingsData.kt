@@ -18,6 +18,7 @@ data class CameraSettingsData(
     val superResolutionEnabled: Boolean = DEFAULT_SUPER_RESOLUTION_ENABLED,
     val finishingPreset: FinishingPreset = DEFAULT_FINISHING_PRESET,
     val hdrVideoEnabled: Boolean = DEFAULT_HDR_VIDEO_ENABLED,
+    val videoQuality: VideoQualityChoice = DEFAULT_VIDEO_QUALITY,
 ) {
     companion object {
         const val DEFAULT_BURST_FRAME_COUNT = 6
@@ -27,6 +28,7 @@ data class CameraSettingsData(
         const val DEFAULT_SUPER_RESOLUTION_ENABLED = false
         const val DEFAULT_HDR_VIDEO_ENABLED = false
         val DEFAULT_FINISHING_PRESET = FinishingPreset.Natural
+        val DEFAULT_VIDEO_QUALITY = VideoQualityChoice.FHD
         val ALLOWED_BURST_FRAME_COUNTS = listOf(3, 6, 9)
         val DEFAULT = CameraSettingsData()
 
@@ -48,6 +50,7 @@ data class CameraSettingsData(
             superResolutionEnabled: Boolean,
             finishingPresetName: String? = null,
             hdrVideoEnabled: Boolean = DEFAULT_HDR_VIDEO_ENABLED,
+            videoQualityName: String? = null,
         ): CameraSettingsData = CameraSettingsData(
             burstFrameCount = sanitizeBurstFrameCount(burstFrameCount),
             applyFinishingToMergedPhotos = applyFinishingToMergedPhotos,
@@ -60,6 +63,8 @@ data class CameraSettingsData(
             finishingPreset = FinishingPreset.entries.firstOrNull { it.name == finishingPresetName }
                 ?: DEFAULT.finishingPreset,
             hdrVideoEnabled = hdrVideoEnabled,
+            videoQuality = VideoQualityChoice.entries.firstOrNull { it.name == videoQualityName }
+                ?: DEFAULT.videoQuality,
         )
     }
 }

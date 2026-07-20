@@ -19,6 +19,7 @@ class CameraSettingsDataTest {
         assertEquals(false, default.superResolutionEnabled)
         assertEquals(FinishingPreset.Natural, default.finishingPreset)
         assertEquals(false, default.hdrVideoEnabled)
+        assertEquals(VideoQualityChoice.FHD, default.videoQuality)
     }
 
     @Test
@@ -48,6 +49,7 @@ class CameraSettingsDataTest {
             superResolutionEnabled = true,
             finishingPreset = FinishingPreset.Vivid,
             hdrVideoEnabled = true,
+            videoQuality = VideoQualityChoice.UHD,
         )
 
         val decoded = CameraSettingsData.fromRaw(
@@ -60,6 +62,7 @@ class CameraSettingsDataTest {
             superResolutionEnabled = original.superResolutionEnabled,
             finishingPresetName = original.finishingPreset.name,
             hdrVideoEnabled = original.hdrVideoEnabled,
+            videoQualityName = original.videoQuality.name,
         )
 
         assertEquals(original, decoded)
@@ -78,6 +81,55 @@ class CameraSettingsDataTest {
         )
 
         assertEquals(CameraSettingsData.DEFAULT.hdrVideoEnabled, decoded.hdrVideoEnabled)
+    }
+
+    @Test
+    fun fromRawFallsBackToDefaultVideoQualityWhenMissing() {
+        val decoded = CameraSettingsData.fromRaw(
+            burstFrameCount = 6,
+            applyFinishingToMergedPhotos = true,
+            defaultCinematicLookName = null,
+            hdrBurstEnabled = false,
+            saveComparisonPair = false,
+            nightModeEnabled = false,
+            superResolutionEnabled = false,
+        )
+
+        assertEquals(CameraSettingsData.DEFAULT.videoQuality, decoded.videoQuality)
+    }
+
+    @Test
+    fun fromRawFallsBackToDefaultVideoQualityForInvalidName() {
+        val decoded = CameraSettingsData.fromRaw(
+            burstFrameCount = 6,
+            applyFinishingToMergedPhotos = true,
+            defaultCinematicLookName = null,
+            hdrBurstEnabled = false,
+            saveComparisonPair = false,
+            nightModeEnabled = false,
+            superResolutionEnabled = false,
+            videoQualityName = "not-a-real-quality",
+        )
+
+        assertEquals(CameraSettingsData.DEFAULT.videoQuality, decoded.videoQuality)
+    }
+
+    @Test
+    fun fromRawRoundTripsEveryVideoQuality() {
+        for (quality in VideoQualityChoice.entries) {
+            val decoded = CameraSettingsData.fromRaw(
+                burstFrameCount = 3,
+                applyFinishingToMergedPhotos = true,
+                defaultCinematicLookName = null,
+                hdrBurstEnabled = false,
+                saveComparisonPair = false,
+                nightModeEnabled = false,
+                superResolutionEnabled = false,
+                videoQualityName = quality.name,
+            )
+
+            assertEquals(quality, decoded.videoQuality)
+        }
     }
 
     @Test

@@ -71,6 +71,44 @@ data class FinishingParams(
             detailEnhance = 0.08,
             whiteBalance = 0.8,
         )
+
+        /**
+         * Reference local-contrast strength for the rendition axis. Visibly stronger
+         * than [DEFAULT]'s timid 0.03: it drives a real local shadow lift / highlight
+         * taming that reads as a deliberate look rather than a no-op. It is the strength
+         * the rendition TARGET (`RenditionTargets`) bakes into the ideal look and that
+         * [RENDITION] renders at, so the two share a single source of truth.
+         */
+        const val REF_LOCAL_CONTRAST = 0.35
+
+        /**
+         * Reference detail-enhance strength for the rendition axis. Visibly stronger
+         * than [DEFAULT]'s timid 0.08: it produces a clearly perceptible sharpen instead
+         * of the near-no-op the clean-truth fidelity floors force onto [DEFAULT]. Paired
+         * with [REF_LOCAL_CONTRAST] as the reference look for `RenditionTargets` and
+         * [RENDITION].
+         */
+        const val REF_DETAIL_ENHANCE = 0.5
+
+        /**
+         * Rendition profile: identical to [DEFAULT] except that [localContrast] and
+         * [detailEnhance] run at their reference strengths ([REF_LOCAL_CONTRAST],
+         * [REF_DETAIL_ENHANCE]) instead of the timid values the clean-truth fidelity
+         * floors pin [DEFAULT] to. Same global tone/saturation/contrast plus the same
+         * white-balance and chroma-denoise strengths.
+         *
+         * This encodes the deliberate look a future "Natural+" or preset system ships
+         * (issue #46). It is evaluated on a SEPARATE axis: `RenditionGoldenRegressionTest`
+         * scores the full pipeline run with these params against the rendition TARGET
+         * (`RenditionTargets`), not against the clean truth, so the stronger rendition is
+         * measured as tracking the intended look rather than as fidelity error. The
+         * existing clean-truth golden suites keep running [DEFAULT] and stay untouched.
+         * No camera/UI stage selects this profile yet; wiring it into a preset is issue #46.
+         */
+        val RENDITION = DEFAULT.copy(
+            localContrast = REF_LOCAL_CONTRAST,
+            detailEnhance = REF_DETAIL_ENHANCE,
+        )
     }
 }
 

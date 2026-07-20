@@ -239,6 +239,15 @@ private fun CameraCaptureScreen(
         BurstImageGeometry.maxBurstPixelsFor(memoryClassMb)
     }
     var mode by rememberSaveable { mutableStateOf(CameraMode.Photo) }
+    // Which physical camera is bound (issue #71); survives mode switches and process death
+    // the same way zoomRatio/flashMode do below - it is a deliberate user choice, not
+    // session-only state like torch.
+    var lensFacing by rememberSaveable { mutableStateOf(LensFacing.Back) }
+    // Capability gate for the switch-camera chip - see CameraPreview's onCameraAvailability.
+    // Both default to false (rather than assuming a back camera exists) so the chip never
+    // flashes visible then disappears before the provider has actually reported in.
+    var hasBackCamera by remember { mutableStateOf(false) }
+    var hasFrontCamera by remember { mutableStateOf(false) }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var videoCapture by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
     var burstController by remember { mutableStateOf<BurstController?>(null) }
@@ -323,6 +332,8 @@ private fun CameraCaptureScreen(
     val torchControlLabelTemplate = stringResource(R.string.torch_control_label)
     val torchContentDescriptionOff = stringResource(R.string.torch_control_content_description_off)
     val torchContentDescriptionOn = stringResource(R.string.torch_control_content_description_on)
+    val switchCameraLabel = stringResource(R.string.switch_camera_label)
+    val switchCameraContentDescription = stringResource(R.string.switch_camera_content_description)
     val compareActionLabel = stringResource(R.string.compare_action)
     val previewBindFailureMessage = stringResource(R.string.preview_bind_failure_message)
     val previewRetryLabel = stringResource(R.string.preview_bind_retry)
@@ -443,6 +454,7 @@ private fun CameraCaptureScreen(
                 settings.burstFrameCount
             },
             retryToken = previewRetryToken,
+            lensFacing = lensFacing,
             desiredZoomRatio = zoomRatio,
             flashMode = flashMode,
             hdrVideoEnabled = settings.hdrVideoEnabled,
@@ -453,6 +465,10 @@ private fun CameraCaptureScreen(
             onExposureControllerReady = { exposureController = it },
             onCinematicConfigReady = { cinematicConfig = it },
             onVideoRangeResolved = { isHlgActive = it },
+            onCameraAvailability = { back, front ->
+                hasBackCamera = back
+                hasFrontCamera = front
+            },
             onCameraReady = { cameraHandle = it },
             onBindError = { previewBindError = true },
         )
@@ -798,6 +814,26 @@ private fun CameraCaptureScreen(
                     cinematicLabel = cinematicModeLabel,
                     onSelected = { mode = it },
                 )
+
+                // Switch-camera chip (issue #71): hidden entirely on a single-camera device,
+                // disabled while recording - switching mid-recording is out of scope, see
+                // CameraSwitchLogic. Sits right above the shutter cluster rather than in one
+                // of the SecondaryControlSlotWidth boxes below, since those are already
+                // conditionally occupied by the burst button (Photo) and look selector
+                // (Cinematic).
+                if (CameraSwitchLogic.shouldShowSwitchChip(hasBackCamera, hasFrontCamera)) {
+                    SwitchCameraChip(
+                        label = switchCameraLabel,
+                        contentDescription = switchCameraContentDescription,
+                        enabled = CameraSwitchLogic.isSwitchEnabled(isRecording),
+                        onClick = {
+                            val reset = CameraSwitchLogic.resetsForSwitch()
+                            zoomRatio = reset.zoomRatio
+                            torchEnabled = reset.torchEnabled
+                            lensFacing = lensFacing.switched()
+                        },
+                    )
+                }
 
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(24.dp),
@@ -1154,6 +1190,41 @@ private fun StatusControlChip(
         Text(
             text = label,
             color = Color.White,
+            style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
+        )
+    }
+}
+
+/**
+ * Switch-camera chip (issue #71): a 48dp-minimum tap target styled like [StatusControlChip],
+ * shown near the shutter cluster only once [CameraSwitchLogic.shouldShowSwitchChip] confirms
+ * both cameras exist, and dimmed/inert while disabled (switching mid-recording is out of
+ * scope - see [CameraSwitchLogic.isSwitchEnabled]) the same way the settings [IconButton]
+ * elsewhere on this screen dims for its own `!isRecording` gate.
+ */
+@Composable
+private fun SwitchCameraChip(
+    label: String,
+    contentDescription: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .background(OverlayScrimColor, shape = RoundedCornerShape(16.dp))
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .clickable(enabled = enabled, onClick = onClick)
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                this.contentDescription = contentDescription
+            }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = Color.White.copy(alpha = if (enabled) 1f else 0.38f),
             style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
         )
     }

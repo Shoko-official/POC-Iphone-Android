@@ -23,6 +23,12 @@ import java.util.concurrent.atomic.AtomicReference
  * the camera's exposure compensation to each step via a caller-supplied blocking lambda,
  * then captures [framesPerEv] frames tagged with that step's EV before advancing.
  * Compensation is restored to 0 when the burst finishes or fails.
+ *
+ * Lens-agnostic (issue #71): [FrameCapture] just drives whichever [ImageCapture][androidx.camera.core.ImageCapture]
+ * CameraPreview currently has bound, so a burst - and downstream frame-merge/guided-compare
+ * (see com.poc.camera.pipeline.BurstMergePipeline, com.poc.camera.compare.GuidedCompareFlow) -
+ * works identically whether that use case is bound to the back or front lens. No facing-
+ * specific casing exists or is needed anywhere in this class or the merge pipelines.
  */
 class BurstController(private val frameCount: Int = DEFAULT_FRAME_COUNT) {
 

@@ -5,10 +5,12 @@ import android.util.Range
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraInfo
+import androidx.camera.core.CameraInfoUnavailableException
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.DynamicRange
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.MeteringPointFactory
+import androidx.camera.core.MirrorMode
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -52,6 +54,10 @@ fun CameraPreview(
     look: VideoLook = VideoLook.Neutral,
     burstFrameCount: Int = BurstController.DEFAULT_FRAME_COUNT,
     retryToken: Int = 0,
+    // Which physical camera to bind (issue #71). A DisposableEffect key (below), like mode:
+    // the selector is baked into every bindToLifecycle call, so switching lenses always
+    // needs a full rebind, never a dynamic in-place update.
+    lensFacing: LensFacing = LensFacing.Back,
     // Zoom ratio the caller wants applied as soon as a (new) camera binds - e.g. the ratio
     // the user had dialed in before switching modes. Read once per bind via
     // rememberUpdatedState below, not a DisposableEffect key: changing it while already
@@ -74,12 +80,28 @@ fun CameraPreview(
     // Reports whether the just-bound Video/Cinematic use case actually resolved to HLG10
     // (true) or SDR (false) - see VideoDynamicRangeResolver. Never called for Photo.
     onVideoRangeResolved: (Boolean) -> Unit = {},
+    // Reports which of the two default cameras (issue #71) the device actually has, via
+    // ProcessCameraProvider.hasCamera, once the provider is ready - independent of `mode`/
+    // `lensFacing`, so CameraScreen can gate the switch-camera chip's visibility
+    // (CameraSwitchLogic.shouldShowSwitchChip) before the user ever taps it.
+    onCameraAvailability: (hasBackCamera: Boolean, hasFrontCamera: Boolean) -> Unit = { _, _ -> },
     onCameraReady: (CameraHandle?) -> Unit = {},
     onBindError: (Throwable) -> Unit = {},
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val previewView = remember { PreviewView(context) }
+    // Mirroring (issue #71): PreviewView mirrors the front camera's live preview
+    // automatically and unconditionally - that part needs no code here at all. ImageCapture
+    // is deliberately left at its default (unmirrored) output: CameraX's own
+    // ImageCapture.Builder.setMirrorMode exists but is not documented as affecting the
+    // actual saved JPEG bytes (unlike VideoCapture's, added and documented for video in
+    // CameraX 1.3 - see the VideoCapture.Builder calls below), and the platform convention
+    // for front-camera stills is to save what the sensor delivered - readable text stays
+    // readable - rather than silently flipping the file to match the mirrored preview. No
+    // transformation is added here; the burst/guided-compare merge path already just
+    // decodes whatever bytes ImageCapture produced (see BurstImageCapture/MergedPhotoSaver),
+    // for either lens, unchanged by this issue.
     val imageCapture = remember { ImageCapture.Builder().build() }
     val recorder = remember {
         Recorder.Builder()
@@ -93,7 +115,7 @@ fun CameraPreview(
     // Bind per mode rather than all use cases at once: some devices reject the combined
     // Preview + ImageCapture + VideoCapture graph, so each mode only binds what it needs.
     // retryToken carries no data; bumping it from the caller re-runs a failed bind attempt.
-    DisposableEffect(lifecycleOwner, mode, look, burstFrameCount, retryToken, hdrVideoEnabled) {
+    DisposableEffect(lifecycleOwner, mode, look, burstFrameCount, retryToken, hdrVideoEnabled, lensFacing) {
         var cameraProvider: ProcessCameraProvider? = null
         var activeEffect: LookCameraEffect? = null
         // Torch is a physical light that outlives whichever use case turned it on; tracked
@@ -107,6 +129,22 @@ fun CameraPreview(
                 try {
                     val provider = providerFuture.get()
                     cameraProvider = provider
+
+                    // Capability gate for the switch-camera chip (issue #71): checked fresh
+                    // on every bind (cheap - hasCamera is a metadata lookup, not a hardware
+                    // open) rather than cached once, so it also self-corrects if the provider
+                    // was somehow not fully warmed up on an earlier call.
+                    val hasBackCamera = try {
+                        provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)
+                    } catch (e: CameraInfoUnavailableException) {
+                        false
+                    }
+                    val hasFrontCamera = try {
+                        provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)
+                    } catch (e: CameraInfoUnavailableException) {
+                        false
+                    }
+                    onCameraAvailability(hasBackCamera, hasFrontCamera)
 
                     val preview = Preview.Builder().build().apply {
                         surfaceProvider = previewView.surfaceProvider
@@ -125,7 +163,7 @@ fun CameraPreview(
                             imageCapture.flashMode = currentFlashMode.toImageCaptureFlashMode()
                             val camera = provider.bindToLifecycle(
                                 lifecycleOwner,
-                                CameraSelector.DEFAULT_BACK_CAMERA,
+                                lensFacing.toCameraSelector(),
                                 preview,
                                 imageCapture,
                             )
@@ -140,7 +178,7 @@ fun CameraPreview(
                             // Dynamic range, like the Cinematic fps/stabilization config below,
                             // depends on what this specific camera reports, so it's resolved
                             // fresh on each bind rather than baked into a top-level remember.
-                            val cameraInfo = CameraSelector.DEFAULT_BACK_CAMERA
+                            val cameraInfo = lensFacing.toCameraSelector()
                                 .filter(provider.availableCameraInfos)
                                 .firstOrNull()
                             val supportedRanges = cameraInfo
@@ -154,11 +192,19 @@ fun CameraPreview(
                                         setDynamicRange(DynamicRange.HLG_10_BIT)
                                     }
                                 }
+                                // Mirroring (issue #71): PreviewView already mirrors the front
+                                // camera's live preview unconditionally; ON_FRONT_ONLY (added
+                                // in CameraX 1.3, verified via javap against this project's
+                                // 1.5.0 camera-video jar) makes the *saved* recording match
+                                // that mirrored preview on a front lens, while leaving a back-
+                                // camera recording untouched - it is a no-op unless the bound
+                                // camera turns out to be front-facing.
+                                .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY)
                                 .build()
 
                             val camera = provider.bindToLifecycle(
                                 lifecycleOwner,
-                                CameraSelector.DEFAULT_BACK_CAMERA,
+                                lensFacing.toCameraSelector(),
                                 preview,
                                 videoCapture,
                             )
@@ -171,7 +217,7 @@ fun CameraPreview(
                         CameraMode.Cinematic -> {
                             // Characteristics vary per device, so the config is resolved fresh
                             // on each bind rather than cached alongside the remembered use cases.
-                            val cameraInfo = CameraSelector.DEFAULT_BACK_CAMERA
+                            val cameraInfo = lensFacing.toCameraSelector()
                                 .filter(provider.availableCameraInfos)
                                 .firstOrNull()
                             val cinematicConfig = cameraInfo
@@ -205,6 +251,10 @@ fun CameraPreview(
                                     }
                                 }
                                 .setVideoStabilizationEnabled(cinematicConfig.stabilization == StabilizationChoice.ON)
+                                // Mirroring (issue #71): same rationale as the Video-mode
+                                // VideoCapture above - matches the front-mirrored preview for
+                                // a front-lens recording, no-op on the back lens.
+                                .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY)
                                 .build()
 
                             // Only the Cinematic look enters the GL path; Neutral binds plainly for
@@ -230,13 +280,13 @@ fun CameraPreview(
                                     .build()
                                 provider.bindToLifecycle(
                                     lifecycleOwner,
-                                    CameraSelector.DEFAULT_BACK_CAMERA,
+                                    lensFacing.toCameraSelector(),
                                     useCaseGroup,
                                 )
                             } else {
                                 provider.bindToLifecycle(
                                     lifecycleOwner,
-                                    CameraSelector.DEFAULT_BACK_CAMERA,
+                                    lensFacing.toCameraSelector(),
                                     preview,
                                     cinematicVideoCapture,
                                 )

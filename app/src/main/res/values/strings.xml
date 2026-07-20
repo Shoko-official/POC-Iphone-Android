@@ -47,6 +47,8 @@
     <string name="torch_control_label">Torch: %1$s</string>
     <string name="torch_control_content_description_off">Torch: off</string>
     <string name="torch_control_content_description_on">Torch: on</string>
+    <string name="switch_camera_label">Flip</string>
+    <string name="switch_camera_content_description">Switch camera</string>
     <string name="settings_back_content_description">Back</string>
     <string name="settings_title">Settings</string>
     <string name="settings_section_burst">Burst photo</string>

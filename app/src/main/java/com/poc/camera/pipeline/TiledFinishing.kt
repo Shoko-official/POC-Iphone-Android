@@ -93,9 +93,13 @@ data class FinishingStats(
  * per-stage supports. Each [GuidedFilter] pass is two [BoxBlur] passes, so its support is
  * `2 * radius`, giving per-stage supports of chroma `2*4 = 8`, local-tone `2*16 = 32`,
  * detail `2*3 = 6` (its 3x3 morphology adds 1, subsumed). The pure stages add 0. The
- * chain support is therefore `8 + 32 + 6 = 46` px ([SUPPORT_RADIUS]). Give every tile a
- * halo of at least that many pixels of real neighbouring content and its CORE (the halo
- * cropped off) sees exactly the neighbourhood the whole-frame pass saw, so tile cores
+ * chain support is therefore `8 + 32 + 6 = 46` px ([SUPPORT_RADIUS]). The [SkinMask]
+ * modulation is also windowed-local but does NOT extend this: it is computed on the
+ * denoised frame (support 8) blurred by radius 8 (support 16), so its dependency reaches
+ * only 16 px from a core pixel -- inside the 46 px chain support -- and it feeds the
+ * modulated stages as a per-pixel coefficient rather than widening their read radius. Give
+ * every tile a halo of at least that many pixels of real neighbouring content and its CORE
+ * (the halo cropped off) sees exactly the neighbourhood the whole-frame pass saw, so tile cores
  * agree in their interior with no feathering. [OVERLAP] is 48 (>= 46, a 2 px margin).
  *
  * ## The one caveat: box-blur running sums are accumulation-order sensitive
@@ -250,18 +254,23 @@ object TiledFinishing {
         } else {
             balanced
         }
+        // Skin-protection modulation is WINDOWED-local (SkinMask blur radius 8 -> support
+        // 16 px, well under OVERLAP 48), so a tile core computes the same plane the
+        // whole-frame path does and the finish stays seam-free. Computed identically to
+        // FinishingPipeline via the shared helper.
+        val skinModulation = FinishingPipeline.skinModulation(denoised, params)
         val locallyMapped = if (params.localContrast > 0.0) {
-            LocalToneMapper.apply(denoised, FinishingPipeline.localToneParams(params.localContrast))
+            LocalToneMapper.apply(denoised, FinishingPipeline.localToneParams(params.localContrast), skinModulation)
         } else {
             denoised
         }
         val enhanced = if (params.detailEnhance > 0.0) {
-            DetailEnhancer.apply(locallyMapped, FinishingPipeline.detailParams(params.detailEnhance), stats.detailKnee)
+            DetailEnhancer.apply(locallyMapped, FinishingPipeline.detailParams(params.detailEnhance), stats.detailKnee, skinModulation)
         } else {
             locallyMapped
         }
         val toned = ToneCurve(params.shadowsLift, params.highlightRolloff).apply(enhanced)
-        val saturated = Saturation.apply(toned, params.saturation)
+        val saturated = Saturation.apply(toned, params.saturation, skinModulation)
         val contrasted = Contrast.apply(saturated, params.contrast)
         return FinishingPipeline.forceOpaque(contrasted)
     }

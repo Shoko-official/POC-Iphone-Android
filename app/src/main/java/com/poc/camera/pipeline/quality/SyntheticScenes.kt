@@ -546,6 +546,104 @@ object SyntheticScenes {
         }
     }
 
+    // --- Skin-tone chart (skin-protection gate) -------------------------------
+    //
+    // A dedicated COLOUR fixture for the skin-protection gate (SkinProtectionGoldenTest),
+    // kept OUT of [names] so the existing golden report is unaffected. It carries, as
+    // solid patches and two textured regions:
+    //  - SIX skin patches spanning the Fitzpatrick I-VI range (light -> deep). Their RGB
+    //    values are chosen to share the SAME reddish-orange skin hue (R > G > B, roughly
+    //    constant channel ratios) while DECREASING in luminance, which is exactly how real
+    //    human skin varies across the range: tone is a luminance axis, not a hue axis. This
+    //    is the fairness property the mask must honour -- a chroma-cluster prior fires on all
+    //    six because they share chroma, and the gate proves mean mask > 0.5 on every one,
+    //    INCLUDING the deep tone. Values are representative sRGB skin reflectances, not tied
+    //    to one product's calibration; they are documented per patch below.
+    //  - THREE non-skin patches that are classic false-positive risks or nearby hues:
+    //    foliage green, sky blue and a saturated fabric red (saturated red is the textbook
+    //    skin false positive) -- the gate proves mean mask < 0.15 on each, i.e. selectivity.
+    //  - a NEUTRAL grey control patch (mask must be ~0, no chroma).
+    //  - a TEXTURED SKIN region (medium-skin base + fine luma detail) for the sharpening
+    //    test: protection must materially reduce detail amplification here.
+    //  - a TEXTURED NON-SKIN region (grey base + the same fine detail) proving the sharpen
+    //    reduction is SELECTIVE: amplification there is essentially unchanged.
+
+    /** One labelled region of the skin chart. [skin]/[textured] drive the gate's assertions. */
+    data class SkinChartRegion(
+        val name: String,
+        val rgb: Int,
+        val x0: Int,
+        val y0: Int,
+        val x1: Int,
+        val y1: Int,
+        val skin: Boolean,
+        val textured: Boolean,
+    )
+
+    /** Fine-detail relative amplitude for the textured skin-chart regions (hue-preserving). */
+    private const val SKIN_TEX_AMPLITUDE = 0.18
+
+    /**
+     * The labelled regions of [skinChartClean] over the [SIZE]x[SIZE] frame. Six Fitzpatrick
+     * skin tones, three non-skin false-positive risks, a neutral control and the two textured
+     * regions. Per-patch RGB reasoning (all keep R > G > B skin hue for the skin tones):
+     *  - light   (247,214,185): Fitzpatrick I/II, very fair (kept off the 255 clip so its
+     *    hue is not distorted by a channel pinned at white).
+     *  - fair    (241,194,167): Fitzpatrick II/III.
+     *  - medium  (222,168,128): Fitzpatrick III/IV, mid tone (also the textured-skin base).
+     *  - olive   (186,129, 92): Fitzpatrick IV, tanned/olive.
+     *  - brown   (135, 90, 62): Fitzpatrick V, brown.
+     *  - deep    ( 88, 58, 42): Fitzpatrick VI, deep -- same hue as light, far lower luma.
+     */
+    val skinChartRegions: List<SkinChartRegion> = listOf(
+        SkinChartRegion("light", rgb(247, 214, 185), 0, 0, 32, 32, skin = true, textured = false),
+        SkinChartRegion("fair", rgb(241, 194, 167), 32, 0, 64, 32, skin = true, textured = false),
+        SkinChartRegion("medium", rgb(222, 168, 128), 64, 0, 96, 32, skin = true, textured = false),
+        SkinChartRegion("olive", rgb(186, 129, 92), 96, 0, 128, 32, skin = true, textured = false),
+        SkinChartRegion("brown", rgb(135, 90, 62), 0, 32, 32, 64, skin = true, textured = false),
+        SkinChartRegion("deep", rgb(88, 58, 42), 32, 32, 64, 64, skin = true, textured = false),
+        SkinChartRegion("foliage", rgb(60, 110, 45), 64, 32, 96, 64, skin = false, textured = false),
+        SkinChartRegion("sky", rgb(110, 155, 210), 96, 32, 128, 64, skin = false, textured = false),
+        SkinChartRegion("fabric", rgb(200, 30, 40), 0, 64, 32, 96, skin = false, textured = false),
+        SkinChartRegion("neutral", rgb(128, 128, 128), 32, 64, 64, 96, skin = false, textured = false),
+        // Textured skin (medium base) and textured non-skin (grey base), both 64px wide.
+        SkinChartRegion("texskin", rgb(222, 168, 128), 64, 64, 128, 128, skin = true, textured = true),
+        SkinChartRegion("texnonskin", rgb(150, 150, 150), 0, 96, 64, 128, skin = false, textured = true),
+    )
+
+    /**
+     * The clean, noise-free skin chart. Solid patches are filled flat; the two textured
+     * regions carry a fine interpolated detail lattice applied as a HUE-PRESERVING luma
+     * factor (all three channels scaled equally by `1 + SKIN_TEX_AMPLITUDE * t`, t in
+     * [-1, 1]), so the sharpening test sees genuine detail to amplify without the texture
+     * itself shifting hue.
+     */
+    fun skinChartClean(): Frame {
+        val out = IntArray(SIZE * SIZE)
+        val detail = texturedCanvas(seed = 0x5C1FL, cell = 3, low = 0, high = 255)
+        for (region in skinChartRegions) {
+            val br = (region.rgb shr 16) and 0xFF
+            val bg = (region.rgb shr 8) and 0xFF
+            val bb = region.rgb and 0xFF
+            for (y in region.y0 until region.y1) {
+                for (x in region.x0 until region.x1) {
+                    val i = y * SIZE + x
+                    if (region.textured) {
+                        val t = (detail[i] / 255.0 - 0.5) * 2.0
+                        val f = 1.0 + SKIN_TEX_AMPLITUDE * t
+                        val r = (br * f).roundToInt().coerceIn(0, 255)
+                        val g = (bg * f).roundToInt().coerceIn(0, 255)
+                        val b = (bb * f).roundToInt().coerceIn(0, 255)
+                        out[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                    } else {
+                        out[i] = (0xFF shl 24) or region.rgb
+                    }
+                }
+            }
+        }
+        return frame(out)
+    }
+
     private fun edges(): Frame {
         val out = IntArray(SIZE * SIZE)
         val half = SIZE / 2

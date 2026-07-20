@@ -132,9 +132,16 @@ object DetailEnhancer {
      * Applies detail enhancement to [frame], preserving its dimensions and alpha. The
      * coring knee is derived from the whole-frame detail-plane noise sigma
      * ([computeKnee]).
+     *
+     * An optional per-pixel [modulation] plane (row-major, one entry per pixel, in [0, 1])
+     * scales the sharpen EFFECT toward identity: each output channel is interpolated back
+     * toward the INPUT channel by `out = in + modulation * (styled - in)`, so modulation 1
+     * reproduces the un-modulated result EXACTLY (bit for bit) and lower values apply
+     * proportionally less sharpening. Used by [FinishingPipeline] to limit over-sharpening
+     * inside skin regions; passing null keeps the original behaviour with no extra work.
      */
-    fun apply(frame: Frame, params: DetailParams = DetailParams()): Frame =
-        applyInternal(frame, params, knee = null)
+    fun apply(frame: Frame, params: DetailParams = DetailParams(), modulation: FloatArray? = null): Frame =
+        applyInternal(frame, params, knee = null, modulation = modulation)
 
     /**
      * Detail enhancement with a PRE-COMPUTED coring [knee] (see [computeKnee]) instead of
@@ -143,9 +150,11 @@ object DetailEnhancer {
      * would give each tile a different sharpen and leave seams. The whole-frame path
      * ([apply]) estimates the knee from the same detail plane it then sharpens, so passing
      * `computeKnee(frame, params)` here reproduces [apply] exactly.
+     *
+     * [modulation] behaves exactly as in the whole-frame [apply] overload above.
      */
-    fun apply(frame: Frame, params: DetailParams, knee: Double): Frame =
-        applyInternal(frame, params, knee)
+    fun apply(frame: Frame, params: DetailParams, knee: Double, modulation: FloatArray? = null): Frame =
+        applyInternal(frame, params, knee, modulation)
 
     /**
      * The coring knee `coringSigmaFactor * robustSigma(detail)` for [frame] under
@@ -166,7 +175,7 @@ object DetailEnhancer {
         return params.coringSigmaFactor * robustSigma(detail)
     }
 
-    private fun applyInternal(frame: Frame, params: DetailParams, knee: Double?): Frame {
+    private fun applyInternal(frame: Frame, params: DetailParams, knee: Double?, modulation: FloatArray? = null): Frame {
         val src = frame.argb
         val luma = DoubleArray(src.size) { i ->
             val pixel = src[i]
@@ -195,9 +204,27 @@ object DetailEnhancer {
 
                 val pixel = src[i]
                 val a = (pixel ushr 24) and 0xFF
-                val r = (((pixel shr 16) and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
-                val g = (((pixel shr 8) and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
-                val b = ((pixel and 0xFF) * ratio).roundToInt().coerceIn(0, 255)
+                val ir = (pixel shr 16) and 0xFF
+                val ig = (pixel shr 8) and 0xFF
+                val ib = pixel and 0xFF
+                // Styled (full-strength) channels in the continuous domain, ratio-applied.
+                val sr = ir * ratio
+                val sg = ig * ratio
+                val sb = ib * ratio
+                val r: Int
+                val g: Int
+                val b: Int
+                if (modulation == null) {
+                    r = sr.roundToInt().coerceIn(0, 255)
+                    g = sg.roundToInt().coerceIn(0, 255)
+                    b = sb.roundToInt().coerceIn(0, 255)
+                } else {
+                    // m == 1 gives ir + (sr - ir) = sr, so null-vs-m==1 is bit-identical.
+                    val m = modulation[i].toDouble()
+                    r = (ir + m * (sr - ir)).roundToInt().coerceIn(0, 255)
+                    g = (ig + m * (sg - ig)).roundToInt().coerceIn(0, 255)
+                    b = (ib + m * (sb - ib)).roundToInt().coerceIn(0, 255)
+                }
                 out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
             }
         }

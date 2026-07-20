@@ -46,4 +46,22 @@ class BurstMergePipelineTest {
             mergedError < singleErrors.min(),
         )
     }
+
+    @Test
+    fun mergeIsDeterministic() {
+        val width = 48
+        val height = 48
+        val base = SyntheticImages.texturedCanvas(width, height, seed = 0xD37EL)
+        val frames = (0 until 6).map { i ->
+            SyntheticImages.noisyVariant(base, width, height, seed = 200L + i, amplitude = 18)
+        }
+
+        val first = BurstMergePipeline.merge(frames)
+        val second = BurstMergePipeline.merge(frames)
+
+        // Byte-for-byte identical output across runs (no randomness in the pipeline).
+        assertEquals(first.merged, second.merged)
+        assertEquals(first.usedFrameCount, second.usedFrameCount)
+        assertEquals(first.offsets, second.offsets)
+    }
 }

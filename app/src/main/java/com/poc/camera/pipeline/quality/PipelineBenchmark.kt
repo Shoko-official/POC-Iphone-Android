@@ -1,10 +1,12 @@
 package com.poc.camera.pipeline.quality
 
 import com.poc.camera.pipeline.BurstMergePipeline
+import com.poc.camera.pipeline.FinishingParams
 import com.poc.camera.pipeline.FinishingPipeline
 import com.poc.camera.pipeline.Frame
 import com.poc.camera.pipeline.GuidedFilter
 import com.poc.camera.pipeline.PipelineParallel
+import com.poc.camera.pipeline.TiledFinishing
 
 /**
  * Wall-clock timing harness for the pure still pipeline at native-capture scales,
@@ -77,6 +79,21 @@ object PipelineBenchmark {
         FinishingPipeline.apply(input)
         val millis = (System.nanoTime() - start) / 1_000_000.0
         return Timing("finishing-only", width, height, 1, 1, millis)
+    }
+
+    /**
+     * Times a single tiled [TiledFinishing.apply] finish at [width]x[height] over a
+     * synthetic noisy capture, the native-resolution finishing path issue #54 adds. Input
+     * generation is excluded. Confirms a 12 MP+ finish completes (no OOM) under the test
+     * heap while its whole-frame equivalent would peak near a gigabyte of float
+     * intermediates; the returned time is reported, not asserted against an SLA.
+     */
+    fun tiledFinishing(width: Int, height: Int, seed: Long = DEFAULT_SEED): Timing {
+        val input = SyntheticScenes.noisy(scene(width, height, seed), seed)
+        val start = System.nanoTime()
+        TiledFinishing.apply(input, FinishingParams.DEFAULT)
+        val millis = (System.nanoTime() - start) / 1_000_000.0
+        return Timing("tiled-finishing", width, height, 1, 1, millis)
     }
 
     /**

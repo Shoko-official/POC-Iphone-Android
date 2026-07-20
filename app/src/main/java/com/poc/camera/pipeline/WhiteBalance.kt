@@ -264,13 +264,31 @@ object WhiteBalance {
             )
         }
 
-        val gains = estimateGains(frame, maxGain)
+        return applyGains(frame, estimateGains(frame, maxGain), strength)
+    }
+
+    /**
+     * Applies a set of PRE-COMPUTED [gains] to [frame], blending them toward identity by
+     * [strength] (`g' = 1 + strength * (g - 1)`), preserving dimensions and timestamp and
+     * forcing alpha opaque. This is the per-pixel half of [apply] with the whole-frame
+     * estimation reduction hoisted out, so a caller that already has the gains (e.g. the
+     * tiled finishing path, which estimates ONCE on the whole frame and then applies the
+     * same gains tile-by-tile) can reuse them instead of re-estimating per region. Passing
+     * `estimateGains(frame)` reproduces [apply] exactly.
+     */
+    fun applyGains(
+        frame: Frame,
+        gains: WhiteBalanceGains,
+        strength: Double = DEFAULT_STRENGTH,
+    ): Frame {
+        require(strength in 0.0..1.0) { "strength must be in [0, 1]" }
+        val src = frame.argb
         val gR = 1.0 + strength * (gains.rGain - 1.0)
         val gG = 1.0 + strength * (gains.gGain - 1.0)
         val gB = 1.0 + strength * (gains.bGain - 1.0)
 
         // Per-pixel gain application: element-wise, so it is row-parallel. Estimation
-        // (a whole-frame reduction) above stays serial.
+        // (a whole-frame reduction) stays with the caller.
         val out = IntArray(src.size)
         PipelineParallel.parallelRows(src.size) { start, end ->
             for (i in start until end) {

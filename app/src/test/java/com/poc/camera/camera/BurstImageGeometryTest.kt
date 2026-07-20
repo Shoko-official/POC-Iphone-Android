@@ -9,20 +9,55 @@ import org.junit.Test
 class BurstImageGeometryTest {
 
     @Test
-    fun twelveMegapixelSensorDownsamplesByTwo() {
-        // 4032x3024 (~12.2 MP) -> inSampleSize 2 -> 2016x1512 (~3.0 MP) <= 8 MP bound
-        // (full 12.2 MP overshoots the bound, so it is still halved).
+    fun twelveMegapixelSensorDecodesAtNativeUnderTheDefaultBound() {
+        // 4032x3024 (~12.19 MP) <= 12.5 MP native bound -> inSampleSize 1 (full resolution).
+        // This is the issue #54 change: with tiled finishing removing the float peak, a
+        // 12 MP sensor now merges at native resolution on a high-memory device.
         val sample = BurstImageGeometry.inSampleSizeFor(4032, 3024, BurstImageGeometry.MAX_BURST_PIXELS)
-        assertEquals(2, sample)
+        assertEquals(1, sample)
         assertTrue((4032 / sample).toLong() * (3024 / sample) <= BurstImageGeometry.MAX_BURST_PIXELS)
     }
 
     @Test
+    fun twelveMegapixelSensorStillHalvesUnderTheConservativeBound() {
+        // Low-memory devices keep the ~8 MP bound: 12.19 MP overshoots it, so /2 -> ~3.0 MP.
+        val sample = BurstImageGeometry.inSampleSizeFor(4032, 3024, BurstImageGeometry.CONSERVATIVE_MAX_BURST_PIXELS)
+        assertEquals(2, sample)
+        assertTrue((4032 / sample).toLong() * (3024 / sample) <= BurstImageGeometry.CONSERVATIVE_MAX_BURST_PIXELS)
+    }
+
+    @Test
     fun fiftyMegapixelSensorDownsamplesByFour() {
-        // 8160x6144 (~50.1 MP): /2 -> 12.5 MP (too big), /4 -> 2040x1536 (~3.1 MP) <= bound.
+        // 8160x6144 (~50.1 MP): /2 -> 4080x3072 (~12.53 MP, just over the 12.5 MP bound),
+        // /4 -> 2040x1536 (~3.1 MP) <= bound.
         val sample = BurstImageGeometry.inSampleSizeFor(8160, 6144, BurstImageGeometry.MAX_BURST_PIXELS)
         assertEquals(4, sample)
         assertTrue((8160 / sample).toLong() * (6144 / sample) <= BurstImageGeometry.MAX_BURST_PIXELS)
+    }
+
+    @Test
+    fun memoryClassSelectsNativeBoundOnlyAboveTheThreshold() {
+        // Below the high-memory threshold -> conservative ~8 MP bound.
+        assertEquals(
+            BurstImageGeometry.CONSERVATIVE_MAX_BURST_PIXELS,
+            BurstImageGeometry.maxBurstPixelsFor(BurstImageGeometry.HIGH_MEMORY_CLASS_MB - 1),
+        )
+        // At or above it -> native ~12.5 MP bound.
+        assertEquals(
+            BurstImageGeometry.MAX_BURST_PIXELS,
+            BurstImageGeometry.maxBurstPixelsFor(BurstImageGeometry.HIGH_MEMORY_CLASS_MB),
+        )
+        assertEquals(
+            BurstImageGeometry.MAX_BURST_PIXELS,
+            BurstImageGeometry.maxBurstPixelsFor(512),
+        )
+    }
+
+    @Test
+    fun nonPositiveMemoryClassFallsBackToConservativeBound() {
+        // An unknown / unreported memory class must not unlock the native bound.
+        assertEquals(BurstImageGeometry.CONSERVATIVE_MAX_BURST_PIXELS, BurstImageGeometry.maxBurstPixelsFor(0))
+        assertEquals(BurstImageGeometry.CONSERVATIVE_MAX_BURST_PIXELS, BurstImageGeometry.maxBurstPixelsFor(-1))
     }
 
     @Test

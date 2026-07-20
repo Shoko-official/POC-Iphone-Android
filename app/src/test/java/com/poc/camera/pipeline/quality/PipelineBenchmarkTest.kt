@@ -46,6 +46,12 @@ class PipelineBenchmarkTest {
         val scaling = finish12mp.millis / finish3mp.millis
         println("finishing 12MP/3MP scaling ratio = %.2f (pixel ratio = 4.0)".format(scaling))
 
+        // Native 12.5 MP tiled finish (issue #54): confirm it runs to completion (no OOM)
+        // under the unit-test heap and record its wall time. The whole-frame equivalent at
+        // this size would peak near a gigabyte of transient float planes.
+        val tiled12mp = PipelineBenchmark.tiledFinishing(4080, 3072)
+        println(tiled12mp)
+
         // Serial vs. parallel on the dominant finishing kernel, for the speedup record.
         val (guidedSerial, guidedParallel) = PipelineBenchmark.guidedFilterSerialVsParallel(burstSize.w, burstSize.h)
         println(guidedSerial)

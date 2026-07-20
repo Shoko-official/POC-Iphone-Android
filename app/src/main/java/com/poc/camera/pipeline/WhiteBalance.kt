@@ -269,16 +269,20 @@ object WhiteBalance {
         val gG = 1.0 + strength * (gains.gGain - 1.0)
         val gB = 1.0 + strength * (gains.bGain - 1.0)
 
+        // Per-pixel gain application: element-wise, so it is row-parallel. Estimation
+        // (a whole-frame reduction) above stays serial.
         val out = IntArray(src.size)
-        for (i in src.indices) {
-            val pixel = src[i]
-            val r = ((pixel shr 16) and 0xFF)
-            val g = ((pixel shr 8) and 0xFF)
-            val b = (pixel and 0xFF)
-            val nr = (r * gR).roundToInt().coerceIn(0, 255)
-            val ng = (g * gG).roundToInt().coerceIn(0, 255)
-            val nb = (b * gB).roundToInt().coerceIn(0, 255)
-            out[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+        PipelineParallel.parallelRows(src.size) { start, end ->
+            for (i in start until end) {
+                val pixel = src[i]
+                val r = ((pixel shr 16) and 0xFF)
+                val g = ((pixel shr 8) and 0xFF)
+                val b = (pixel and 0xFF)
+                val nr = (r * gR).roundToInt().coerceIn(0, 255)
+                val ng = (g * gG).roundToInt().coerceIn(0, 255)
+                val nb = (b * gB).roundToInt().coerceIn(0, 255)
+                out[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+            }
         }
         return Frame(frame.width, frame.height, out, frame.timestampMillis)
     }

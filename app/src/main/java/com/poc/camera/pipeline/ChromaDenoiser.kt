@@ -80,33 +80,39 @@ object ChromaDenoiser {
             return Frame(frame.width, frame.height, IntArray(src.size) { (0xFF shl 24) or (src[it] and 0x00FFFFFF) }, frame.timestampMillis)
         }
 
+        // Opponent-space split and reconstruction are both element-wise (row-parallel);
+        // the guided filtering between them is parallel internally.
         val n = src.size
         val luma = DoubleArray(n)
         val cb = DoubleArray(n)
         val cr = DoubleArray(n)
-        for (i in 0 until n) {
-            val pixel = src[i]
-            val r = ((pixel shr 16) and 0xFF).toDouble()
-            val g = ((pixel shr 8) and 0xFF).toDouble()
-            val b = (pixel and 0xFF).toDouble()
-            val y = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
-            luma[i] = y
-            cb[i] = b - y
-            cr[i] = r - y
+        PipelineParallel.parallelRows(n) { start, end ->
+            for (i in start until end) {
+                val pixel = src[i]
+                val r = ((pixel shr 16) and 0xFF).toDouble()
+                val g = ((pixel shr 8) and 0xFF).toDouble()
+                val b = (pixel and 0xFF).toDouble()
+                val y = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
+                luma[i] = y
+                cb[i] = b - y
+                cr[i] = r - y
+            }
         }
 
         val cbFiltered = GuidedFilter.guided(cb, luma, frame.width, frame.height, radius, eps)
         val crFiltered = GuidedFilter.guided(cr, luma, frame.width, frame.height, radius, eps)
 
         val out = IntArray(n)
-        for (i in 0 until n) {
-            val y = luma[i]
-            val outCb = cb[i] + strength * (cbFiltered[i] - cb[i])
-            val outCr = cr[i] + strength * (crFiltered[i] - cr[i])
-            val r = (y + outCr).roundToInt().coerceIn(0, 255)
-            val b = (y + outCb).roundToInt().coerceIn(0, 255)
-            val g = (y - (R_WEIGHT * outCr + B_WEIGHT * outCb) / G_WEIGHT).roundToInt().coerceIn(0, 255)
-            out[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        PipelineParallel.parallelRows(n) { start, end ->
+            for (i in start until end) {
+                val y = luma[i]
+                val outCb = cb[i] + strength * (cbFiltered[i] - cb[i])
+                val outCr = cr[i] + strength * (crFiltered[i] - cr[i])
+                val r = (y + outCr).roundToInt().coerceIn(0, 255)
+                val b = (y + outCb).roundToInt().coerceIn(0, 255)
+                val g = (y - (R_WEIGHT * outCr + B_WEIGHT * outCb) / G_WEIGHT).roundToInt().coerceIn(0, 255)
+                out[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
         }
         return Frame(frame.width, frame.height, out, frame.timestampMillis)
     }

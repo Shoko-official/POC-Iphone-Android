@@ -47,62 +47,75 @@ object RobustFrameMerger {
         val refArgb = reference.argb
 
         // Reference luma per pixel, matching Luminance.extract's rounded Rec. 601.
+        // Element-wise seeding: each pixel is written once, so it satisfies the
+        // [PipelineParallel] contract and is chunked by row.
         val refLuma = IntArray(pixelCount)
         val sumR = DoubleArray(pixelCount)
         val sumG = DoubleArray(pixelCount)
         val sumB = DoubleArray(pixelCount)
         val sumW = DoubleArray(pixelCount)
-        for (i in 0 until pixelCount) {
-            val pixel = refArgb[i]
-            val r = (pixel shr 16) and 0xFF
-            val g = (pixel shr 8) and 0xFF
-            val b = pixel and 0xFF
-            refLuma[i] = (299 * r + 587 * g + 114 * b + 500) / 1000
-            // Reference seeds every accumulator with weight 1.
-            sumR[i] = r.toDouble()
-            sumG[i] = g.toDouble()
-            sumB[i] = b.toDouble()
-            sumW[i] = 1.0
+        PipelineParallel.parallelRows(pixelCount) { start, end ->
+            for (i in start until end) {
+                val pixel = refArgb[i]
+                val r = (pixel shr 16) and 0xFF
+                val g = (pixel shr 8) and 0xFF
+                val b = pixel and 0xFF
+                refLuma[i] = (299 * r + 587 * g + 114 * b + 500) / 1000
+                // Reference seeds every accumulator with weight 1.
+                sumR[i] = r.toDouble()
+                sumG[i] = g.toDouble()
+                sumB[i] = b.toDouble()
+                sumW[i] = 1.0
+            }
         }
 
-        val scratch = DoubleArray(3)
         for (index in frames.indices) {
             if (index == 0 || !accepted[index]) continue
             val offsets = tileOffsets[index] ?: continue
             val frame = frames[index]
             val sigma = estimateSigma(frame, offsets, refLuma, width, height, ghostRejector)
 
-            for (y in 0 until height) {
-                val row = y * width
-                for (x in 0 until width) {
-                    val offsetX = offsets.offsetXAt(x, y)
-                    val offsetY = offsets.offsetYAt(x, y)
-                    SubPixelSampler.sampleRgb(frame, x + offsetX, y + offsetY, scratch)
-                    val luma = 0.299 * scratch[0] + 0.587 * scratch[1] + 0.114 * scratch[2]
-                    val i = row + x
-                    val weight = ghostRejector.weight(luma - refLuma[i], sigma)
-                    if (weight > 0.0) {
-                        sumR[i] += weight * scratch[0]
-                        sumG[i] += weight * scratch[1]
-                        sumB[i] += weight * scratch[2]
-                        sumW[i] += weight
+            // Row-parallel per frame: each output row reads arbitrary INPUT rows (via
+            // the sub-pixel fetch) but writes only its own accumulators, so rows are
+            // independent within a frame; frames are still folded in sequentially, so
+            // the per-pixel accumulation order across frames is unchanged and the merge
+            // is bit-identical to the serial path. Scratch is per-chunk (thread-local).
+            PipelineParallel.parallelRows(height) { yStart, yEnd ->
+                val scratch = DoubleArray(3)
+                for (y in yStart until yEnd) {
+                    val row = y * width
+                    for (x in 0 until width) {
+                        val offsetX = offsets.offsetXAt(x, y)
+                        val offsetY = offsets.offsetYAt(x, y)
+                        SubPixelSampler.sampleRgb(frame, x + offsetX, y + offsetY, scratch)
+                        val luma = 0.299 * scratch[0] + 0.587 * scratch[1] + 0.114 * scratch[2]
+                        val i = row + x
+                        val weight = ghostRejector.weight(luma - refLuma[i], sigma)
+                        if (weight > 0.0) {
+                            sumR[i] += weight * scratch[0]
+                            sumG[i] += weight * scratch[1]
+                            sumB[i] += weight * scratch[2]
+                            sumW[i] += weight
+                        }
                     }
                 }
             }
         }
 
         val merged = IntArray(pixelCount)
-        for (i in 0 until pixelCount) {
-            val totalWeight = sumW[i]
-            if (totalWeight <= 1.0 + WEIGHT_EPS) {
-                // Only the reference supports this pixel: keep it exactly.
-                merged[i] = refArgb[i]
-                continue
+        PipelineParallel.parallelRows(pixelCount) { start, end ->
+            for (i in start until end) {
+                val totalWeight = sumW[i]
+                if (totalWeight <= 1.0 + WEIGHT_EPS) {
+                    // Only the reference supports this pixel: keep it exactly.
+                    merged[i] = refArgb[i]
+                    continue
+                }
+                val r = (sumR[i] / totalWeight).roundToInt().coerceIn(0, 255)
+                val g = (sumG[i] / totalWeight).roundToInt().coerceIn(0, 255)
+                val b = (sumB[i] / totalWeight).roundToInt().coerceIn(0, 255)
+                merged[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
             }
-            val r = (sumR[i] / totalWeight).roundToInt().coerceIn(0, 255)
-            val g = (sumG[i] / totalWeight).roundToInt().coerceIn(0, 255)
-            val b = (sumB[i] / totalWeight).roundToInt().coerceIn(0, 255)
-            merged[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
         }
 
         return Frame(width, height, merged, reference.timestampMillis)

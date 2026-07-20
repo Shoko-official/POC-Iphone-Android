@@ -24,13 +24,17 @@ class ToneCurve(shadowsLift: Double, highlightRolloff: Double) {
         val src = frame.argb
         val out = IntArray(src.size)
         val lut = lookupTable
-        for (i in src.indices) {
-            val pixel = src[i]
-            val a = (pixel ushr 24) and 0xFF
-            val r = lut[(pixel shr 16) and 0xFF]
-            val g = lut[(pixel shr 8) and 0xFF]
-            val b = lut[pixel and 0xFF]
-            out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+        // Per-pixel LUT map is element-wise (row-parallel); the 256-entry LUT itself is
+        // built once, serially, in the constructor.
+        PipelineParallel.parallelRows(src.size) { start, end ->
+            for (i in start until end) {
+                val pixel = src[i]
+                val a = (pixel ushr 24) and 0xFF
+                val r = lut[(pixel shr 16) and 0xFF]
+                val g = lut[(pixel shr 8) and 0xFF]
+                val b = lut[pixel and 0xFF]
+                out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
         }
         return Frame(frame.width, frame.height, out, frame.timestampMillis)
     }

@@ -6,21 +6,48 @@ package com.poc.camera.camera
  *
  * Full-sensor JPEGs are far too large to hold several of at once as ARGB [IntArray]s: a
  * 12 MP frame is 48 MB decoded, and a 6-9 frame burst would blow the heap. Each frame is
- * therefore downscaled at decode time to at most [MAX_BURST_PIXELS] pixels, still 3-4x
- * the resolution of the retired 720p ImageAnalysis path (~0.9 MP) while keeping the
- * transient burst footprint bounded.
+ * therefore downscaled at decode time to at most [MAX_BURST_PIXELS] pixels, keeping the
+ * transient burst footprint bounded while staying well above the retired 720p
+ * ImageAnalysis path (~0.9 MP).
  */
 object BurstImageGeometry {
 
     /**
-     * Upper bound on decoded pixels per burst frame (~3.5 MP). A 12 MP 4032x3024 sensor
-     * decodes at inSampleSize 2 to 2016x1512 (~3.0 MP, ~12 MB as ARGB); six such frames
-     * peak around 75 MB in flight before merged frames are released to GC. This is a
-     * deliberate interim bound: true native-resolution merging needs tiled processing
-     * (tracked as the issue #42 performance follow-up), not a full-frame IntArray per
-     * capture.
+     * Upper bound on decoded pixels per burst frame (~8 MP).
+     *
+     * Raised from the former ~3.5 MP interim bound after the issue #42 pipeline work
+     * made the pure merge + finishing stages row-parallel with deterministic (bit-
+     * identical) output, so the per-frame CPU cost of a larger frame now scales
+     * near-linearly across cores instead of serially. Measured on the pure pipeline,
+     * finishing scales ~4.3x from 3 MP to 12 MP (a 4x pixel jump), confirming there is
+     * headroom above the old bound.
+     *
+     * ## Memory math (the real constraint, honestly)
+     *
+     * An ARGB frame costs 4 bytes/pixel, so at this bound one decoded frame is
+     * ~8 MP * 4 = ~32 MB. Decoding is one-in-flight (each JPEG is decoded and downscaled
+     * before the next), so decode itself peaks at ~32 MB, but the MERGE holds all N
+     * frames at once: a 6-frame burst is ~6 * 32 = ~192 MB of IntArrays resident, plus
+     * the merge accumulators (four DoubleArrays over the pixel count, ~256 MB at 8 MP)
+     * and the finishing guided-filter intermediates (several transient DoubleArrays).
+     * That is a heavy but workable footprint on a mid-range device and a deliberate step
+     * DOWN from a full 12 MP bound, where six frames alone would be ~288 MB of IntArrays
+     * before any working memory -- too aggressive for low-RAM devices.
+     *
+     * ## Chosen compromise and the device-side follow-up
+     *
+     * 8 MP is a measured compromise: it roughly doubles usable resolution over the old
+     * 3.5 MP bound while keeping the resident merge footprint under ~200 MB of frame
+     * data. A larger 4032x3024 sensor therefore still decodes at inSampleSize 2 to
+     * ~3.0 MP (unchanged), but sensors between ~8 and ~12 MP now decode at full (sample
+     * 1) instead of being halved. The proper device-side fix -- picking the bound from
+     * the device's memory class ([android.app.ActivityManager.getMemoryClass], so a
+     * high-RAM phone can go to native 12 MP while a low-RAM phone stays conservative),
+     * and/or tiled/streaming merge to drop the "all frames resident" cost -- is the
+     * remaining issue #42 follow-up and intentionally out of scope for this pure-pipeline
+     * change.
      */
-    const val MAX_BURST_PIXELS: Int = 3_500_000
+    const val MAX_BURST_PIXELS: Int = 8_000_000
 
     /**
      * Smallest power-of-two `inSampleSize` for which a [sourceWidth] x [sourceHeight]

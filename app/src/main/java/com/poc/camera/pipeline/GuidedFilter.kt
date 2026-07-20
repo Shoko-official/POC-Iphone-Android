@@ -40,28 +40,37 @@ object GuidedFilter {
         height: Int,
         radius: Int,
         eps: Double,
+        chunkCount: Int = PipelineParallel.parallelism,
     ): DoubleArray {
         require(radius >= 0) { "radius must be >= 0" }
         require(eps > 0.0) { "eps must be > 0" }
 
-        val meanI = BoxBlur.blur(image, width, height, radius)
+        val meanI = BoxBlur.blur(image, width, height, radius, chunkCount)
         val squares = DoubleArray(image.size) { image[it] * image[it] }
-        val meanII = BoxBlur.blur(squares, width, height, radius)
+        val meanII = BoxBlur.blur(squares, width, height, radius, chunkCount)
 
+        // a/b are element-wise in the flat pixel index, so the row/column contract of
+        // [PipelineParallel] holds directly over the pixel range.
         val a = DoubleArray(image.size)
         val b = DoubleArray(image.size)
-        for (i in image.indices) {
-            // Clamp variance to >= 0: it is non-negative in exact arithmetic, but
-            // meanII - meanI^2 can go slightly negative from rounding on flat runs.
-            val varI = max(0.0, meanII[i] - meanI[i] * meanI[i])
-            val ai = varI / (varI + eps)
-            a[i] = ai
-            b[i] = meanI[i] * (1.0 - ai)
+        PipelineParallel.parallelRows(image.size, chunkCount) { start, end ->
+            for (i in start until end) {
+                // Clamp variance to >= 0: it is non-negative in exact arithmetic, but
+                // meanII - meanI^2 can go slightly negative from rounding on flat runs.
+                val varI = max(0.0, meanII[i] - meanI[i] * meanI[i])
+                val ai = varI / (varI + eps)
+                a[i] = ai
+                b[i] = meanI[i] * (1.0 - ai)
+            }
         }
 
-        val meanA = BoxBlur.blur(a, width, height, radius)
-        val meanB = BoxBlur.blur(b, width, height, radius)
-        return DoubleArray(image.size) { meanA[it] * image[it] + meanB[it] }
+        val meanA = BoxBlur.blur(a, width, height, radius, chunkCount)
+        val meanB = BoxBlur.blur(b, width, height, radius, chunkCount)
+        val out = DoubleArray(image.size)
+        PipelineParallel.parallelRows(image.size, chunkCount) { start, end ->
+            for (i in start until end) out[i] = meanA[i] * image[i] + meanB[i]
+        }
+        return out
     }
 
     /**
@@ -94,30 +103,38 @@ object GuidedFilter {
         height: Int,
         radius: Int,
         eps: Double,
+        chunkCount: Int = PipelineParallel.parallelism,
     ): DoubleArray {
         require(radius >= 0) { "radius must be >= 0" }
         require(eps > 0.0) { "eps must be > 0" }
         require(input.size == guide.size) { "input and guide must have the same size" }
 
-        val meanI = BoxBlur.blur(input, width, height, radius)
-        val meanG = BoxBlur.blur(guide, width, height, radius)
-        val corrIG = BoxBlur.blur(DoubleArray(input.size) { input[it] * guide[it] }, width, height, radius)
-        val corrGG = BoxBlur.blur(DoubleArray(guide.size) { guide[it] * guide[it] }, width, height, radius)
+        val meanI = BoxBlur.blur(input, width, height, radius, chunkCount)
+        val meanG = BoxBlur.blur(guide, width, height, radius, chunkCount)
+        val corrIG = BoxBlur.blur(DoubleArray(input.size) { input[it] * guide[it] }, width, height, radius, chunkCount)
+        val corrGG = BoxBlur.blur(DoubleArray(guide.size) { guide[it] * guide[it] }, width, height, radius, chunkCount)
 
+        // a/b are element-wise in the flat pixel index (contract of [PipelineParallel]).
         val a = DoubleArray(input.size)
         val b = DoubleArray(input.size)
-        for (i in input.indices) {
-            val covIG = corrIG[i] - meanI[i] * meanG[i]
-            // Clamp guide variance to >= 0 (non-negative in exact arithmetic; rounding
-            // on flat runs can push it slightly negative). Covariance is left signed.
-            val varG = max(0.0, corrGG[i] - meanG[i] * meanG[i])
-            val ai = covIG / (varG + eps)
-            a[i] = ai
-            b[i] = meanI[i] - ai * meanG[i]
+        PipelineParallel.parallelRows(input.size, chunkCount) { start, end ->
+            for (i in start until end) {
+                val covIG = corrIG[i] - meanI[i] * meanG[i]
+                // Clamp guide variance to >= 0 (non-negative in exact arithmetic; rounding
+                // on flat runs can push it slightly negative). Covariance is left signed.
+                val varG = max(0.0, corrGG[i] - meanG[i] * meanG[i])
+                val ai = covIG / (varG + eps)
+                a[i] = ai
+                b[i] = meanI[i] - ai * meanG[i]
+            }
         }
 
-        val meanA = BoxBlur.blur(a, width, height, radius)
-        val meanB = BoxBlur.blur(b, width, height, radius)
-        return DoubleArray(input.size) { meanA[it] * guide[it] + meanB[it] }
+        val meanA = BoxBlur.blur(a, width, height, radius, chunkCount)
+        val meanB = BoxBlur.blur(b, width, height, radius, chunkCount)
+        val out = DoubleArray(input.size)
+        PipelineParallel.parallelRows(input.size, chunkCount) { start, end ->
+            for (i in start until end) out[i] = meanA[i] * guide[i] + meanB[i]
+        }
+        return out
     }
 }

@@ -31,6 +31,15 @@ android {
     buildFeatures {
         compose = true
     }
+
+    testOptions {
+        unitTests.all {
+            // The pipeline benchmark exercises finishing at native 12 MP resolution,
+            // where the double-precision guided-filter intermediates transiently need
+            // well over the default test-JVM heap. Sized for a single 12 MP finish.
+            it.maxHeapSize = "3g"
+        }
+    }
 }
 
 kotlin {

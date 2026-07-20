@@ -14,13 +14,16 @@ object Contrast {
     fun apply(frame: Frame, factor: Double): Frame {
         val src = frame.argb
         val out = IntArray(src.size)
-        for (i in src.indices) {
-            val pixel = src[i]
-            val a = (pixel ushr 24) and 0xFF
-            val r = adjust((pixel shr 16) and 0xFF, factor)
-            val g = adjust((pixel shr 8) and 0xFF, factor)
-            val b = adjust(pixel and 0xFF, factor)
-            out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+        // Per-pixel, element-wise: row-parallel.
+        PipelineParallel.parallelRows(src.size) { start, end ->
+            for (i in start until end) {
+                val pixel = src[i]
+                val a = (pixel ushr 24) and 0xFF
+                val r = adjust((pixel shr 16) and 0xFF, factor)
+                val g = adjust((pixel shr 8) and 0xFF, factor)
+                val b = adjust(pixel and 0xFF, factor)
+                out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
         }
         return Frame(frame.width, frame.height, out, frame.timestampMillis)
     }

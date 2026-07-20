@@ -115,6 +115,8 @@ import com.poc.camera.R
 import com.poc.camera.compare.ComparePair
 import com.poc.camera.compare.GuidedCompareStep
 import com.poc.camera.compare.ReferenceImageLoader
+import com.poc.camera.pipeline.BokehParams
+import com.poc.camera.pipeline.BokehRenderer
 import com.poc.camera.pipeline.BurstMergePipeline
 import com.poc.camera.pipeline.FinishingPipeline
 import com.poc.camera.pipeline.Frame
@@ -381,11 +383,14 @@ private fun CameraCaptureScreen(
     val photoModeLabel = stringResource(R.string.mode_photo)
     val videoModeLabel = stringResource(R.string.mode_video)
     val cinematicModeLabel = stringResource(R.string.mode_cinematic)
+    val portraitModeLabel = stringResource(R.string.mode_portrait)
     val burstButtonLabel = stringResource(R.string.burst_button)
     val burstMergeSuccessMessage = stringResource(R.string.burst_merge_success)
     val hdrBurstMergeSuccessMessage = stringResource(R.string.burst_hdr_merge_success)
     val superResolutionSuccessMessage = stringResource(R.string.burst_super_resolution_success)
     val burstMergeFailureMessage = stringResource(R.string.burst_merge_failure)
+    val portraitMergeSuccessMessage = stringResource(R.string.portrait_merge_success)
+    val portraitNoSubjectFoundMessage = stringResource(R.string.portrait_no_subject_found)
     val cinematicFps24Label = stringResource(R.string.cinematic_fps_24)
     val cinematicFpsDefaultLabel = stringResource(R.string.cinematic_fps_default)
     val cinematicStabilizedTemplate = stringResource(R.string.cinematic_overlay_stabilized)
@@ -526,6 +531,120 @@ private fun CameraCaptureScreen(
     // the observer above delivers a real reading (e.g. immediately after a fresh bind).
     val torchIsOn = liveTorchState?.let { it == TorchState.ON } ?: torchEnabled
 
+    // Portrait capture (issue #80): a single shutter tap always runs burst -> merge ->
+    // segment -> bokeh -> finish -> save; there is no separate "quick shot" affordance in
+    // this mode (a single un-merged frame would defeat the point of a clean subject/
+    // background split - see the empty SecondaryControlSlotWidth box for Portrait below,
+    // unlike Photo's optional Burst button). HDR burst, night mode and super-resolution are
+    // all ignored here - Portrait always merges a plain single-EV BurstController.arm()
+    // burst with BurstMergePipeline regardless of what those toggles are set to (SIMPLIFY
+    // decision, issue #80). BokehRenderer runs BEFORE FinishingPipeline: the defocus reads
+    // the merged, still scene-referred-ish data, consistent with FinishingPipeline's own
+    // stage-ordering rationale of running rendition (tone/saturation/contrast) last, over
+    // effects already baked in - so the bokeh itself isn't re-tonemapped by the look/preset
+    // the user picked. Mirrors mergeAndSave's structure below (Photo's HDR/night/SR burst
+    // dispatch) but is kept as its own function rather than folded into it, since the
+    // post-merge step (segment + conditional bokeh) and the distinct no-subject snackbar
+    // have no equivalent there.
+    fun startPortraitCapture() {
+        val controller = burstController ?: return
+        val capture = imageCapture ?: return
+        haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+        isBurstInProgress = true
+        // Snapshot once at capture start, like mergeAndSave's guidedCaptureActive below: if
+        // the user dismisses the guided banner mid-burst, this capture finishes as a normal
+        // one.
+        val guidedCaptureActive = guidedStep == GuidedCompareStep.AwaitingCapture
+        val frameCapture = BurstController.FrameCapture { onResult ->
+            BurstImageCapture.capture(capture, burstCaptureExecutor, maxBurstPixels, onResult)
+        }
+        controller.arm(frameCapture) { burst ->
+            Log.d(TAG, "Portrait burst captured ${burst.frames.size} frames in ${burst.captureSpanMillis} ms")
+            scope.launch(Dispatchers.Default) {
+                try {
+                    val mergeResult = BurstMergePipeline.merge(burst.frames)
+                    val merged = mergeResult.merged
+                    // Segmentation runs on the MERGED frame (not a raw burst frame), and
+                    // BLOCKS this coroutine's thread with an internal ~3s timeout - safe
+                    // here since Dispatchers.Default is already off the main thread. A null
+                    // mask (timeout, MLKit failure, or no confident subject) falls back to a
+                    // normal finished photo instead of failing the whole capture.
+                    val mask = SubjectSegmenter.segment(merged)
+                    val bokehApplied = if (mask != null) {
+                        BokehRenderer.render(merged, mask, BokehParams.forImageWidth(merged.width))
+                    } else {
+                        merged
+                    }
+                    // Unlike Photo's mergeAndSave, finishing is unconditional here - a POC
+                    // simplification (issue #80): settings.applyFinishingToMergedPhotos only
+                    // gates Photo's burst/HDR/night/SR merges, not Portrait.
+                    val finished = FinishingPipeline.apply(bokehApplied, settings.finishingPreset.params)
+                    val processedUri = MergedPhotoSaver.save(
+                        context,
+                        finished,
+                        prefix = MergedPhotoSaver.PORTRAIT_PREFIX,
+                        exif = ExifMetadata(
+                            captureTimestampMillis = finished.timestampMillis,
+                            widthPx = finished.width,
+                            heightPx = finished.height,
+                        ),
+                    )
+                    val message = if (mask != null) {
+                        String.format(
+                            portraitMergeSuccessMessage,
+                            mergeResult.usedFrameCount,
+                            finished.width,
+                            finished.height,
+                        )
+                    } else {
+                        portraitNoSubjectFoundMessage
+                    }
+                    val capturedPair = if (guidedCaptureActive) {
+                        ComparePair(processedUri = processedUri, referenceUri = null)
+                    } else if (settings.saveComparisonPair) {
+                        val referenceUri = MergedPhotoSaver.save(
+                            context,
+                            merged,
+                            prefix = MergedPhotoSaver.RAW_PREFIX,
+                            exif = ExifMetadata(
+                                captureTimestampMillis = merged.timestampMillis,
+                                widthPx = merged.width,
+                                heightPx = merged.height,
+                            ),
+                        )
+                        ComparePair(processedUri = processedUri, referenceUri = referenceUri)
+                    } else {
+                        null
+                    }
+                    withContext(Dispatchers.Main) {
+                        isBurstInProgress = false
+                        lastCapture = LastCapture(processedUri, CaptureMediaType.Photo)
+                        if (guidedCaptureActive && capturedPair != null) {
+                            onComparePairCaptured(capturedPair)
+                            onGuidedCaptureCompleted()
+                        } else if (capturedPair != null) {
+                            onComparePairCaptured(capturedPair)
+                            val result = snackbarHostState.showSnackbar(
+                                message = message,
+                                actionLabel = compareActionLabel,
+                            )
+                            if (result == SnackbarResult.ActionPerformed) {
+                                onOpenCompare()
+                            }
+                        } else {
+                            snackbarHostState.showSnackbar(message)
+                        }
+                    }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        isBurstInProgress = false
+                        snackbarHostState.showSnackbar(burstMergeFailureMessage)
+                    }
+                }
+            }
+        }
+    }
+
     // The shutter's primary action, shared by the on-screen ShutterButton and the hardware
     // volume-key path below (issue #73) - a plain local lambda (recreated every recomposition,
     // like the inline onClick it replaces) rather than a remembered reference, since it closes
@@ -569,6 +688,8 @@ private fun CameraCaptureScreen(
                 elapsedMillis = 0L
                 isRecording = true
             }
+        } else if (mode == CameraMode.Portrait) {
+            startPortraitCapture()
         } else {
             val capture = imageCapture ?: return@shutterAction
             haptics.performHapticFeedback(HapticFeedbackType.Confirm)
@@ -790,7 +911,10 @@ private fun CameraCaptureScreen(
                 )
             }
 
-            if (hasFlashUnit && mode == CameraMode.Photo) {
+            // Portrait binds an ImageCapture just like Photo (see CameraPreview), and its
+            // flashMode is applied the same dynamic way, so the flash control is shown for
+            // both rather than only Photo.
+            if (hasFlashUnit && (mode == CameraMode.Photo || mode == CameraMode.Portrait)) {
                 StatusControlChip(
                     label = String.format(
                         flashControlLabelTemplate,
@@ -1034,6 +1158,7 @@ private fun CameraCaptureScreen(
                     selected = mode,
                     enabled = !isRecording,
                     photoLabel = photoModeLabel,
+                    portraitLabel = portraitModeLabel,
                     videoLabel = videoModeLabel,
                     cinematicLabel = cinematicModeLabel,
                     onSelected = { mode = it },
@@ -1555,16 +1680,23 @@ private fun ModeSelector(
     selected: CameraMode,
     enabled: Boolean,
     photoLabel: String,
+    portraitLabel: String,
     videoLabel: String,
     cinematicLabel: String,
     onSelected: (CameraMode) -> Unit,
 ) {
+    // Photo/Portrait grouped first (both photo-like, sharing the Preview + ImageCapture
+    // bind), then the two video-like modes - issue #80 adds Portrait as the 4th entry.
     val options = listOf(
         CameraMode.Photo to photoLabel,
+        CameraMode.Portrait to portraitLabel,
         CameraMode.Video to videoLabel,
         CameraMode.Cinematic to cinematicLabel,
     )
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.widthIn(max = 320.dp)) {
+    // Widened from the original 3-entry 320.dp and each label capped at one line (like
+    // LookSelector's labelSmall/maxLines=1 below) so 4 short labels - including the
+    // 9-character "Cinematic" and 8-character "Portrait" - never wrap on a narrow screen.
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.widthIn(max = 360.dp)) {
         options.forEachIndexed { index, (candidateMode, label) ->
             SegmentedButton(
                 modifier = Modifier.heightIn(min = 48.dp),
@@ -1573,7 +1705,13 @@ private fun ModeSelector(
                 enabled = enabled,
                 onClick = { onSelected(candidateMode) },
                 icon = {},
-                label = { Text(text = label) },
+                label = {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                    )
+                },
             )
         }
     }

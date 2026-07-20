@@ -21,6 +21,14 @@ package com.poc.camera.pipeline
  *
  * [whiteBalance] is the strength of the [WhiteBalance] pass in [0, 1] (0 disables it),
  * blending the bounded auto white-balance gains toward identity.
+ *
+ * [skinProtection] is the strength of the [SkinMask]-driven skin-tone protection in [0, 1]
+ * (0 disables it = current behaviour). Where the mask fires it scales DOWN the effective
+ * strength of the [Saturation], [LocalToneMapper] and [DetailEnhancer] passes -- bounding
+ * saturation, local contrast and sharpening inside skin so the generic rendition operators
+ * cannot over-cook skin. It only ever REDUCES those operators; it never lightens, darkens
+ * or shifts skin hue. On a grayscale frame the mask is all-zero, so any [skinProtection]
+ * value is an exact no-op there.
  */
 data class FinishingParams(
     val shadowsLift: Double,
@@ -31,6 +39,7 @@ data class FinishingParams(
     val chromaDenoise: Double = 0.0,
     val detailEnhance: Double = 0.0,
     val whiteBalance: Double = 0.0,
+    val skinProtection: Double = 0.0,
 ) {
     companion object {
         /**
@@ -60,6 +69,14 @@ data class FinishingParams(
          * [WhiteBalance.DEFAULT_MAX_GAIN] range and then scaled by this strength -- so it
          * cannot over-correct. See AwbGoldenRegressionTest for the cast-correction and
          * neutrality proofs behind this default.
+         *
+         * [skinProtection] ships on at 0.7: strong enough to visibly bound saturation,
+         * local contrast and sharpening inside skin regions, while still letting the
+         * operators do most of their work everywhere else. It is a strict no-op on every
+         * grayscale scene (the skin mask is all-zero without skin chroma), so the fidelity
+         * floors on those scenes are bit-unaffected; only the colour scenes with skin
+         * chroma shift, and only within tolerance. See SkinProtectionGoldenTest for the
+         * hue-shift, sharpening and cross-skin-tone fairness proofs behind this default.
          */
         val DEFAULT = FinishingParams(
             shadowsLift = 0.12,
@@ -70,6 +87,7 @@ data class FinishingParams(
             chromaDenoise = 0.6,
             detailEnhance = 0.08,
             whiteBalance = 0.8,
+            skinProtection = 0.7,
         )
 
         /**
@@ -194,20 +212,40 @@ object FinishingPipeline {
         } else {
             balanced
         }
+        // Skin-protection modulation, computed ONCE on the cleaned (post-denoise) chroma and
+        // shared by the three operators it bounds. Null when protection is off, so those
+        // stages take their original path unchanged.
+        val skinModulation = skinModulation(denoised, params)
         val locallyMapped = if (params.localContrast > 0.0) {
-            LocalToneMapper.apply(denoised, localToneParams(params.localContrast))
+            LocalToneMapper.apply(denoised, localToneParams(params.localContrast), skinModulation)
         } else {
             denoised
         }
         val enhanced = if (params.detailEnhance > 0.0) {
-            DetailEnhancer.apply(locallyMapped, detailParams(params.detailEnhance))
+            DetailEnhancer.apply(locallyMapped, detailParams(params.detailEnhance), skinModulation)
         } else {
             locallyMapped
         }
         val toned = ToneCurve(params.shadowsLift, params.highlightRolloff).apply(enhanced)
-        val saturated = Saturation.apply(toned, params.saturation)
+        val saturated = Saturation.apply(toned, params.saturation, skinModulation)
         val contrasted = Contrast.apply(saturated, params.contrast)
         return forceOpaque(contrasted)
+    }
+
+    /**
+     * The per-pixel skin-protection modulation plane for [denoisedFrame] under [params], or
+     * null when [FinishingParams.skinProtection] is 0 (protection disabled -> the modulated
+     * stages take their original path). Each entry is `1 - skinProtection * mask`, so it is
+     * 1 (full operator effect) off skin and drops to `1 - skinProtection` (bounded effect)
+     * where the [SkinMask] fires. The mask is computed on the DENOISED frame -- cleaner
+     * chroma -- exactly as [FinishingPipeline.apply] and [TiledFinishing.finishRegion] both
+     * do, so the whole-frame and tiled paths build the same plane.
+     */
+    internal fun skinModulation(denoisedFrame: Frame, params: FinishingParams): FloatArray? {
+        if (params.skinProtection <= 0.0) return null
+        val mask = SkinMask.compute(denoisedFrame)
+        val strength = params.skinProtection
+        return FloatArray(mask.size) { (1.0 - strength * mask[it]).toFloat() }
     }
 
     /**

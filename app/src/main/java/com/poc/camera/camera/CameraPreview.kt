@@ -3,8 +3,10 @@ package com.poc.camera.camera
 import android.util.Log
 import android.util.Range
 import androidx.camera.core.Camera
+import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
+import androidx.camera.core.MeteringPointFactory
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -26,6 +28,17 @@ import com.poc.camera.pipeline.Looks
 
 private const val TAG = "CameraPreview"
 
+/**
+ * What tap-to-focus needs from the current bind: the bound camera's control surface and
+ * the PreviewView's coordinate-to-[androidx.camera.core.MeteringPoint] factory. Re-supplied
+ * on every successful bind (mode switch, retry) and cleared to null while unbound, so a
+ * stale [CameraControl] from a previous bind is never used for metering.
+ */
+data class FocusMeteringHandle(
+    val cameraControl: CameraControl,
+    val meteringPointFactory: MeteringPointFactory,
+)
+
 @Composable
 fun CameraPreview(
     mode: CameraMode,
@@ -38,6 +51,7 @@ fun CameraPreview(
     onBurstControllerReady: (BurstController) -> Unit = {},
     onExposureControllerReady: (ExposureController?) -> Unit = {},
     onCinematicConfigReady: (CinematicConfig) -> Unit = {},
+    onFocusMeteringReady: (FocusMeteringHandle?) -> Unit = {},
     onBindError: (Throwable) -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -86,15 +100,17 @@ fun CameraPreview(
                             onImageCaptureReady(imageCapture)
                             onBurstControllerReady(burstController)
                             onExposureControllerReady(camera.exposureController())
+                            onFocusMeteringReady(camera.focusMeteringHandle(previewView))
                         }
                         CameraMode.Video -> {
-                            provider.bindToLifecycle(
+                            val camera = provider.bindToLifecycle(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
                                 preview,
                                 videoCapture,
                             )
                             onVideoCaptureReady(videoCapture)
+                            onFocusMeteringReady(camera.focusMeteringHandle(previewView))
                         }
                         CameraMode.Cinematic -> {
                             // Characteristics vary per device, so the config is resolved fresh
@@ -131,7 +147,7 @@ fun CameraPreview(
                             }
                             activeEffect = effect
 
-                            if (effect != null) {
+                            val camera = if (effect != null) {
                                 val useCaseGroup = UseCaseGroup.Builder()
                                     .addUseCase(preview)
                                     .addUseCase(cinematicVideoCapture)
@@ -152,6 +168,7 @@ fun CameraPreview(
                             }
                             onVideoCaptureReady(cinematicVideoCapture)
                             onCinematicConfigReady(cinematicConfig)
+                            onFocusMeteringReady(camera.focusMeteringHandle(previewView))
                         }
                     }
                 } catch (t: Throwable) {
@@ -165,6 +182,9 @@ fun CameraPreview(
         onDispose {
             cameraProvider?.unbindAll()
             activeEffect?.release()
+            // Invalidates any in-flight focus/metering handle from this bind so a mode
+            // switch or retry never lets a tap reach a torn-down CameraControl.
+            onFocusMeteringReady(null)
         }
     }
 
@@ -202,3 +222,6 @@ private fun Camera.exposureController(): ExposureController? {
         },
     )
 }
+
+private fun Camera.focusMeteringHandle(previewView: PreviewView): FocusMeteringHandle =
+    FocusMeteringHandle(cameraControl, previewView.meteringPointFactory)

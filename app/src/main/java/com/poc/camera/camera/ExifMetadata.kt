@@ -11,7 +11,13 @@ import java.util.TimeZone
  * Frames are decoded upright before processing - rotation is applied at decode time in
  * [JpegBurstFrameDecoder] - so the built [TAG_ORIENTATION] is always the EXIF "normal"
  * value (1). That is not a placeholder; it is the honest description of pixels that are
- * already the right way up by the time this metadata is attached.
+ * already the right way up by the time this metadata is attached. Selfie mirroring (issue
+ * #88, [com.poc.camera.pipeline.mirrorHorizontal]) does not change that: a mirrored front-
+ * camera frame's pixels are physically flipped by the pipeline before the JPEG is encoded, so
+ * orientation stays 1 here too - there is no EXIF mirror flag to set instead (EXIF orientation
+ * values 2/4/5/7 encode a flip, but this project writes literal pixels, never a flip-by-tag,
+ * to keep every consumer that ignores EXIF orientation - like [BitmapFrameConverter][com.poc.camera.imaging.BitmapFrameConverter]
+ * reading a saved file back in - seeing the correct, already-mirrored image).
  *
  * Pure data holder plus a map builder, no Android imports, so tag formatting can be unit
  * tested without Robolectric. Map keys are the tag name strings documented by

@@ -20,6 +20,7 @@ class CameraSettingsDataTest {
         assertEquals(FinishingPreset.Natural, default.finishingPreset)
         assertEquals(false, default.hdrVideoEnabled)
         assertEquals(VideoQualityChoice.FHD, default.videoQuality)
+        assertEquals(false, default.verboseTimings)
     }
 
     @Test
@@ -50,6 +51,7 @@ class CameraSettingsDataTest {
             finishingPreset = FinishingPreset.Vivid,
             hdrVideoEnabled = true,
             videoQuality = VideoQualityChoice.UHD,
+            verboseTimings = true,
         )
 
         val decoded = CameraSettingsData.fromRaw(
@@ -63,9 +65,25 @@ class CameraSettingsDataTest {
             finishingPresetName = original.finishingPreset.name,
             hdrVideoEnabled = original.hdrVideoEnabled,
             videoQualityName = original.videoQuality.name,
+            verboseTimings = original.verboseTimings,
         )
 
         assertEquals(original, decoded)
+    }
+
+    @Test
+    fun fromRawFallsBackToVerboseTimingsDisabledWhenMissing() {
+        val decoded = CameraSettingsData.fromRaw(
+            burstFrameCount = 6,
+            applyFinishingToMergedPhotos = true,
+            defaultCinematicLookName = null,
+            hdrBurstEnabled = false,
+            saveComparisonPair = false,
+            nightModeEnabled = false,
+            superResolutionEnabled = false,
+        )
+
+        assertEquals(CameraSettingsData.DEFAULT.verboseTimings, decoded.verboseTimings)
     }
 
     @Test

@@ -298,12 +298,22 @@ private fun CameraCaptureScreen(
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     val snackbarHostState = remember { SnackbarHostState() }
-    // Single background thread that both delivers each takePicture callback and decodes
-    // the returned JPEG, so heavy full-resolution decode stays off the main thread and
-    // captures never overlap. Shut down when the screen leaves composition.
+    // Background thread that delivers each takePicture callback and copies the JPEG bytes
+    // off the ImageProxy (BurstImageCapture.acquire) - fast, so the camera session frees up
+    // for the next capture almost immediately. Shut down when the screen leaves composition.
     val burstCaptureExecutor = remember { Executors.newSingleThreadExecutor() }
+    // Separate single-threaded executor for the slow half: decoding acquired JPEG bytes into
+    // a pipeline Frame (BurstImageCapture.decode). Split from burstCaptureExecutor (issue
+    // #87) so decode of frame N runs concurrently with acquisition of frame N+1 instead of
+    // blocking it - see BurstController's "decode pipelining" doc. Single-threaded, not a
+    // pool: BurstController relies on decodes settling in capture order and its
+    // CaptureSpans.Builder being driven from one thread only.
+    val burstDecodeExecutor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) {
-        onDispose { burstCaptureExecutor.shutdown() }
+        onDispose {
+            burstCaptureExecutor.shutdown()
+            burstDecodeExecutor.shutdown()
+        }
     }
     // Per-device native-resolution ceiling for burst decode: high-memory devices decode
     // 12 MP+ sensors at native resolution, low-memory devices stay conservative. Read once
@@ -586,9 +596,11 @@ private fun CameraCaptureScreen(
         // one.
         val guidedCaptureActive = guidedStep == GuidedCompareStep.AwaitingCapture
         val frameCapture = BurstController.FrameCapture { onResult ->
-            BurstImageCapture.capture(capture, burstCaptureExecutor, maxBurstPixels, onResult)
+            BurstImageCapture.acquire(capture, burstCaptureExecutor) { acquireResult ->
+                onResult(acquireResult.map { jpeg -> { BurstImageCapture.decode(jpeg, maxBurstPixels) } })
+            }
         }
-        controller.arm(frameCapture) { burst ->
+        controller.arm(frameCapture, burstDecodeExecutor) { burst ->
             Log.d(TAG, "Portrait burst captured ${burst.frames.size} frames in ${burst.captureSpanMillis} ms")
             scope.launch(Dispatchers.Default) {
                 // Frames are collected: the camera is free again, so a new capture can be
@@ -600,6 +612,10 @@ private fun CameraCaptureScreen(
                     currentProcessingStage = ProcessingStage.Merging
                 }
                 try {
+                    // Merge/segment/bokeh all run while the chip still reads "Merging" (see
+                    // ProcessingStage's own doc: it's a coarse per-job phase, not a per-op
+                    // breakdown), so this one span covers all three for CaptureSpans too.
+                    val mergeStart = System.currentTimeMillis()
                     val mergeResult = BurstMergePipeline.merge(burst.frames)
                     val merged = mergeResult.merged
                     // Segmentation runs on the MERGED frame (not a raw burst frame), and
@@ -613,12 +629,16 @@ private fun CameraCaptureScreen(
                     } else {
                         merged
                     }
+                    val mergeMillis = System.currentTimeMillis() - mergeStart
                     withContext(Dispatchers.Main) { currentProcessingStage = ProcessingStage.Finishing }
                     // Unlike Photo's mergeAndSave, finishing is unconditional here - a POC
                     // simplification (issue #80): settings.applyFinishingToMergedPhotos only
                     // gates Photo's burst/HDR/night/SR merges, not Portrait.
+                    val finishStart = System.currentTimeMillis()
                     val finished = FinishingPipeline.apply(bokehApplied, settings.finishingPreset.params)
+                    val finishMillis = System.currentTimeMillis() - finishStart
                     withContext(Dispatchers.Main) { currentProcessingStage = ProcessingStage.Saving }
+                    val saveStart = System.currentTimeMillis()
                     val processedUri = MergedPhotoSaver.save(
                         context,
                         finished,
@@ -629,7 +649,10 @@ private fun CameraCaptureScreen(
                             heightPx = finished.height,
                         ),
                     )
-                    val message = if (mask != null) {
+                    val saveMillis = System.currentTimeMillis() - saveStart
+                    val spans = burst.spans.copy(mergeMillis = mergeMillis, finishMillis = finishMillis, saveMillis = saveMillis)
+                    Log.d(TAG, "Portrait capture breakdown: ${spans.formatBreakdown()}")
+                    val baseMessage = if (mask != null) {
                         String.format(
                             portraitMergeSuccessMessage,
                             mergeResult.usedFrameCount,
@@ -638,6 +661,11 @@ private fun CameraCaptureScreen(
                         )
                     } else {
                         portraitNoSubjectFoundMessage
+                    }
+                    val message = if (settings.verboseTimings) {
+                        "$baseMessage (${spans.formatBreakdown()})"
+                    } else {
+                        baseMessage
                     }
                     val capturedPair = if (guidedCaptureActive) {
                         ComparePair(processedUri = processedUri, referenceUri = null)
@@ -1264,100 +1292,125 @@ private fun CameraCaptureScreen(
                     ) {
                         if (mode == CameraMode.Photo) {
                             // Merge (single-EV or HDR) off the main thread, then finish,
-                            // persist and report; shared by both burst paths.
-                            val mergeAndSave: (suspend () -> Pair<Frame, String>) -> Unit = { produce ->
-                                // Snapshot once at merge start: if the user dismisses the guided
-                                // banner mid-burst, this capture finishes as a normal one.
-                                val guidedCaptureActive = guidedStep == GuidedCompareStep.AwaitingCapture
-                                scope.launch(Dispatchers.Default) {
-                                    // Frames are collected: the camera is free again, so a new
-                                    // capture can be armed immediately while this one merges -
-                                    // the processing queue (issue #86) takes over from here via
-                                    // processingCount instead of isCapturing.
-                                    withContext(Dispatchers.Main) {
-                                        isCapturing = false
-                                        processingCount++
-                                        currentProcessingStage = ProcessingStage.Merging
-                                    }
-                                    try {
-                                        val (merged, message) = produce()
-                                        // Finishing (tone/saturation/contrast) is optional and
-                                        // only ever applies to the merged burst frame.
-                                        // Night captures use the night finishing profile,
-                                        // regardless of preset; every other merge (standard or
-                                        // HDR) uses the user's chosen rendition preset.
-                                        val finishingParams = if (settings.nightModeEnabled) {
-                                            NightPipeline.FINISHING_PARAMS
-                                        } else {
-                                            settings.finishingPreset.params
+                            // persist and report; shared by both burst paths. spans carries
+                            // the capture/decode sums BurstController already measured; this
+                            // closure fills in merge/finish/save around its own stage
+                            // transitions and logs+optionally shows the full breakdown.
+                            val mergeAndSave: (spans: CaptureSpans, produce: suspend () -> Pair<Frame, String>) -> Unit =
+                                { spans, produce ->
+                                    // Snapshot once at merge start: if the user dismisses the
+                                    // guided banner mid-burst, this capture finishes as a normal one.
+                                    val guidedCaptureActive = guidedStep == GuidedCompareStep.AwaitingCapture
+                                    scope.launch(Dispatchers.Default) {
+                                        // Frames are collected: the camera is free again, so a new
+                                        // capture can be armed immediately while this one merges -
+                                        // the processing queue (issue #86) takes over from here via
+                                        // processingCount instead of isCapturing.
+                                        withContext(Dispatchers.Main) {
+                                            isCapturing = false
+                                            processingCount++
+                                            currentProcessingStage = ProcessingStage.Merging
                                         }
-                                        withContext(Dispatchers.Main) { currentProcessingStage = ProcessingStage.Finishing }
-                                        val output = if (settings.applyFinishingToMergedPhotos) {
-                                            FinishingPipeline.apply(merged, finishingParams)
-                                        } else {
-                                            merged
-                                        }
-                                        withContext(Dispatchers.Main) { currentProcessingStage = ProcessingStage.Saving }
-                                        val processedUri = MergedPhotoSaver.save(
-                                            context,
-                                            output,
-                                            exif = ExifMetadata(
-                                                captureTimestampMillis = output.timestampMillis,
-                                                widthPx = output.width,
-                                                heightPx = output.height,
-                                            ),
-                                        )
-                                        // A guided-comparison capture always fills slot A with the
-                                        // processed result and leaves slot B unset until the user
-                                        // picks the reference photo on the Compare screen. Otherwise,
-                                        // persist the unprocessed merge input, as-is, for on-device
-                                        // A/B comparison when the user opted in via settings.
-                                        val capturedPair = if (guidedCaptureActive) {
-                                            ComparePair(processedUri = processedUri, referenceUri = null)
-                                        } else if (settings.saveComparisonPair) {
-                                            val referenceUri = MergedPhotoSaver.save(
+                                        try {
+                                            val mergeStart = System.currentTimeMillis()
+                                            val (merged, baseMessage) = produce()
+                                            val mergeMillis = System.currentTimeMillis() - mergeStart
+                                            // Finishing (tone/saturation/contrast) is optional and
+                                            // only ever applies to the merged burst frame.
+                                            // Night captures use the night finishing profile,
+                                            // regardless of preset; every other merge (standard or
+                                            // HDR) uses the user's chosen rendition preset.
+                                            val finishingParams = if (settings.nightModeEnabled) {
+                                                NightPipeline.FINISHING_PARAMS
+                                            } else {
+                                                settings.finishingPreset.params
+                                            }
+                                            withContext(Dispatchers.Main) {
+                                                currentProcessingStage = ProcessingStage.Finishing
+                                            }
+                                            val finishStart = System.currentTimeMillis()
+                                            val output = if (settings.applyFinishingToMergedPhotos) {
+                                                FinishingPipeline.apply(merged, finishingParams)
+                                            } else {
+                                                merged
+                                            }
+                                            val finishMillis = System.currentTimeMillis() - finishStart
+                                            withContext(Dispatchers.Main) {
+                                                currentProcessingStage = ProcessingStage.Saving
+                                            }
+                                            val saveStart = System.currentTimeMillis()
+                                            val processedUri = MergedPhotoSaver.save(
                                                 context,
-                                                merged,
-                                                prefix = MergedPhotoSaver.RAW_PREFIX,
+                                                output,
                                                 exif = ExifMetadata(
-                                                    captureTimestampMillis = merged.timestampMillis,
-                                                    widthPx = merged.width,
-                                                    heightPx = merged.height,
+                                                    captureTimestampMillis = output.timestampMillis,
+                                                    widthPx = output.width,
+                                                    heightPx = output.height,
                                                 ),
                                             )
-                                            ComparePair(processedUri = processedUri, referenceUri = referenceUri)
-                                        } else {
-                                            null
-                                        }
-                                        withContext(Dispatchers.Main) {
-                                            processingCount = (processingCount - 1).coerceAtLeast(0)
-                                            if (processingCount == 0) currentProcessingStage = null
-                                            lastCapture = LastCapture(processedUri, CaptureMediaType.Photo)
-                                            if (guidedCaptureActive && capturedPair != null) {
-                                                onComparePairCaptured(capturedPair)
-                                                onGuidedCaptureCompleted()
-                                            } else if (capturedPair != null) {
-                                                onComparePairCaptured(capturedPair)
-                                                val result = snackbarHostState.showSnackbar(
-                                                    message = message,
-                                                    actionLabel = compareActionLabel,
-                                                )
-                                                if (result == SnackbarResult.ActionPerformed) {
-                                                    onOpenCompare()
-                                                }
+                                            val saveMillis = System.currentTimeMillis() - saveStart
+                                            val finalSpans = spans.copy(
+                                                mergeMillis = mergeMillis,
+                                                finishMillis = finishMillis,
+                                                saveMillis = saveMillis,
+                                            )
+                                            Log.d(TAG, "Capture breakdown: ${finalSpans.formatBreakdown()}")
+                                            val message = if (settings.verboseTimings) {
+                                                "$baseMessage (${finalSpans.formatBreakdown()})"
                                             } else {
-                                                snackbarHostState.showSnackbar(message)
+                                                baseMessage
                                             }
-                                        }
-                                    } catch (e: Exception) {
-                                        withContext(Dispatchers.Main) {
-                                            processingCount = (processingCount - 1).coerceAtLeast(0)
-                                            if (processingCount == 0) currentProcessingStage = null
-                                            snackbarHostState.showSnackbar(burstMergeFailureMessage)
+                                            // A guided-comparison capture always fills slot A with the
+                                            // processed result and leaves slot B unset until the user
+                                            // picks the reference photo on the Compare screen. Otherwise,
+                                            // persist the unprocessed merge input, as-is, for on-device
+                                            // A/B comparison when the user opted in via settings.
+                                            val capturedPair = if (guidedCaptureActive) {
+                                                ComparePair(processedUri = processedUri, referenceUri = null)
+                                            } else if (settings.saveComparisonPair) {
+                                                val referenceUri = MergedPhotoSaver.save(
+                                                    context,
+                                                    merged,
+                                                    prefix = MergedPhotoSaver.RAW_PREFIX,
+                                                    exif = ExifMetadata(
+                                                        captureTimestampMillis = merged.timestampMillis,
+                                                        widthPx = merged.width,
+                                                        heightPx = merged.height,
+                                                    ),
+                                                )
+                                                ComparePair(processedUri = processedUri, referenceUri = referenceUri)
+                                            } else {
+                                                null
+                                            }
+                                            withContext(Dispatchers.Main) {
+                                                processingCount = (processingCount - 1).coerceAtLeast(0)
+                                                if (processingCount == 0) currentProcessingStage = null
+                                                lastCapture = LastCapture(processedUri, CaptureMediaType.Photo)
+                                                if (guidedCaptureActive && capturedPair != null) {
+                                                    onComparePairCaptured(capturedPair)
+                                                    onGuidedCaptureCompleted()
+                                                } else if (capturedPair != null) {
+                                                    onComparePairCaptured(capturedPair)
+                                                    val result = snackbarHostState.showSnackbar(
+                                                        message = message,
+                                                        actionLabel = compareActionLabel,
+                                                    )
+                                                    if (result == SnackbarResult.ActionPerformed) {
+                                                        onOpenCompare()
+                                                    }
+                                                } else {
+                                                    snackbarHostState.showSnackbar(message)
+                                                }
+                                            }
+                                        } catch (e: Exception) {
+                                            withContext(Dispatchers.Main) {
+                                                processingCount = (processingCount - 1).coerceAtLeast(0)
+                                                if (processingCount == 0) currentProcessingStage = null
+                                                snackbarHostState.showSnackbar(burstMergeFailureMessage)
+                                            }
                                         }
                                     }
                                 }
-                            }
                             val controllerReady = burstController != null
                             ActionIconButton(
                                 icon = CameraGlyphs.Burst,
@@ -1375,7 +1428,13 @@ private fun CameraCaptureScreen(
                                     isCapturing = true
                                     currentProcessingStage = ProcessingStage.Capturing
                                     val frameCapture = BurstController.FrameCapture { onResult ->
-                                        BurstImageCapture.capture(capture, burstCaptureExecutor, maxBurstPixels, onResult)
+                                        BurstImageCapture.acquire(capture, burstCaptureExecutor) { acquireResult ->
+                                            onResult(
+                                                acquireResult.map { jpeg ->
+                                                    { BurstImageCapture.decode(jpeg, maxBurstPixels) }
+                                                },
+                                            )
+                                        }
                                     }
                                     val exposure = exposureController
                                     if (settings.nightModeEnabled) {
@@ -1383,13 +1442,13 @@ private fun CameraCaptureScreen(
                                         // long burst merged with the night profile. When both
                                         // switches are on, HDR is skipped for this capture and
                                         // the standard merge snackbar reflects that night ran.
-                                        controller.arm(frameCapture) { burst ->
+                                        controller.arm(frameCapture, burstDecodeExecutor) { burst ->
                                             Log.d(
                                                 TAG,
                                                 "Night burst captured ${burst.frames.size} frames " +
                                                     "in ${burst.captureSpanMillis} ms",
                                             )
-                                            mergeAndSave {
+                                            mergeAndSave(burst.spans) {
                                                 val result = NightPipeline.merge(burst.frames)
                                                 result.merged to String.format(
                                                     burstMergeSuccessMessage,
@@ -1405,13 +1464,14 @@ private fun CameraCaptureScreen(
                                             framesPerEv = exposure.framesPerEv,
                                             setExposureIndex = exposure.setIndexAndAwait,
                                             captureFrame = frameCapture,
+                                            decodeExecutor = burstDecodeExecutor,
                                         ) { burst ->
                                             Log.d(
                                                 TAG,
                                                 "HDR burst captured ${burst.frames.size} frames " +
                                                     "in ${burst.captureSpanMillis} ms",
                                             )
-                                            mergeAndSave {
+                                            mergeAndSave(burst.spans) {
                                                 val result = HdrMergePipeline.merge(burst.frames, burst.evs)
                                                 result.fused to String.format(
                                                     hdrBurstMergeSuccessMessage,
@@ -1425,13 +1485,13 @@ private fun CameraCaptureScreen(
                                         // Standard single-EV burst super-resolved onto a
                                         // doubled grid. Night and HDR are handled above and
                                         // take priority; SR runs only on the plain still path.
-                                        controller.arm(frameCapture) { burst ->
+                                        controller.arm(frameCapture, burstDecodeExecutor) { burst ->
                                             Log.d(
                                                 TAG,
                                                 "SR burst captured ${burst.frames.size} frames " +
                                                     "in ${burst.captureSpanMillis} ms",
                                             )
-                                            mergeAndSave {
+                                            mergeAndSave(burst.spans) {
                                                 val result = SuperResolution.superResolve(burst.frames)
                                                 result.superResolved to String.format(
                                                     superResolutionSuccessMessage,
@@ -1442,13 +1502,13 @@ private fun CameraCaptureScreen(
                                             }
                                         }
                                     } else {
-                                        controller.arm(frameCapture) { burst ->
+                                        controller.arm(frameCapture, burstDecodeExecutor) { burst ->
                                             Log.d(
                                                 TAG,
                                                 "Burst captured ${burst.frames.size} frames " +
                                                     "in ${burst.captureSpanMillis} ms",
                                             )
-                                            mergeAndSave {
+                                            mergeAndSave(burst.spans) {
                                                 val result = BurstMergePipeline.merge(burst.frames)
                                                 result.merged to String.format(
                                                     burstMergeSuccessMessage,

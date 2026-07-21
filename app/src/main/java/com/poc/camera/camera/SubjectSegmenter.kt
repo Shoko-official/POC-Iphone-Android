@@ -43,6 +43,12 @@ private const val TAG = "SubjectSegmenter"
  *   alone, so this specific claim is doc-verified rather than javap-verified).
  * - `InputImage.fromBitmap(Bitmap, rotationDegrees: Int)` - rotationDegrees is always 0 here:
  *   the merged [Frame] this segments is already decoded upright (see [ExifMetadata]'s KDoc).
+ *   Front-camera captures are also already mirrored by the time they reach here (issue #88,
+ *   [com.poc.camera.pipeline.mirrorHorizontal] runs on the merged frame in CameraScreen right
+ *   after merge, before this call) - a horizontal flip changes nothing about which way is
+ *   "up", so `rotationDegrees = 0` stays correct for both lenses either way, and the mask this
+ *   returns lines up pixel-for-pixel with the same (mirrored) geometry [BokehRenderer] and the
+ *   final save both use.
  *
  * ## Device-only
  *

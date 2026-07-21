@@ -118,6 +118,7 @@ import com.poc.camera.pipeline.Frame
 import com.poc.camera.pipeline.HdrMergePipeline
 import com.poc.camera.pipeline.NightPipeline
 import com.poc.camera.pipeline.SuperResolution
+import com.poc.camera.pipeline.mirrorHorizontal
 import com.poc.camera.settings.CameraSettingsData
 import com.poc.camera.settings.VideoQualityLogic
 import java.util.concurrent.Executors
@@ -595,6 +596,13 @@ private fun CameraCaptureScreen(
         // the user dismisses the guided banner mid-burst, this capture finishes as a normal
         // one.
         val guidedCaptureActive = guidedStep == GuidedCompareStep.AwaitingCapture
+        // Selfie mirroring (issue #88): snapshot the facing that is ACTUALLY being captured,
+        // not whatever lensFacing reads once merge/segment/bokeh finish - the flip-camera
+        // chip stays enabled during Portrait's background processing (see its own
+        // CameraSwitchLogic.isSwitchEnabled call, gated only on isRecording), so reading
+        // lensFacing late could pick up a flip that happened after this burst was already
+        // captured on the old lens.
+        val captureLensFacing = lensFacing
         val frameCapture = BurstController.FrameCapture { onResult ->
             BurstImageCapture.acquire(capture, burstCaptureExecutor) { acquireResult ->
                 onResult(acquireResult.map { jpeg -> { BurstImageCapture.decode(jpeg, maxBurstPixels) } })
@@ -617,7 +625,19 @@ private fun CameraCaptureScreen(
                     // breakdown), so this one span covers all three for CaptureSpans too.
                     val mergeStart = System.currentTimeMillis()
                     val mergeResult = BurstMergePipeline.merge(burst.frames)
-                    val merged = mergeResult.merged
+                    // Selfie mirroring (issue #88): mirrored ONCE here, right after merge and
+                    // before segmentation, when the front lens was used - so segmentation, the
+                    // bokeh mask, the finished PRT_ save, the RAW_ comparison save (below, which
+                    // reuses this same `merged`), and the thumbnail all see one consistent,
+                    // already-mirrored frame. Every mainstream camera app defaults selfies to
+                    // match the mirrored preview PreviewView already shows the user live, rather
+                    // than the sensor's raw (un-mirrored) orientation - see [mirrorHorizontal]'s
+                    // KDoc for the full rationale.
+                    val merged = if (captureLensFacing == LensFacing.Front) {
+                        mergeResult.merged.mirrorHorizontal()
+                    } else {
+                        mergeResult.merged
+                    }
                     // Segmentation runs on the MERGED frame (not a raw burst frame), and
                     // BLOCKS this coroutine's thread with an internal ~3s timeout - safe
                     // here since Dispatchers.Default is already off the main thread. A null
@@ -761,6 +781,19 @@ private fun CameraCaptureScreen(
         } else if (mode == CameraMode.Portrait) {
             startPortraitCapture()
         } else {
+            // Selfie mirroring (issue #88) does NOT apply here. This is Photo's plain single
+            // tap: CameraX's ImageCapture.takePicture writes the JPEG straight to disk itself
+            // (PhotoCapture never sees decoded pixels to mirror), unlike every other photo
+            // path (burst/HDR/night/SR merges and Portrait), which all pass their merged Frame
+            // through Frame.mirrorHorizontal before saving. CameraX 1.5's
+            // ImageCapture.Builder.setMirrorMode exists, but its effect on the JPEG output was
+            // left undocumented in this project's own findings (issue #71) - shipping an
+            // untested, per-device-unknown mirror on the one path we don't control the pixels
+            // for would trade a known, honest inconsistency for an unverified one. So: a
+            // front-camera single tap keeps CameraX's un-mirrored platform default; a
+            // front-camera burst/HDR/night/SR/Portrait capture is mirrored to match the
+            // preview. Documented, not hidden - users who want mirrored selfies should use a
+            // burst-based mode.
             val capture = imageCapture ?: return@shutterAction
             haptics.performHapticFeedback(HapticFeedbackType.Confirm)
             PhotoCapture.capture(
@@ -1296,8 +1329,16 @@ private fun CameraCaptureScreen(
                             // the capture/decode sums BurstController already measured; this
                             // closure fills in merge/finish/save around its own stage
                             // transitions and logs+optionally shows the full breakdown.
-                            val mergeAndSave: (spans: CaptureSpans, produce: suspend () -> Pair<Frame, String>) -> Unit =
-                                { spans, produce ->
+                            // captureLensFacing is threaded in by every call site below (each
+                            // snapshots lensFacing at the moment its burst is armed, not read
+                            // late here - see startPortraitCapture's matching comment on why:
+                            // the flip-camera chip stays enabled during background processing).
+                            val mergeAndSave: (
+                                spans: CaptureSpans,
+                                captureLensFacing: LensFacing,
+                                produce: suspend () -> Pair<Frame, String>,
+                            ) -> Unit =
+                                { spans, captureLensFacing, produce ->
                                     // Snapshot once at merge start: if the user dismisses the
                                     // guided banner mid-burst, this capture finishes as a normal one.
                                     val guidedCaptureActive = guidedStep == GuidedCompareStep.AwaitingCapture
@@ -1313,7 +1354,19 @@ private fun CameraCaptureScreen(
                                         }
                                         try {
                                             val mergeStart = System.currentTimeMillis()
-                                            val (merged, baseMessage) = produce()
+                                            val (rawMerged, baseMessage) = produce()
+                                            // Selfie mirroring (issue #88): mirrored ONCE here, on
+                                            // the final merged geometry (after SR's 2x output too),
+                                            // before finishing - so the RAW_ comparison save below
+                                            // (which reuses this same `merged`) and the MRG_ save
+                                            // stay consistent. See Frame.mirrorHorizontal's KDoc and
+                                            // startPortraitCapture's matching comment for the
+                                            // rationale and where Portrait applies the same rule.
+                                            val merged = if (captureLensFacing == LensFacing.Front) {
+                                                rawMerged.mirrorHorizontal()
+                                            } else {
+                                                rawMerged
+                                            }
                                             val mergeMillis = System.currentTimeMillis() - mergeStart
                                             // Finishing (tone/saturation/contrast) is optional and
                                             // only ever applies to the merged burst frame.
@@ -1427,6 +1480,11 @@ private fun CameraCaptureScreen(
                                     haptics.performHapticFeedback(HapticFeedbackType.Confirm)
                                     isCapturing = true
                                     currentProcessingStage = ProcessingStage.Capturing
+                                    // Selfie mirroring (issue #88): snapshot the facing being
+                                    // captured right now, not whatever lensFacing reads once
+                                    // this burst's merge finishes - see startPortraitCapture's
+                                    // matching captureLensFacing comment for why that matters.
+                                    val captureLensFacing = lensFacing
                                     val frameCapture = BurstController.FrameCapture { onResult ->
                                         BurstImageCapture.acquire(capture, burstCaptureExecutor) { acquireResult ->
                                             onResult(
@@ -1448,7 +1506,7 @@ private fun CameraCaptureScreen(
                                                 "Night burst captured ${burst.frames.size} frames " +
                                                     "in ${burst.captureSpanMillis} ms",
                                             )
-                                            mergeAndSave(burst.spans) {
+                                            mergeAndSave(burst.spans, captureLensFacing) {
                                                 val result = NightPipeline.merge(burst.frames)
                                                 result.merged to String.format(
                                                     burstMergeSuccessMessage,
@@ -1471,7 +1529,7 @@ private fun CameraCaptureScreen(
                                                 "HDR burst captured ${burst.frames.size} frames " +
                                                     "in ${burst.captureSpanMillis} ms",
                                             )
-                                            mergeAndSave(burst.spans) {
+                                            mergeAndSave(burst.spans, captureLensFacing) {
                                                 val result = HdrMergePipeline.merge(burst.frames, burst.evs)
                                                 result.fused to String.format(
                                                     hdrBurstMergeSuccessMessage,
@@ -1491,7 +1549,7 @@ private fun CameraCaptureScreen(
                                                 "SR burst captured ${burst.frames.size} frames " +
                                                     "in ${burst.captureSpanMillis} ms",
                                             )
-                                            mergeAndSave(burst.spans) {
+                                            mergeAndSave(burst.spans, captureLensFacing) {
                                                 val result = SuperResolution.superResolve(burst.frames)
                                                 result.superResolved to String.format(
                                                     superResolutionSuccessMessage,
@@ -1508,7 +1566,7 @@ private fun CameraCaptureScreen(
                                                 "Burst captured ${burst.frames.size} frames " +
                                                     "in ${burst.captureSpanMillis} ms",
                                             )
-                                            mergeAndSave(burst.spans) {
+                                            mergeAndSave(burst.spans, captureLensFacing) {
                                                 val result = BurstMergePipeline.merge(burst.frames)
                                                 result.merged to String.format(
                                                     burstMergeSuccessMessage,

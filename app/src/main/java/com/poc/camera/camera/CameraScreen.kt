@@ -51,7 +51,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -80,16 +79,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -143,8 +137,11 @@ import kotlinx.coroutines.withContext
 // unpredictable live preview (sky, snow, direct light); paired with a text shadow below
 // for the worst case of a near-white background behind a status chip.
 private const val TAG = "CameraScreen"
-private val OverlayScrimColor = Color.Black.copy(alpha = 0.6f)
-private val OverlayTextShadow = Shadow(color = Color.Black, offset = Offset(0f, 1f), blurRadius = 4f)
+// The chrome's scrim and text shadow now live once in ChromeTokens (ViewfinderChrome.kt);
+// these aliases keep the remaining message-surface composables (OverlayChip, the guided
+// banner, the bind-error card) reading from that single source of truth.
+private val OverlayScrimColor = ChromeTokens.Scrim
+private val OverlayTextShadow = ChromeTokens.TextShadow
 private val SecondaryControlSlotWidth = 88.dp
 
 // Tap-to-focus reticle: transient feedback near the tap point, not a control, so it sits
@@ -154,13 +151,20 @@ private val SecondaryControlSlotWidth = 88.dp
 private const val FOCUS_AUTO_CANCEL_MILLIS = 4_000L
 private const val FOCUS_RETICLE_SETTLE_DELAY_MILLIS = 800L
 private const val FOCUS_RETICLE_FADE_MILLIS = 250
+private const val FOCUS_RETICLE_SCALE_MILLIS = 180
 private val FocusReticleSize = 72.dp
-private val FocusReticleCornerRadius = 8.dp
 private val FocusReticleStrokeWidth = 2.dp
-private val FocusReticleStrokeWidthResolved = 3.dp
-private val FocusReticleFocusingColor = Color.White
-private val FocusReticleSuccessColor = Color(0xFF7CFF7A)
-private val FocusReticleFailureColor = Color(0xFFFF6B57)
+private val FocusReticleCornerArm = 16.dp
+// Redesigned reticle (issue #82): four L-shaped corner brackets that read their state through
+// geometry and brightness, never colour alone - a subtler photographic convention than the
+// old check/cross glyphs. Focus lock contracts the brackets and brightens to full white; a
+// failure pushes them apart and dims them.
+private const val FOCUS_RETICLE_SCALE_FOCUSING = 1f
+private const val FOCUS_RETICLE_SCALE_FOCUSED = 0.82f
+private const val FOCUS_RETICLE_SCALE_FAILED = 1.18f
+private const val FOCUS_RETICLE_ALPHA_FOCUSING = 0.9f
+private const val FOCUS_RETICLE_ALPHA_FOCUSED = 1f
+private const val FOCUS_RETICLE_ALPHA_FAILED = 0.5f
 
 // Last-capture thumbnail (issue #74): ~56dp visual size doubles as the touch target
 // (already clears the 48dp minimum used elsewhere on this screen, e.g. ZoomChip), so no
@@ -401,24 +405,22 @@ private fun CameraCaptureScreen(
     val videoQualityMismatchContentDescriptionTemplate =
         stringResource(R.string.video_quality_mismatch_content_description)
     val neutralLookLabel = stringResource(R.string.look_neutral)
-    val cinematicLookLabel = stringResource(R.string.look_cinematic)
+    // Short form for the tiny label under the Look toggle (issue #82); the full
+    // "Cinematic look" is kept for the Settings default-look picker.
+    val cinematicLookShortLabel = stringResource(R.string.look_cinematic_short)
+    val lookToggleContentDescriptionTemplate = stringResource(R.string.look_toggle_content_description)
     val recordingIndicatorContentDescription = stringResource(R.string.recording_indicator_content_description)
     val openSettingsContentDescription = stringResource(R.string.open_settings_content_description)
     val tapToFocusContentDescription = stringResource(R.string.tap_to_focus_content_description)
     val zoomResetContentDescriptionTemplate = stringResource(R.string.zoom_reset_content_description)
-    val flashModeOffLabel = stringResource(R.string.flash_mode_off)
-    val flashModeAutoLabel = stringResource(R.string.flash_mode_auto)
-    val flashModeOnLabel = stringResource(R.string.flash_mode_on)
-    val flashControlLabelTemplate = stringResource(R.string.flash_control_label)
+    // Flash/torch are icon buttons now (issue #82): the distinct flash glyphs and the torch
+    // button's inverted active state carry the non-colour state cue, so only the spoken
+    // content descriptions remain - the old text-chip labels are gone.
     val flashContentDescriptionOff = stringResource(R.string.flash_control_content_description_off)
     val flashContentDescriptionAuto = stringResource(R.string.flash_control_content_description_auto)
     val flashContentDescriptionOn = stringResource(R.string.flash_control_content_description_on)
-    val torchModeOffLabel = stringResource(R.string.torch_mode_off)
-    val torchModeOnLabel = stringResource(R.string.torch_mode_on)
-    val torchControlLabelTemplate = stringResource(R.string.torch_control_label)
     val torchContentDescriptionOff = stringResource(R.string.torch_control_content_description_off)
     val torchContentDescriptionOn = stringResource(R.string.torch_control_content_description_on)
-    val switchCameraLabel = stringResource(R.string.switch_camera_label)
     val switchCameraContentDescription = stringResource(R.string.switch_camera_content_description)
     val compareActionLabel = stringResource(R.string.compare_action)
     val previewBindFailureMessage = stringResource(R.string.preview_bind_failure_message)
@@ -895,198 +897,189 @@ private fun CameraCaptureScreen(
             }
         }
 
+        // Top bar (issue #82): one row spanning the width - passive status chips on the
+        // LEFT, action icon buttons on the RIGHT - so read-only status and interactive
+        // actions never mix into one ambiguous strip of differently-shaped chips the way
+        // they did before. The guided-capture banner, when present, sits centred below it.
         Column(
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .align(Alignment.TopStart)
+                .fillMaxWidth()
+                .padding(start = ChromeTokens.EdgeInset, end = ChromeTokens.EdgeInset, top = ChromeTokens.EdgeInset),
+            verticalArrangement = Arrangement.spacedBy(ChromeTokens.ChipSpacing),
         ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top,
+            ) {
+                // LEFT: passive status chips only, all in one StatusChip style. weight(fill
+                // = false) lets a long cinematic-config chip take the space it needs without
+                // ever pushing into the action buttons.
+                Column(
+                    modifier = Modifier.weight(1f, fill = false),
+                    verticalArrangement = Arrangement.spacedBy(ChromeTokens.ChipSpacing),
+                ) {
+                    if (isRecording) {
+                        StatusChip(
+                            modifier = Modifier.semantics(mergeDescendants = true) {
+                                contentDescription = recordingIndicatorContentDescription
+                            },
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(Color.Red, CircleShape),
+                            )
+                            Text(
+                                text = RecordingTimeFormatter.format(elapsedMillis),
+                                style = chromeTextStyle(),
+                            )
+                        }
+                    }
+
+                    // HDR status is only ever worth showing once the user has opted into it
+                    // in settings - with it off every recording is trivially SDR, so a
+                    // permanent "SDR" chip/suffix would just be noise on every session.
+                    val videoRangeLabel = if (settings.hdrVideoEnabled) {
+                        if (isHlgActive) videoHdrStatusHlg10Label else videoHdrStatusSdrLabel
+                    } else {
+                        null
+                    }
+                    // Quality mismatch (issue #72): only worth a chip once the Recorder
+                    // actually landed somewhere other than the user's own choice - see
+                    // VideoQualityLogic.showQualityChip. Reuses the same "%1$s - %2$s" join
+                    // as the HDR suffix (VideoOverlayLabel) so a HDR+quality mismatch reads
+                    // as one chip, e.g. "HLG10 - 1080p", instead of two.
+                    val qualityMismatchLabel = if (VideoQualityLogic.showQualityChip(settings.videoQuality, effectiveVideoQuality)) {
+                        effectiveVideoQuality.displayLabel
+                    } else {
+                        null
+                    }
+                    val videoOverlayLabel = VideoOverlayLabel.combine(
+                        rangeLabel = videoRangeLabel,
+                        qualityLabel = qualityMismatchLabel,
+                        joinTemplate = cinematicRangeSuffixTemplate,
+                    )
+                    val qualityMismatchContentDescription = qualityMismatchLabel?.let {
+                        String.format(
+                            videoQualityMismatchContentDescriptionTemplate,
+                            effectiveVideoQuality.displayLabel,
+                            settings.videoQuality.displayLabel,
+                        )
+                    }
+
+                    if (mode == CameraMode.Video && videoOverlayLabel != null) {
+                        StatusChip(
+                            text = videoOverlayLabel,
+                            contentDescription = qualityMismatchContentDescription,
+                        )
+                    }
+
+                    if (mode == CameraMode.Cinematic) {
+                        cinematicConfig?.let { config ->
+                            StatusChip(
+                                text = CinematicOverlayText.format(
+                                    config = config,
+                                    fps24Label = cinematicFps24Label,
+                                    fpsDefaultLabel = cinematicFpsDefaultLabel,
+                                    stabilizedTemplate = cinematicStabilizedTemplate,
+                                    unstabilizedTemplate = cinematicUnstabilizedTemplate,
+                                    rangeLabel = videoOverlayLabel,
+                                    rangeSuffixTemplate = cinematicRangeSuffixTemplate,
+                                ),
+                                contentDescription = qualityMismatchContentDescription,
+                            )
+                        }
+                    }
+
+                    if (ZoomLogic.shouldShowChip(zoomRatio, isPinching)) {
+                        ZoomChip(
+                            ratio = zoomRatio,
+                            resetContentDescription = String.format(
+                                zoomResetContentDescriptionTemplate,
+                                ZoomLogic.formatLabel(zoomRatio),
+                            ),
+                            onReset = {
+                                val zoomState = liveZoomState
+                                val resetRatio = ZoomLogic.computeNewRatio(
+                                    current = 1f,
+                                    gestureFactor = 1f,
+                                    min = zoomState?.minZoomRatio ?: 1f,
+                                    max = zoomState?.maxZoomRatio ?: 1f,
+                                )
+                                zoomRatio = resetRatio
+                                cameraHandle?.cameraControl?.setZoomRatio(resetRatio)
+                            },
+                        )
+                    }
+                }
+
+                // RIGHT: action icon buttons only - flash/torch, compare, settings - evenly
+                // spaced with identical 48dp targets and shared circular-scrim styling.
+                Row(horizontalArrangement = Arrangement.spacedBy(ChromeTokens.ActionSpacing)) {
+                    // Portrait binds an ImageCapture just like Photo (see CameraPreview) and
+                    // applies flashMode the same dynamic way, so flash shows for both. The
+                    // three distinct bolt glyphs carry the off/auto/on state (non-colour).
+                    if (hasFlashUnit && (mode == CameraMode.Photo || mode == CameraMode.Portrait)) {
+                        ActionIconButton(
+                            icon = when (flashMode) {
+                                FlashMode.Off -> CameraGlyphs.FlashOff
+                                FlashMode.Auto -> CameraGlyphs.FlashAuto
+                                FlashMode.On -> CameraGlyphs.FlashOn
+                            },
+                            contentDescription = when (flashMode) {
+                                FlashMode.Off -> flashContentDescriptionOff
+                                FlashMode.Auto -> flashContentDescriptionAuto
+                                FlashMode.On -> flashContentDescriptionOn
+                            },
+                            onClick = { flashMode = flashMode.next() },
+                        )
+                    }
+
+                    // Torch is a two-state toggle: the inverted (white fill / dark icon)
+                    // active state is its non-colour cue, mirrored in the content description.
+                    if (hasFlashUnit && mode.isVideoLike) {
+                        ActionIconButton(
+                            icon = CameraGlyphs.Torch,
+                            contentDescription = if (torchIsOn) {
+                                torchContentDescriptionOn
+                            } else {
+                                torchContentDescriptionOff
+                            },
+                            active = torchIsOn,
+                            onClick = { torchEnabled = TorchLogic.toggle(torchIsOn) },
+                        )
+                    }
+
+                    // Only offered once this session has produced a processed/reference pair
+                    // (i.e. "Save comparison pair" was on for at least one burst).
+                    if (comparePair != null) {
+                        ActionIconButton(
+                            icon = CameraGlyphs.Compare,
+                            contentDescription = compareActionLabel,
+                            enabled = !isRecording,
+                            onClick = onOpenCompare,
+                        )
+                    }
+
+                    ActionIconButton(
+                        icon = CameraGlyphs.Settings,
+                        contentDescription = openSettingsContentDescription,
+                        enabled = !isRecording,
+                        onClick = onOpenSettings,
+                    )
+                }
+            }
+
             if (guidedStep == GuidedCompareStep.AwaitingCapture) {
                 GuidedCaptureBanner(
+                    modifier = Modifier.align(Alignment.CenterHorizontally),
                     message = guidedCaptureBannerMessage,
                     detail = guidedCaptureBannerDetail,
                     cancelContentDescription = guidedCancelContentDescription,
                     onCancel = onGuidedCancel,
                 )
-            }
-
-            // Portrait binds an ImageCapture just like Photo (see CameraPreview), and its
-            // flashMode is applied the same dynamic way, so the flash control is shown for
-            // both rather than only Photo.
-            if (hasFlashUnit && (mode == CameraMode.Photo || mode == CameraMode.Portrait)) {
-                StatusControlChip(
-                    label = String.format(
-                        flashControlLabelTemplate,
-                        when (flashMode) {
-                            FlashMode.Off -> flashModeOffLabel
-                            FlashMode.Auto -> flashModeAutoLabel
-                            FlashMode.On -> flashModeOnLabel
-                        },
-                    ),
-                    contentDescription = when (flashMode) {
-                        FlashMode.Off -> flashContentDescriptionOff
-                        FlashMode.Auto -> flashContentDescriptionAuto
-                        FlashMode.On -> flashContentDescriptionOn
-                    },
-                    onClick = { flashMode = flashMode.next() },
-                )
-            }
-
-            if (hasFlashUnit && mode.isVideoLike) {
-                StatusControlChip(
-                    label = String.format(
-                        torchControlLabelTemplate,
-                        if (torchIsOn) torchModeOnLabel else torchModeOffLabel,
-                    ),
-                    contentDescription = if (torchIsOn) {
-                        torchContentDescriptionOn
-                    } else {
-                        torchContentDescriptionOff
-                    },
-                    onClick = { torchEnabled = TorchLogic.toggle(torchIsOn) },
-                )
-            }
-
-            if (ZoomLogic.shouldShowChip(zoomRatio, isPinching)) {
-                ZoomChip(
-                    ratio = zoomRatio,
-                    resetContentDescription = String.format(
-                        zoomResetContentDescriptionTemplate,
-                        ZoomLogic.formatLabel(zoomRatio),
-                    ),
-                    onReset = {
-                        val zoomState = liveZoomState
-                        val resetRatio = ZoomLogic.computeNewRatio(
-                            current = 1f,
-                            gestureFactor = 1f,
-                            min = zoomState?.minZoomRatio ?: 1f,
-                            max = zoomState?.maxZoomRatio ?: 1f,
-                        )
-                        zoomRatio = resetRatio
-                        cameraHandle?.cameraControl?.setZoomRatio(resetRatio)
-                    },
-                )
-            }
-
-            // HDR status is only ever worth showing once the user has opted into it in
-            // settings - with it off every recording is trivially SDR, so a permanent
-            // "SDR" chip/suffix would just be noise on every session.
-            val videoRangeLabel = if (settings.hdrVideoEnabled) {
-                if (isHlgActive) videoHdrStatusHlg10Label else videoHdrStatusSdrLabel
-            } else {
-                null
-            }
-            // Quality mismatch (issue #72): only worth a chip once the Recorder actually
-            // landed somewhere other than the user's own choice - see
-            // VideoQualityLogic.showQualityChip. Reuses the same "%1$s - %2$s" join as the
-            // HDR suffix (VideoOverlayLabel) so a HDR+quality mismatch reads as one chip,
-            // e.g. "HLG10 - 1080p", instead of two.
-            val qualityMismatchLabel = if (VideoQualityLogic.showQualityChip(settings.videoQuality, effectiveVideoQuality)) {
-                effectiveVideoQuality.displayLabel
-            } else {
-                null
-            }
-            val videoOverlayLabel = VideoOverlayLabel.combine(
-                rangeLabel = videoRangeLabel,
-                qualityLabel = qualityMismatchLabel,
-                joinTemplate = cinematicRangeSuffixTemplate,
-            )
-            val qualityMismatchContentDescription = qualityMismatchLabel?.let {
-                String.format(
-                    videoQualityMismatchContentDescriptionTemplate,
-                    effectiveVideoQuality.displayLabel,
-                    settings.videoQuality.displayLabel,
-                )
-            }
-
-            if (mode == CameraMode.Video && videoOverlayLabel != null) {
-                OverlayChip {
-                    Text(
-                        text = videoOverlayLabel,
-                        color = Color.White,
-                        style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
-                        modifier = qualityMismatchContentDescription?.let { desc ->
-                            Modifier.semantics { contentDescription = desc }
-                        } ?: Modifier,
-                    )
-                }
-            }
-
-            if (mode == CameraMode.Cinematic) {
-                cinematicConfig?.let { config ->
-                    OverlayChip {
-                        Text(
-                            text = CinematicOverlayText.format(
-                                config = config,
-                                fps24Label = cinematicFps24Label,
-                                fpsDefaultLabel = cinematicFpsDefaultLabel,
-                                stabilizedTemplate = cinematicStabilizedTemplate,
-                                unstabilizedTemplate = cinematicUnstabilizedTemplate,
-                                rangeLabel = videoOverlayLabel,
-                                rangeSuffixTemplate = cinematicRangeSuffixTemplate,
-                            ),
-                            color = Color.White,
-                            style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
-                            modifier = qualityMismatchContentDescription?.let { desc ->
-                                Modifier.semantics { contentDescription = desc }
-                            } ?: Modifier,
-                        )
-                    }
-                }
-            }
-
-            if (isRecording) {
-                OverlayChip {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.semantics(mergeDescendants = true) {
-                            contentDescription = recordingIndicatorContentDescription
-                        },
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .background(Color.Red, CircleShape),
-                        )
-                        Text(
-                            text = RecordingTimeFormatter.format(elapsedMillis),
-                            color = Color.White,
-                            style = MaterialTheme.typography.bodyLarge.copy(shadow = OverlayTextShadow),
-                        )
-                    }
-                }
-            }
-        }
-
-        IconButton(
-            onClick = onOpenSettings,
-            enabled = !isRecording,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(16.dp)
-                .background(OverlayScrimColor, CircleShape),
-        ) {
-            Icon(
-                imageVector = Icons.Filled.Settings,
-                contentDescription = openSettingsContentDescription,
-                tint = Color.White.copy(alpha = if (isRecording) 0.38f else 1f),
-            )
-        }
-
-        // Only offered once this session has actually produced a processed/reference
-        // pair (i.e. "Save comparison pair" was on for at least one burst).
-        if (comparePair != null) {
-            Button(
-                onClick = onOpenCompare,
-                enabled = !isRecording,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(16.dp)
-                    .heightIn(min = 48.dp),
-            ) {
-                Text(text = compareActionLabel)
             }
         }
 
@@ -1145,14 +1138,20 @@ private fun CameraCaptureScreen(
             )
         }
 
-        OverlayChip(
+        // Bottom cluster (issue #82): the mode selector over the shutter row, with no
+        // wrapping scrim box. Each control now carries its own minimal backing - the
+        // segmented selector its own surface, the secondary controls the shared circular
+        // scrim, the shutter its ring - so the chrome reads as one system rather than a
+        // box inside a box. Flip camera (issue #71) moves into the right secondary slot as
+        // an icon button beside the shutter, no longer a text chip on its own row above.
+        Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 24.dp),
         ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(ChromeTokens.ClusterSpacing),
             ) {
                 ModeSelector(
                     selected = mode,
@@ -1163,26 +1162,6 @@ private fun CameraCaptureScreen(
                     cinematicLabel = cinematicModeLabel,
                     onSelected = { mode = it },
                 )
-
-                // Switch-camera chip (issue #71): hidden entirely on a single-camera device,
-                // disabled while recording - switching mid-recording is out of scope, see
-                // CameraSwitchLogic. Sits right above the shutter cluster rather than in one
-                // of the SecondaryControlSlotWidth boxes below, since those are already
-                // conditionally occupied by the burst button (Photo) and look selector
-                // (Cinematic).
-                if (CameraSwitchLogic.shouldShowSwitchChip(hasBackCamera, hasFrontCamera)) {
-                    SwitchCameraChip(
-                        label = switchCameraLabel,
-                        contentDescription = switchCameraContentDescription,
-                        enabled = CameraSwitchLogic.isSwitchEnabled(isRecording),
-                        onClick = {
-                            val reset = CameraSwitchLogic.resetsForSwitch()
-                            zoomRatio = reset.zoomRatio
-                            torchEnabled = reset.torchEnabled
-                            lensFacing = lensFacing.switched()
-                        },
-                    )
-                }
 
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(24.dp),
@@ -1276,10 +1255,13 @@ private fun CameraCaptureScreen(
                                 }
                             }
                             val controllerReady = burstController != null
-                            Button(
+                            ActionIconButton(
+                                icon = CameraGlyphs.Burst,
+                                contentDescription = burstButtonLabel,
+                                enabled = controllerReady && !isBurstInProgress,
                                 onClick = {
-                                    val controller = burstController ?: return@Button
-                                    val capture = imageCapture ?: return@Button
+                                    val controller = burstController ?: return@ActionIconButton
+                                    val capture = imageCapture ?: return@ActionIconButton
                                     haptics.performHapticFeedback(HapticFeedbackType.Confirm)
                                     isBurstInProgress = true
                                     val frameCapture = BurstController.FrameCapture { onResult ->
@@ -1368,10 +1350,35 @@ private fun CameraCaptureScreen(
                                         }
                                     }
                                 },
-                                enabled = controllerReady && !isBurstInProgress,
-                            ) {
-                                Text(text = burstButtonLabel)
-                            }
+                            )
+                        } else if (mode == CameraMode.Cinematic) {
+                            // Look toggle (issue #82): the two-option segmented selector is
+                            // now a single droplet icon button that cycles the look, with the
+                            // active look name shown small beneath - the one secondary control
+                            // that keeps a visible label, since which look is applied
+                            // materially changes the recording. Same videoLook state, same
+                            // reachability (one tap to switch between the two looks).
+                            LookToggleButton(
+                                selected = videoLook,
+                                enabled = !isRecording,
+                                neutralLabel = neutralLookLabel,
+                                cinematicLabel = cinematicLookShortLabel,
+                                contentDescription = String.format(
+                                    lookToggleContentDescriptionTemplate,
+                                    if (videoLook == VideoLook.Neutral) {
+                                        neutralLookLabel
+                                    } else {
+                                        cinematicLookShortLabel
+                                    },
+                                ),
+                                onToggle = {
+                                    videoLook = if (videoLook == VideoLook.Neutral) {
+                                        VideoLook.Cinematic
+                                    } else {
+                                        VideoLook.Neutral
+                                    }
+                                },
+                            )
                         }
                     }
 
@@ -1386,17 +1393,25 @@ private fun CameraCaptureScreen(
                         onClick = onShutterPressed,
                     )
 
+                    // Right secondary slot: flip camera (issue #71), now an icon button
+                    // beside the shutter instead of a text chip on its own row. Hidden on a
+                    // single-camera device, disabled while recording (out of scope), per
+                    // CameraSwitchLogic - unchanged behaviour, only the affordance changed.
                     Box(
                         modifier = Modifier.width(SecondaryControlSlotWidth),
                         contentAlignment = Alignment.Center,
                     ) {
-                        if (mode == CameraMode.Cinematic) {
-                            LookSelector(
-                                selected = videoLook,
-                                enabled = !isRecording,
-                                neutralLabel = neutralLookLabel,
-                                cinematicLabel = cinematicLookLabel,
-                                onSelected = { videoLook = it },
+                        if (CameraSwitchLogic.shouldShowSwitchChip(hasBackCamera, hasFrontCamera)) {
+                            ActionIconButton(
+                                icon = CameraGlyphs.FlipCamera,
+                                contentDescription = switchCameraContentDescription,
+                                enabled = CameraSwitchLogic.isSwitchEnabled(isRecording),
+                                onClick = {
+                                    val reset = CameraSwitchLogic.resetsForSwitch()
+                                    zoomRatio = reset.zoomRatio
+                                    torchEnabled = reset.torchEnabled
+                                    lensFacing = lensFacing.switched()
+                                },
                             )
                         }
                     }
@@ -1411,7 +1426,11 @@ private fun CameraCaptureScreen(
     }
 }
 
-/** Rounded translucent backing so white overlay content stays legible over the live preview. */
+/**
+ * Larger scrim-backed message surface for multi-line overlay content - the guided-capture
+ * banner and the bind-error card - sharing the chrome's single scrim and corner radius
+ * ([ChromeTokens]) with the compact [StatusChip], just with roomier padding.
+ */
 @Composable
 private fun OverlayChip(
     modifier: Modifier = Modifier,
@@ -1419,7 +1438,7 @@ private fun OverlayChip(
 ) {
     Box(
         modifier = modifier
-            .background(OverlayScrimColor, shape = RoundedCornerShape(16.dp))
+            .background(ChromeTokens.Scrim, shape = ChromeTokens.ChipShape)
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         content()
@@ -1427,11 +1446,12 @@ private fun OverlayChip(
 }
 
 /**
- * Current-zoom indicator: an [OverlayChip] that's also a 48dp tap target resetting zoom to
- * 1x (clamped to the device's own floor - see [ZoomLogic]). The visible label is the actual
- * clamped ratio, never an aspirational "1.0x", so a device whose minimum sits above 1x is
- * never misrepresented. Callers gate visibility with [ZoomLogic.shouldShowChip] - this
- * composable itself has no opinion on when it should be shown.
+ * Current-zoom indicator: visually a passive [StatusChip] so it sits at the same height as
+ * every other left-column status chip, but wrapped in a transparent 48dp box that carries
+ * the zoom-reset tap target (WCAG AA) without making the chip itself taller than its
+ * neighbours. The visible label is the actual clamped ratio, never an aspirational "1.0x",
+ * so a device whose minimum sits above 1x is never misrepresented. Callers gate visibility
+ * with [ZoomLogic.shouldShowChip] - this composable has no opinion on when it should show.
  */
 @Composable
 private fun ZoomChip(
@@ -1442,21 +1462,17 @@ private fun ZoomChip(
 ) {
     Box(
         modifier = modifier
-            .background(OverlayScrimColor, shape = RoundedCornerShape(16.dp))
-            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .sizeIn(minWidth = ChromeTokens.TouchTarget, minHeight = ChromeTokens.TouchTarget)
             .clickable(onClick = onReset)
             .semantics(mergeDescendants = true) {
                 role = Role.Button
                 contentDescription = resetContentDescription
-            }
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        contentAlignment = Alignment.Center,
+            },
+        contentAlignment = Alignment.CenterStart,
     ) {
-        Text(
-            text = ZoomLogic.formatLabel(ratio),
-            color = Color.White,
-            style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
-        )
+        StatusChip {
+            Text(text = ZoomLogic.formatLabel(ratio), style = chromeTextStyle())
+        }
     }
 }
 
@@ -1564,76 +1580,6 @@ private fun loadVideoThumbnail(context: Context, uri: Uri): Bitmap? {
 }
 
 /**
- * Shared visual for the flash-cycle (Photo) and torch-toggle (Video/Cinematic) top-status
- * controls: a 48dp-minimum tap target styled like [ZoomChip], showing a short text label
- * rather than an icon. material-icons-core - this project's only icon dependency, so as not
- * to pull in the extended icon set for two glyphs - ships no flash/torch icon at all, so this
- * is a deliberate text-chip fallback; [label] and [contentDescription] both state the mode by
- * name so the state is never colour-only.
- */
-@Composable
-private fun StatusControlChip(
-    label: String,
-    contentDescription: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier
-            .background(OverlayScrimColor, shape = RoundedCornerShape(16.dp))
-            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
-            .clickable(onClick = onClick)
-            .semantics(mergeDescendants = true) {
-                role = Role.Button
-                this.contentDescription = contentDescription
-            }
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = Color.White,
-            style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
-        )
-    }
-}
-
-/**
- * Switch-camera chip (issue #71): a 48dp-minimum tap target styled like [StatusControlChip],
- * shown near the shutter cluster only once [CameraSwitchLogic.shouldShowSwitchChip] confirms
- * both cameras exist, and dimmed/inert while disabled (switching mid-recording is out of
- * scope - see [CameraSwitchLogic.isSwitchEnabled]) the same way the settings [IconButton]
- * elsewhere on this screen dims for its own `!isRecording` gate.
- */
-@Composable
-private fun SwitchCameraChip(
-    label: String,
-    contentDescription: String,
-    enabled: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier
-            .background(OverlayScrimColor, shape = RoundedCornerShape(16.dp))
-            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
-            .clickable(enabled = enabled, onClick = onClick)
-            .semantics(mergeDescendants = true) {
-                role = Role.Button
-                this.contentDescription = contentDescription
-            }
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = Color.White.copy(alpha = if (enabled) 1f else 0.38f),
-            style = MaterialTheme.typography.bodySmall.copy(shadow = OverlayTextShadow),
-        )
-    }
-}
-
-/**
  * Step-1 instruction for the guided comparison flow: shown while the user is back on
  * Camera to capture the shot that will fill slot A. [onCancel] resets the whole guided
  * flow (see [GuidedCompareFlow.advance]) rather than just hiding this banner, so the
@@ -1693,9 +1639,9 @@ private fun ModeSelector(
         CameraMode.Video to videoLabel,
         CameraMode.Cinematic to cinematicLabel,
     )
-    // Widened from the original 3-entry 320.dp and each label capped at one line (like
-    // LookSelector's labelSmall/maxLines=1 below) so 4 short labels - including the
-    // 9-character "Cinematic" and 8-character "Portrait" - never wrap on a narrow screen.
+    // Widened from the original 3-entry 320.dp and each label capped at one line so 4 short
+    // labels - including the 9-character "Cinematic" and 8-character "Portrait" - never wrap
+    // on a narrow screen.
     SingleChoiceSegmentedButtonRow(modifier = Modifier.widthIn(max = 360.dp)) {
         options.forEachIndexed { index, (candidateMode, label) ->
             SegmentedButton(
@@ -1717,36 +1663,41 @@ private fun ModeSelector(
     }
 }
 
+/**
+ * Cinematic look control (issue #82): a single droplet [ActionIconButton] that cycles the
+ * two looks, with the active look name shown small beneath. It replaces the old two-segment
+ * selector but drives the same `videoLook` state - with only two looks, one tap still
+ * switches between them. The applied (Cinematic) look inverts the button as a non-colour
+ * active cue, and the visible label plus content description keep the state legible without
+ * relying on colour.
+ */
 @Composable
-private fun LookSelector(
+private fun LookToggleButton(
     selected: VideoLook,
     enabled: Boolean,
     neutralLabel: String,
     cinematicLabel: String,
-    onSelected: (VideoLook) -> Unit,
+    contentDescription: String,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val options = listOf(
-        VideoLook.Neutral to neutralLabel,
-        VideoLook.Cinematic to cinematicLabel,
-    )
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.widthIn(max = SecondaryControlSlotWidth * 2)) {
-        options.forEachIndexed { index, (candidateLook, label) ->
-            SegmentedButton(
-                modifier = Modifier.heightIn(min = 48.dp),
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
-                selected = selected == candidateLook,
-                enabled = enabled,
-                onClick = { onSelected(candidateLook) },
-                icon = {},
-                label = {
-                    Text(
-                        text = label,
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
-                    )
-                },
-            )
-        }
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        ActionIconButton(
+            icon = CameraGlyphs.Look,
+            contentDescription = contentDescription,
+            enabled = enabled,
+            active = selected == VideoLook.Cinematic,
+            onClick = onToggle,
+        )
+        Text(
+            text = if (selected == VideoLook.Neutral) neutralLabel else cinematicLabel,
+            style = chromeTextStyle(),
+            maxLines = 1,
+        )
     }
 }
 
@@ -1795,11 +1746,17 @@ private fun ShutterButton(
 }
 
 /**
- * Transient tap-to-focus feedback near the tap point: a small stroked square that reads
- * its colour, stroke weight and inner mark from [state], so success/failure is never
- * colour-only - Focused adds a thicker stroke plus an inner tick, Failed switches to a
- * dashed stroke plus an inner cross. Not a control (see [FocusReticleSize]), so it stays
- * well under the 48dp minimum touch target used elsewhere on this screen.
+ * Transient tap-to-focus feedback near the tap point (redesigned, issue #82): four thin
+ * L-shaped corner brackets - a quieter photographic convention than the old stroked square
+ * with a check/cross glyph. State is read through geometry and brightness, never colour:
+ * while focusing the brackets sit at full size in near-white; on lock they contract slightly
+ * and brighten to solid white; on failure they push apart and dim. Colour is a single flat
+ * white throughout, so there are no competing accents. Not a control (see [FocusReticleSize]),
+ * so it stays well under the 48dp minimum touch target used elsewhere on this screen.
+ *
+ * The contract/break motion respects the system reduced-motion setting: when animations are
+ * disabled ([Settings.Global.ANIMATOR_DURATION_SCALE] is 0) the brackets snap to their
+ * resolved geometry instead of tweening.
  */
 @Composable
 private fun FocusReticle(
@@ -1813,18 +1770,31 @@ private fun FocusReticle(
         is FocusReticleState.Failed -> state.point
         FocusReticleState.Idle -> return
     }
-    val strokeColor = when (state) {
-        is FocusReticleState.Focusing -> FocusReticleFocusingColor
-        is FocusReticleState.Focused -> FocusReticleSuccessColor
-        is FocusReticleState.Failed -> FocusReticleFailureColor
+    val targetScale = when (state) {
+        is FocusReticleState.Focusing -> FOCUS_RETICLE_SCALE_FOCUSING
+        is FocusReticleState.Focused -> FOCUS_RETICLE_SCALE_FOCUSED
+        is FocusReticleState.Failed -> FOCUS_RETICLE_SCALE_FAILED
         FocusReticleState.Idle -> return
     }
-    val strokeWidth = if (state is FocusReticleState.Focused) {
-        FocusReticleStrokeWidthResolved
-    } else {
-        FocusReticleStrokeWidth
+    val stateAlpha = when (state) {
+        is FocusReticleState.Focusing -> FOCUS_RETICLE_ALPHA_FOCUSING
+        is FocusReticleState.Focused -> FOCUS_RETICLE_ALPHA_FOCUSED
+        is FocusReticleState.Failed -> FOCUS_RETICLE_ALPHA_FAILED
+        FocusReticleState.Idle -> return
     }
-    val dashed = state is FocusReticleState.Failed
+
+    val context = LocalContext.current
+    val motionEnabled = remember(context) {
+        Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
+    }
+    val animatedScale by animateFloatAsState(
+        targetValue = targetScale,
+        animationSpec = tween(
+            durationMillis = if (motionEnabled) FOCUS_RETICLE_SCALE_MILLIS else 0,
+            easing = LinearEasing,
+        ),
+        label = "focus_reticle_scale",
+    )
 
     Canvas(
         modifier = modifier
@@ -1835,59 +1805,40 @@ private fun FocusReticle(
             .size(FocusReticleSize)
             .alpha(alpha),
     ) {
-        val strokeWidthPx = strokeWidth.toPx()
-        val inset = strokeWidthPx / 2f
-        val pathEffect = if (dashed) PathEffect.dashPathEffect(floatArrayOf(10f, 8f)) else null
-        drawRoundRect(
-            color = strokeColor,
-            topLeft = Offset(inset, inset),
-            size = Size(size.width - strokeWidthPx, size.height - strokeWidthPx),
-            cornerRadius = CornerRadius(FocusReticleCornerRadius.toPx()),
-            style = Stroke(width = strokeWidthPx, pathEffect = pathEffect),
-        )
-
+        val strokeWidthPx = FocusReticleStrokeWidth.toPx()
+        val armPx = FocusReticleCornerArm.toPx()
+        val color = Color.White.copy(alpha = stateAlpha)
         val cx = size.width / 2f
         val cy = size.height / 2f
-        when (state) {
-            is FocusReticleState.Focused -> {
-                // Inner checkmark: the non-colour cue that distinguishes success from a
-                // plain thicker stroke alone.
-                val tick = size.minDimension * 0.14f
-                drawLine(
-                    color = strokeColor,
-                    start = Offset(cx - tick, cy),
-                    end = Offset(cx - tick * 0.2f, cy + tick),
-                    strokeWidth = strokeWidthPx,
-                    cap = StrokeCap.Round,
-                )
-                drawLine(
-                    color = strokeColor,
-                    start = Offset(cx - tick * 0.2f, cy + tick),
-                    end = Offset(cx + tick * 1.4f, cy - tick),
-                    strokeWidth = strokeWidthPx,
-                    cap = StrokeCap.Round,
-                )
-            }
-            is FocusReticleState.Failed -> {
-                // Inner cross: the non-colour cue that distinguishes failure from the
-                // dashed stroke alone.
-                val cross = size.minDimension * 0.16f
-                drawLine(
-                    color = strokeColor,
-                    start = Offset(cx - cross, cy - cross),
-                    end = Offset(cx + cross, cy + cross),
-                    strokeWidth = strokeWidthPx,
-                    cap = StrokeCap.Round,
-                )
-                drawLine(
-                    color = strokeColor,
-                    start = Offset(cx - cross, cy + cross),
-                    end = Offset(cx + cross, cy - cross),
-                    strokeWidth = strokeWidthPx,
-                    cap = StrokeCap.Round,
-                )
-            }
-            else -> Unit
+        val half = (size.minDimension / 2f - strokeWidthPx) * animatedScale
+        val left = cx - half
+        val right = cx + half
+        val top = cy - half
+        val bottom = cy + half
+
+        // Each corner is an L: one arm toward centre along x, one along y. dx/dy point the
+        // arms inward from that corner.
+        val corners = listOf(
+            Triple(Offset(left, top), 1f, 1f),
+            Triple(Offset(right, top), -1f, 1f),
+            Triple(Offset(left, bottom), 1f, -1f),
+            Triple(Offset(right, bottom), -1f, -1f),
+        )
+        for ((corner, dx, dy) in corners) {
+            drawLine(
+                color = color,
+                start = corner,
+                end = Offset(corner.x + dx * armPx, corner.y),
+                strokeWidth = strokeWidthPx,
+                cap = StrokeCap.Round,
+            )
+            drawLine(
+                color = color,
+                start = corner,
+                end = Offset(corner.x, corner.y + dy * armPx),
+                strokeWidth = strokeWidthPx,
+                cap = StrokeCap.Round,
+            )
         }
     }
 }

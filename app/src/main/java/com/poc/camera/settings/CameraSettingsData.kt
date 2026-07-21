@@ -19,6 +19,11 @@ data class CameraSettingsData(
     val finishingPreset: FinishingPreset = DEFAULT_FINISHING_PRESET,
     val hdrVideoEnabled: Boolean = DEFAULT_HDR_VIDEO_ENABLED,
     val videoQuality: VideoQualityChoice = DEFAULT_VIDEO_QUALITY,
+    // Shutter-latency instrumentation (issue #87): appends CaptureSpans.formatBreakdown()
+    // to the capture success snackbar when on. The breakdown is always logged via Log.d
+    // regardless of this switch - this only controls whether it also reaches the UI, since
+    // most users never need a per-phase latency breakdown on every capture.
+    val verboseTimings: Boolean = DEFAULT_VERBOSE_TIMINGS,
 ) {
     companion object {
         const val DEFAULT_BURST_FRAME_COUNT = 6
@@ -27,6 +32,7 @@ data class CameraSettingsData(
         const val DEFAULT_NIGHT_MODE_ENABLED = false
         const val DEFAULT_SUPER_RESOLUTION_ENABLED = false
         const val DEFAULT_HDR_VIDEO_ENABLED = false
+        const val DEFAULT_VERBOSE_TIMINGS = false
         val DEFAULT_FINISHING_PRESET = FinishingPreset.Natural
         val DEFAULT_VIDEO_QUALITY = VideoQualityChoice.FHD
         val ALLOWED_BURST_FRAME_COUNTS = listOf(3, 6, 9)
@@ -51,6 +57,7 @@ data class CameraSettingsData(
             finishingPresetName: String? = null,
             hdrVideoEnabled: Boolean = DEFAULT_HDR_VIDEO_ENABLED,
             videoQualityName: String? = null,
+            verboseTimings: Boolean = DEFAULT_VERBOSE_TIMINGS,
         ): CameraSettingsData = CameraSettingsData(
             burstFrameCount = sanitizeBurstFrameCount(burstFrameCount),
             applyFinishingToMergedPhotos = applyFinishingToMergedPhotos,
@@ -65,6 +72,7 @@ data class CameraSettingsData(
             hdrVideoEnabled = hdrVideoEnabled,
             videoQuality = VideoQualityChoice.entries.firstOrNull { it.name == videoQualityName }
                 ?: DEFAULT.videoQuality,
+            verboseTimings = verboseTimings,
         )
     }
 }

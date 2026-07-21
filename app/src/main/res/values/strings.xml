@@ -83,6 +83,9 @@
     <string name="video_quality_mismatch_content_description">Recording at %1$s instead of the selected %2$s</string>
     <string name="settings_section_cinematic">Cinematic mode</string>
     <string name="settings_default_look_label">Default look</string>
+    <string name="settings_section_developer">Developer</string>
+    <string name="settings_verbose_timings_label">Verbose capture timings</string>
+    <string name="settings_verbose_timings_description">Appends the per-phase capture latency breakdown (capture/decode/merge/finish/save) to the success message. Always logged separately regardless of this switch.</string>
     <string name="settings_section_comparison">Comparison</string>
     <string name="settings_save_comparison_pair_label">Save comparison pair</string>
     <string name="settings_save_comparison_pair_description">Also saves the unprocessed merge input alongside the processed photo (RAW_ prefix) so it can be opened in the Compare viewer.</string>

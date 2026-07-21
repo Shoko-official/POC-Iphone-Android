@@ -3,32 +3,33 @@ package com.poc.camera.camera
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import androidx.camera.core.ImageProxy
 import com.poc.camera.imaging.BitmapFrameConverter
 import com.poc.camera.pipeline.Frame
 import java.io.IOException
-import java.nio.ByteBuffer
 
 /**
- * Decodes an in-memory full-resolution [ImageProxy] captured via
+ * Decodes raw full-resolution JPEG bytes captured via
  * `ImageCapture.takePicture(Executor, OnImageCapturedCallback)` into an upright pipeline
  * [Frame].
  *
- * The default `ImageCapture` output format is JPEG: a single plane whose buffer holds the
- * compressed bytes. Those bytes are decoded with an `inSampleSize` chosen by
- * [BurstImageGeometry] so the result stays within [BurstImageGeometry.MAX_BURST_PIXELS],
- * then rotated to upright per [ImageProxy.getImageInfo]'s reported rotation so the pipeline
- * sees the same orientation the retired ImageAnalysis path produced.
+ * [jpegBytes] is decoded with an `inSampleSize` chosen by [BurstImageGeometry] so the result
+ * stays within [BurstImageGeometry.MAX_BURST_PIXELS], then rotated to upright per
+ * [rotationDegrees] (the source `ImageProxy`'s reported rotation - see [BurstImageCapture],
+ * which extracts both before the `ImageProxy` itself is closed, since decode now runs later
+ * and off that callback thread - see [BurstController]'s decode-pipelining doc) so the
+ * pipeline sees the same orientation the retired ImageAnalysis path produced.
  *
  * Thin Android adapter, exercised only on device; the sizing/rotation math it relies on is
  * pure and unit tested in [BurstImageGeometry], and [Frame] plus the merge pipeline are
- * covered by JVM tests. The caller owns the [ImageProxy] lifecycle and must close it.
+ * covered by JVM tests.
  */
 object JpegBurstFrameDecoder {
 
-    fun decode(image: ImageProxy, maxBurstPixels: Int = BurstImageGeometry.MAX_BURST_PIXELS): Frame {
-        val jpegBytes = image.planes[0].buffer.toByteArray()
-
+    fun decode(
+        jpegBytes: ByteArray,
+        rotationDegrees: Int,
+        maxBurstPixels: Int = BurstImageGeometry.MAX_BURST_PIXELS,
+    ): Frame {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, bounds)
         val sampleSize = BurstImageGeometry.inSampleSizeFor(bounds.outWidth, bounds.outHeight, maxBurstPixels)
@@ -40,7 +41,7 @@ object JpegBurstFrameDecoder {
         // Rotating allocates a second bitmap of the (rotated) same pixel count for the
         // duration of the conversion, so peak decode memory is ~2x one downscaled frame;
         // both are released before the next capture in the sequential burst loop.
-        val upright = rotateUpright(decoded, image.imageInfo.rotationDegrees)
+        val upright = rotateUpright(decoded, rotationDegrees)
         return try {
             BitmapFrameConverter.toFrame(upright, System.currentTimeMillis())
         } finally {
@@ -54,12 +55,5 @@ object JpegBurstFrameDecoder {
         if (normalized == 0) return bitmap
         val matrix = Matrix().apply { postRotate(normalized.toFloat()) }
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-    }
-
-    private fun ByteBuffer.toByteArray(): ByteArray {
-        val duplicate = duplicate().apply { rewind() }
-        val bytes = ByteArray(duplicate.remaining())
-        duplicate.get(bytes)
-        return bytes
     }
 }

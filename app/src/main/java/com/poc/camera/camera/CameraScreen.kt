@@ -52,6 +52,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -325,7 +326,19 @@ private fun CameraCaptureScreen(
     var videoCapture by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
     var burstController by remember { mutableStateOf<BurstController?>(null) }
     var exposureController by remember { mutableStateOf<ExposureController?>(null) }
-    var isBurstInProgress by remember { mutableStateOf(false) }
+    // Capture/processing queue (issue #86): isCapturing mirrors BurstController.isArmed - the
+    // camera hardware is busy, so the shutter/burst button/volume key MUST stay disabled (see
+    // ProcessingQueuePolicy.canCapture). processingCount is decoupled from that: it counts
+    // merge/segment/finish/save jobs running on Dispatchers.Default, so once a burst's frames
+    // are collected (BurstController's completion callback), a new capture can be armed
+    // immediately while the previous one keeps processing in the background - bounded to
+    // ProcessingQueuePolicy.DEFAULT_MAX_CONCURRENT_PROCESSING as a memory bound, not a UX
+    // restriction (see that constant's doc). currentProcessingStage is one shared var every
+    // in-flight job overwrites at its own phase boundaries, so it always reads as the MOST
+    // RECENT job's stage with no per-job breakdown.
+    var isCapturing by remember { mutableStateOf(false) }
+    var processingCount by remember { mutableIntStateOf(0) }
+    var currentProcessingStage by remember { mutableStateOf<ProcessingStage?>(null) }
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
     var isRecording by remember { mutableStateOf(false) }
     var recordingStartMillis by remember { mutableLongStateOf(0L) }
@@ -430,6 +443,14 @@ private fun CameraCaptureScreen(
     val guidedCancelContentDescription = stringResource(R.string.guided_comparison_cancel_content_description)
     val lastCaptureContentDescription = stringResource(R.string.last_capture_content_description)
     val lastCaptureOpenFailureMessage = stringResource(R.string.last_capture_open_failure)
+    // Processing queue (issue #86): the stage labels a ProcessingStage maps to, plus the
+    // "xN" count-suffix template - all resolved once here and handed to the pure
+    // ProcessingQueuePolicy functions, the same pattern CinematicOverlayText's callers use.
+    val processingStageCapturingLabel = stringResource(R.string.processing_stage_capturing)
+    val processingStageMergingLabel = stringResource(R.string.processing_stage_merging)
+    val processingStageFinishingLabel = stringResource(R.string.processing_stage_finishing)
+    val processingStageSavingLabel = stringResource(R.string.processing_stage_saving)
+    val processingStageCountSuffixTemplate = stringResource(R.string.processing_stage_count_suffix)
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -551,8 +572,15 @@ private fun CameraCaptureScreen(
     fun startPortraitCapture() {
         val controller = burstController ?: return
         val capture = imageCapture ?: return
+        // Defense in depth (issue #86): ShutterButton's own `enabled` already keeps an
+        // on-screen tap from reaching here while the queue is full, but the hardware
+        // volume-key path (see the LaunchedEffect below) calls this function directly and
+        // bypasses that Compose-level gate entirely, so the real guard has to live here too.
+        // A silent no-op mirrors BurstController.arm's own "already armed" behaviour.
+        if (!ProcessingQueuePolicy.canCapture(isCapturing, processingCount)) return
         haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-        isBurstInProgress = true
+        isCapturing = true
+        currentProcessingStage = ProcessingStage.Capturing
         // Snapshot once at capture start, like mergeAndSave's guidedCaptureActive below: if
         // the user dismisses the guided banner mid-burst, this capture finishes as a normal
         // one.
@@ -563,6 +591,14 @@ private fun CameraCaptureScreen(
         controller.arm(frameCapture) { burst ->
             Log.d(TAG, "Portrait burst captured ${burst.frames.size} frames in ${burst.captureSpanMillis} ms")
             scope.launch(Dispatchers.Default) {
+                // Frames are collected: the camera is free again, so a new capture can be
+                // armed immediately while this one merges - the processing queue (issue #86)
+                // takes over from here via processingCount instead of isCapturing.
+                withContext(Dispatchers.Main) {
+                    isCapturing = false
+                    processingCount++
+                    currentProcessingStage = ProcessingStage.Merging
+                }
                 try {
                     val mergeResult = BurstMergePipeline.merge(burst.frames)
                     val merged = mergeResult.merged
@@ -577,10 +613,12 @@ private fun CameraCaptureScreen(
                     } else {
                         merged
                     }
+                    withContext(Dispatchers.Main) { currentProcessingStage = ProcessingStage.Finishing }
                     // Unlike Photo's mergeAndSave, finishing is unconditional here - a POC
                     // simplification (issue #80): settings.applyFinishingToMergedPhotos only
                     // gates Photo's burst/HDR/night/SR merges, not Portrait.
                     val finished = FinishingPipeline.apply(bokehApplied, settings.finishingPreset.params)
+                    withContext(Dispatchers.Main) { currentProcessingStage = ProcessingStage.Saving }
                     val processedUri = MergedPhotoSaver.save(
                         context,
                         finished,
@@ -619,7 +657,8 @@ private fun CameraCaptureScreen(
                         null
                     }
                     withContext(Dispatchers.Main) {
-                        isBurstInProgress = false
+                        processingCount = (processingCount - 1).coerceAtLeast(0)
+                        if (processingCount == 0) currentProcessingStage = null
                         lastCapture = LastCapture(processedUri, CaptureMediaType.Photo)
                         if (guidedCaptureActive && capturedPair != null) {
                             onComparePairCaptured(capturedPair)
@@ -639,7 +678,8 @@ private fun CameraCaptureScreen(
                     }
                 } catch (e: Exception) {
                     withContext(Dispatchers.Main) {
-                        isBurstInProgress = false
+                        processingCount = (processingCount - 1).coerceAtLeast(0)
+                        if (processingCount == 0) currentProcessingStage = null
                         snackbarHostState.showSnackbar(burstMergeFailureMessage)
                     }
                 }
@@ -1107,35 +1147,86 @@ private fun CameraCaptureScreen(
             }
         }
 
-        // Last-capture thumbnail (issue #74): bottom-start, clear of the shutter cluster
-        // (bottom-center) and its flanking burst/look controls, and clear of the top-start
-        // Compare button/top-end Settings gear. Absent entirely until the first capture
-        // this session - no empty placeholder box - per lastCapture's own nullability.
-        lastCapture?.let { capture ->
-            LastCaptureThumbnail(
-                capture = capture,
-                contentDescription = lastCaptureContentDescription,
-                onTap = {
-                    val queriedMimeType = context.contentResolver.getType(capture.uri)
-                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(
-                            capture.uri,
-                            LastCaptureMimeType.resolve(queriedMimeType, capture.mediaType),
-                        )
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
-                    try {
-                        context.startActivity(intent)
-                    } catch (e: ActivityNotFoundException) {
-                        scope.launch {
-                            snackbarHostState.showSnackbar(lastCaptureOpenFailureMessage)
-                        }
-                    }
-                },
+        // Last-capture thumbnail (issue #74) + processing indicator (issue #86): bottom-start,
+        // clear of the shutter cluster (bottom-center) and its flanking burst/look controls,
+        // and clear of the top-start Compare button/top-end Settings gear. The stage StatusChip
+        // sits right above the slot it describes, quiet by design: no full-screen overlay, no
+        // blocking dialog, just the same chrome language as every other status chip. The slot
+        // is present whenever there is a previous capture to show OR a job is currently
+        // processing - the empty scrim tile below covers the case where the very first capture
+        // of a session is still merging and there is no thumbnail yet to overlay a spinner on.
+        // Absent entirely otherwise - no empty placeholder - per lastCapture's own nullability.
+        if (lastCapture != null || processingCount > 0) {
+            Column(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(16.dp),
-            )
+                verticalArrangement = Arrangement.spacedBy(ChromeTokens.ChipSpacing),
+            ) {
+                if (processingCount > 0) {
+                    StatusChip(
+                        text = ProcessingQueuePolicy.chipText(
+                            // A job is in flight (processingCount > 0), so it has already
+                            // moved past Capturing - see ProcessingStage's own doc for why
+                            // that value never actually reaches this chip.
+                            stage = currentProcessingStage ?: ProcessingStage.Merging,
+                            processingCount = processingCount,
+                            capturingLabel = processingStageCapturingLabel,
+                            mergingLabel = processingStageMergingLabel,
+                            finishingLabel = processingStageFinishingLabel,
+                            savingLabel = processingStageSavingLabel,
+                            countSuffixTemplate = processingStageCountSuffixTemplate,
+                        ),
+                    )
+                }
+                Box(contentAlignment = Alignment.Center) {
+                    val capture = lastCapture
+                    if (capture != null) {
+                        LastCaptureThumbnail(
+                            capture = capture,
+                            contentDescription = lastCaptureContentDescription,
+                            onTap = {
+                                val queriedMimeType = context.contentResolver.getType(capture.uri)
+                                val intent = Intent(Intent.ACTION_VIEW).apply {
+                                    setDataAndType(
+                                        capture.uri,
+                                        LastCaptureMimeType.resolve(queriedMimeType, capture.mediaType),
+                                    )
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                try {
+                                    context.startActivity(intent)
+                                } catch (e: ActivityNotFoundException) {
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar(lastCaptureOpenFailureMessage)
+                                    }
+                                }
+                            },
+                        )
+                    } else {
+                        // No capture yet this session, but one is already processing (the
+                        // very first capture): a bare scrim tile the same shape/size as the
+                        // real thumbnail, just so the spinner below has a slot to sit in.
+                        Box(
+                            modifier = Modifier
+                                .size(LastCaptureThumbnailSize)
+                                .clip(RoundedCornerShape(LastCaptureThumbnailCornerRadius))
+                                .background(OverlayScrimColor),
+                        )
+                    }
+                    if (processingCount > 0) {
+                        // Small and indeterminate by design (issue #86): a quiet corner
+                        // indicator, not a full-screen overlay or blocking dialog. The stage
+                        // StatusChip above already carries the accessible label, so this stays
+                        // purely decorative rather than duplicating it.
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = ChromeTokens.OnChrome,
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                }
+            }
         }
 
         // Bottom cluster (issue #82): the mode selector over the shutter row, with no
@@ -1179,6 +1270,15 @@ private fun CameraCaptureScreen(
                                 // banner mid-burst, this capture finishes as a normal one.
                                 val guidedCaptureActive = guidedStep == GuidedCompareStep.AwaitingCapture
                                 scope.launch(Dispatchers.Default) {
+                                    // Frames are collected: the camera is free again, so a new
+                                    // capture can be armed immediately while this one merges -
+                                    // the processing queue (issue #86) takes over from here via
+                                    // processingCount instead of isCapturing.
+                                    withContext(Dispatchers.Main) {
+                                        isCapturing = false
+                                        processingCount++
+                                        currentProcessingStage = ProcessingStage.Merging
+                                    }
                                     try {
                                         val (merged, message) = produce()
                                         // Finishing (tone/saturation/contrast) is optional and
@@ -1191,11 +1291,13 @@ private fun CameraCaptureScreen(
                                         } else {
                                             settings.finishingPreset.params
                                         }
+                                        withContext(Dispatchers.Main) { currentProcessingStage = ProcessingStage.Finishing }
                                         val output = if (settings.applyFinishingToMergedPhotos) {
                                             FinishingPipeline.apply(merged, finishingParams)
                                         } else {
                                             merged
                                         }
+                                        withContext(Dispatchers.Main) { currentProcessingStage = ProcessingStage.Saving }
                                         val processedUri = MergedPhotoSaver.save(
                                             context,
                                             output,
@@ -1228,7 +1330,8 @@ private fun CameraCaptureScreen(
                                             null
                                         }
                                         withContext(Dispatchers.Main) {
-                                            isBurstInProgress = false
+                                            processingCount = (processingCount - 1).coerceAtLeast(0)
+                                            if (processingCount == 0) currentProcessingStage = null
                                             lastCapture = LastCapture(processedUri, CaptureMediaType.Photo)
                                             if (guidedCaptureActive && capturedPair != null) {
                                                 onComparePairCaptured(capturedPair)
@@ -1248,7 +1351,8 @@ private fun CameraCaptureScreen(
                                         }
                                     } catch (e: Exception) {
                                         withContext(Dispatchers.Main) {
-                                            isBurstInProgress = false
+                                            processingCount = (processingCount - 1).coerceAtLeast(0)
+                                            if (processingCount == 0) currentProcessingStage = null
                                             snackbarHostState.showSnackbar(burstMergeFailureMessage)
                                         }
                                     }
@@ -1258,12 +1362,18 @@ private fun CameraCaptureScreen(
                             ActionIconButton(
                                 icon = CameraGlyphs.Burst,
                                 contentDescription = burstButtonLabel,
-                                enabled = controllerReady && !isBurstInProgress,
+                                enabled = controllerReady && ProcessingQueuePolicy.canCapture(isCapturing, processingCount),
                                 onClick = {
                                     val controller = burstController ?: return@ActionIconButton
                                     val capture = imageCapture ?: return@ActionIconButton
+                                    // Defense in depth (issue #86): `enabled` above already
+                                    // keeps a disallowed tap from reaching here, but this keeps
+                                    // the click handler correct on its own terms too - see the
+                                    // matching check/comment in startPortraitCapture.
+                                    if (!ProcessingQueuePolicy.canCapture(isCapturing, processingCount)) return@ActionIconButton
                                     haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-                                    isBurstInProgress = true
+                                    isCapturing = true
+                                    currentProcessingStage = ProcessingStage.Capturing
                                     val frameCapture = BurstController.FrameCapture { onResult ->
                                         BurstImageCapture.capture(capture, burstCaptureExecutor, maxBurstPixels, onResult)
                                     }
@@ -1385,6 +1495,13 @@ private fun CameraCaptureScreen(
                     ShutterButton(
                         mode = mode,
                         isRecording = isRecording,
+                        // Portrait's shutter IS the burst trigger (see startPortraitCapture),
+                        // so it respects the same processing-queue gate (issue #86) as the
+                        // Photo-mode burst button. Video/Cinematic have their own start/stop
+                        // mechanic and Photo's plain tap is an un-merged single shot, so
+                        // neither is part of this queue - both stay always enabled here.
+                        enabled = mode != CameraMode.Portrait ||
+                            ProcessingQueuePolicy.canCapture(isCapturing, processingCount),
                         contentDescription = when {
                             mode.isVideoLike && isRecording -> stopContentDescription
                             mode.isVideoLike -> recordContentDescription
@@ -1713,12 +1830,17 @@ private fun ShutterButton(
     contentDescription: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    // Portrait mode routes the shutter through the processing queue (issue #86) - disabled
+    // while the queue can't accept a new capture, dimmed the same way ActionIconButton dims
+    // a disabled control elsewhere on this chrome.
+    enabled: Boolean = true,
 ) {
     Box(
         modifier = modifier
             .size(76.dp)
+            .alpha(if (enabled) 1f else ChromeTokens.DisabledAlpha)
             .border(4.dp, Color.White, CircleShape)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .semantics {
                 role = Role.Button
                 this.contentDescription = contentDescription

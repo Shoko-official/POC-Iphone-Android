@@ -457,23 +457,35 @@ object SyntheticScenes {
         for (y in 0 until n) {
             val row = y * n
             for (x in 0 until n) {
-                var v = srBase(x, y)
-                if (y in SR_ABOVE_BAND_Y0 until SR_ABOVE_BAND_Y1) {
-                    v += SR_BAR_AMPLITUDE * cos(2.0 * PI * x / SR_ABOVE_NYQUIST_PERIOD)
-                } else if (y in SR_NEAR_BAND_Y0 until SR_NEAR_BAND_Y1) {
-                    v += SR_BAR_AMPLITUDE * cos(2.0 * PI * x / SR_NEAR_NYQUIST_PERIOD)
-                }
+                val v = srChartValue(x.toDouble(), y.toDouble())
                 out[row + x] = gray(v.roundToInt().coerceIn(0, 255))
             }
         }
         return Frame(n, n, out, timestampMillis = 0L)
     }
 
+    /**
+     * The chart's CONTINUOUS analytic value at truth coordinate (tx, ty): the smooth base
+     * plus the bar bands. [resolutionChartTruth] is its integer-grid quantisation; the
+     * warped burst samples it directly (see [resolutionChartShiftedWarpedBurst]) because a
+     * real sensor impulse-samples the continuous scene at any phase, which no resampling
+     * of the discrete chart can reproduce for super-Nyquist content.
+     */
+    private fun srChartValue(tx: Double, ty: Double): Double {
+        var v = srBase(tx, ty)
+        if (ty >= SR_ABOVE_BAND_Y0 && ty < SR_ABOVE_BAND_Y1) {
+            v += SR_BAR_AMPLITUDE * cos(2.0 * PI * tx / SR_ABOVE_NYQUIST_PERIOD)
+        } else if (ty >= SR_NEAR_BAND_Y0 && ty < SR_NEAR_BAND_Y1) {
+            v += SR_BAR_AMPLITUDE * cos(2.0 * PI * tx / SR_NEAR_NYQUIST_PERIOD)
+        }
+        return v
+    }
+
     /** Smooth, gradient-rich, band-limited base so no alignment tile is flat. */
-    private fun srBase(x: Int, y: Int): Double {
+    private fun srBase(x: Double, y: Double): Double {
         val sx = 34.0 * sin(2.0 * PI * x / 53.0)
         val sy = 20.0 * sin(2.0 * PI * y / 47.0 + 0.7)
-        val ramp = 16.0 * (x + y).toDouble() / (2 * (SR_TRUTH_SIZE - 1))
+        val ramp = 16.0 * (x + y) / (2 * (SR_TRUTH_SIZE - 1))
         return SR_BASE_MID + sx + sy + ramp
     }
 
@@ -507,6 +519,88 @@ object SyntheticScenes {
             }
         }
         return Frame(outW, outH, out, timestampMillis = 0L)
+    }
+
+    // Shifted + warped SR burst (issue #125): every NON-reference frame carries, on top of
+    // its sub-pixel phase, a GLOBAL truth-pixel shift of several input pixels (integer +
+    // fractional) and a LINEAR horizontal shear whose sign alternates per frame. The shift
+    // makes frame and reference coordinates genuinely different; the shear makes the
+    // per-tile offset field spatially VARYING. Both together are what expose a splat-side
+    // lookup of the field at FRAME coordinates: under a pure translation the field is
+    // constant, so evaluating it at the wrong coordinates still returns the right value --
+    // which is exactly why the zero-global-shift [resolutionChartBurst] fixtures never
+    // caught that bug. The shear is LINEAR deliberately: SR needs the recovered field
+    // accurate to a few hundredths of an input pixel, and a linear field is the only shape
+    // the 32 px bilinear tile-centre interpolation represents exactly (a curved warp
+    // leaves BOTH lookups with tile-grid representation error that swamps the difference
+    // under test). The alternating sign makes the frame-coordinate lookup error -- field
+    // slope times the frame-vs-reference displacement -- flip sign across frames, so the
+    // mis-splatted phases decohere instead of collapsing into a harmless common shift.
+
+    /** Global truth-pixel shift of every non-reference frame: (3.5, 20.5) input px, so the
+     *  frame-vs-reference coordinate displacement has integer AND fractional parts. The y
+     *  component is large because the shear varies along y: the frame-coordinate lookup
+     *  error is the field slope times this displacement. */
+    const val SR_SHIFT_TRUTH_X = 7.0
+    const val SR_SHIFT_TRUTH_Y = 41.0
+
+    /** Magnitude of the linear shear at the chart's top/bottom edge, in truth px (+/-1
+     *  input px: keeps every per-tile offset within the +/-2 px search radius on top of
+     *  the global integer offset). */
+    const val SR_WARP_MAX_TRUTH = 2.0
+
+    /**
+     * A [count]-frame SR burst whose non-reference frames all carry the global
+     * ([SR_SHIFT_TRUTH_X], [SR_SHIFT_TRUTH_Y]) shift plus the alternating-sign linear
+     * shear on top of their [SR_PHASES_TRUTH] sub-pixel phase. Frame 0 is the unshifted,
+     * unwarped reference, so the recovered offset fields are many pixels large and
+     * spatially varying. Per-frame seeds derive from [baseSeed] as in
+     * [resolutionChartBurst].
+     *
+     * Frames are impulse samples of the ANALYTIC chart ([srChartValue]) rather than a
+     * bilinear resampling of the discrete truth: bilinear interpolation attenuates the
+     * above-Nyquist band at fractional phases (to ~38% halfway between texels), and the
+     * shear puts nearly every row at a fractional phase, so resampling the discrete chart
+     * would erase the very signal the burst must carry. A real sensor impulse-samples the
+     * continuous scene, which the analytic evaluation models exactly; [resolutionChartBurst]
+     * keeps its discrete resampling, whose phases were chosen to be safe for it.
+     */
+    fun resolutionChartShiftedWarpedBurst(baseSeed: Long, count: Int = SR_BURST_COUNT): List<Frame> {
+        require(count >= 1) { "count must be >= 1" }
+        val edge = SR_TRUTH_SIZE / 2.0 // distance from chart centre to the y edges
+        return (0 until count).map { k ->
+            val input = if (k == 0) {
+                srSampleChartWarped(0.0, 0.0, shearSlope = 0.0)
+            } else {
+                val (dxTruth, dyTruth) = SR_PHASES_TRUTH[k % SR_PHASES_TRUTH.size]
+                val sign = if (k % 2 == 1) 1.0 else -1.0
+                srSampleChartWarped(
+                    dxTruth + SR_SHIFT_TRUTH_X,
+                    dyTruth + SR_SHIFT_TRUTH_Y,
+                    shearSlope = sign * SR_WARP_MAX_TRUTH / edge,
+                )
+            }
+            noisy(input, baseSeed + k * SEED_STRIDE, SR_READ_NOISE, SR_SHOT_GAIN)
+        }
+    }
+
+    /** Impulse sampling of the analytic chart at stride 2 with a truth-pixel shift plus a
+     *  linear horizontal shear of [shearSlope] truth px per truth row about the chart's
+     *  vertical centre; the shear displacement follows the truth row actually sampled, as
+     *  a rolling-shutter-like warp would. */
+    private fun srSampleChartWarped(dxTruth: Double, dyTruth: Double, shearSlope: Double): Frame {
+        val n = SR_INPUT_SIZE
+        val out = IntArray(n * n)
+        for (yy in 0 until n) {
+            val row = yy * n
+            val ty = 2.0 * yy + dyTruth
+            val shear = shearSlope * (ty - SR_TRUTH_SIZE / 2.0)
+            for (xx in 0 until n) {
+                val v = srChartValue(2.0 * xx + dxTruth + shear, ty)
+                out[row + xx] = gray(v.roundToInt().coerceIn(0, 255))
+            }
+        }
+        return Frame(n, n, out, timestampMillis = 0L)
     }
 
     /** Home block bounds (x0, y0, x1, y1) in INPUT coords: where the reference's block sits. */

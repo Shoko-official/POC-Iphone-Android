@@ -16,7 +16,8 @@ import kotlin.math.roundToInt
  *  2. EQUIVALENCE above the threshold: the bounded downsampled-base path tracks the
  *     whole-frame path ([BacklitRescue.applyFullResBase]) on a 3.1 MP synthetic backlit
  *     frame -- MAE / max-difference bounds plus the rescued LOOK (subject mean lift
- *     within 2%).
+ *     within 2%) -- for both exactly-dividing (2048x1536) and remainder-block
+ *     (2049x1537, both dimensions odd at factor 2) dimensions.
  *  3. MEMORY: the pure-arithmetic peak estimate for a 50 MP capture stays under a
  *     documented budget and the double-plane transient is capped regardless of size
  *     (the pattern of TiledFinishingMemoryTest).
@@ -61,12 +62,47 @@ class BacklitRescueBoundedBaseTest {
 
     @Test
     fun boundedPathTracksTheWholeFramePathAboveThreshold() {
-        val frame = syntheticBacklit(LARGE_W, LARGE_H)
+        assertBoundedTracksWholeFrame(LARGE_W, LARGE_H)
+    }
+
+    @Test
+    fun boundedPathTracksTheWholeFramePathWithNonDividingDimensions() {
+        // Both dimensions odd at factor 2, so the LAST row and column blocks of the box
+        // downsample are partial (1 px). Their true centres sit at the block's single
+        // source pixel, while the gain interpolation assumes the uniform full-block
+        // centre ox*factor + (factor-1)/2 -- a quarter-sample mismatch confined to the
+        // frame's last row/column. The equivalence bounds must hold there regardless.
+        val (bounded, whole) = assertBoundedTracksWholeFrame(ODD_W, ODD_H)
+
+        // The remainder row/column sit in the bright background (gain ~1, locally flat
+        // in every fixture), so the partial-block centre mismatch must stay within the
+        // flat-region bound; a broken last-block mapping would blow it up.
+        var maxEdgeOfFrameDiff = 0
+        for (x in 0 until ODD_W) {
+            maxEdgeOfFrameDiff = maxOf(maxEdgeOfFrameDiff, pixelDiff(bounded, whole, x, ODD_H - 1))
+        }
+        for (y in 0 until ODD_H) {
+            maxEdgeOfFrameDiff = maxOf(maxEdgeOfFrameDiff, pixelDiff(bounded, whole, ODD_W - 1, y))
+        }
+        println("[bounded-base] ${ODD_W}x$ODD_H remainder row/column max diff = $maxEdgeOfFrameDiff")
+        assertTrue(
+            "partial last-block row/column must agree within $MAX_FLAT_DIFF codes (was $maxEdgeOfFrameDiff)",
+            maxEdgeOfFrameDiff < MAX_FLAT_DIFF,
+        )
+    }
+
+    /**
+     * Shared equivalence proof: rescues a [w]x[h] backlit fixture on the bounded and the
+     * whole-frame paths and asserts the MAE / max / flat-region / subject-lift bounds.
+     * Returns the (bounded, whole) pair for scenario-specific follow-up assertions.
+     */
+    private fun assertBoundedTracksWholeFrame(w: Int, h: Int): Pair<Frame, Frame> {
+        val frame = syntheticBacklit(w, h)
         assertTrue(
             "fixture must sit above the threshold",
             frame.width.toLong() * frame.height > BacklitRescue.MAX_BASE_PIXELS,
         )
-        assertEquals(2, BacklitRescue.baseDownscaleFactor(LARGE_W, LARGE_H))
+        assertEquals(2, BacklitRescue.baseDownscaleFactor(w, h))
 
         val bounded = BacklitRescue.apply(frame, params, engagement = 1.0)
         val whole = BacklitRescue.applyFullResBase(frame, params, engagement = 1.0, PipelineParallel.parallelism)
@@ -74,12 +110,12 @@ class BacklitRescueBoundedBaseTest {
         var sumAbs = 0.0
         var maxDiff = 0
         var maxFlatDiff = 0
-        for (y in 0 until LARGE_H) {
-            for (x in 0 until LARGE_W) {
-                val i = y * LARGE_W + x
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val i = y * w + x
                 val a = bounded.argb[i]
                 val b = whole.argb[i]
-                val flat = distToSubjectBoundary(x, y) > FLAT_MARGIN
+                val flat = distToSubjectBoundary(x, y, w, h) > FLAT_MARGIN
                 for (shift in intArrayOf(16, 8, 0)) {
                     val diff = abs(((a shr shift) and 0xFF) - ((b shr shift) and 0xFF))
                     sumAbs += diff
@@ -90,14 +126,14 @@ class BacklitRescueBoundedBaseTest {
         }
         val mae = sumAbs / (bounded.argb.size * 3.0)
 
-        val interior = subjectInterior()
+        val interior = subjectInterior(w, h)
         val inputSubject = meanLuma(frame, interior)
         val boundedLift = meanLuma(bounded, interior) / inputSubject
         val wholeLift = meanLuma(whole, interior) / inputSubject
         val liftDelta = abs(boundedLift / wholeLift - 1.0)
 
         println(
-            "[bounded-base] 3.1MP equivalence mae=${"%.4f".format(mae)} max=$maxDiff " +
+            "[bounded-base] ${w}x$h equivalence mae=${"%.4f".format(mae)} max=$maxDiff " +
                 "flat-max=$maxFlatDiff subject lift bounded=x${"%.3f".format(boundedLift)} " +
                 "whole=x${"%.3f".format(wholeLift)} (delta ${"%.4f".format(liftDelta)})",
         )
@@ -108,6 +144,18 @@ class BacklitRescueBoundedBaseTest {
             maxFlatDiff < MAX_FLAT_DIFF,
         )
         assertTrue("subject mean lift must match the whole-frame path within 2% (was $liftDelta)", liftDelta <= MAX_LIFT_DELTA)
+        return bounded to whole
+    }
+
+    /** Largest per-channel absolute difference between [a] and [b] at pixel (x, y). */
+    private fun pixelDiff(a: Frame, b: Frame, x: Int, y: Int): Int {
+        val pa = a.argb[y * a.width + x]
+        val pb = b.argb[y * b.width + x]
+        var max = 0
+        for (shift in intArrayOf(16, 8, 0)) {
+            max = maxOf(max, abs(((pa shr shift) and 0xFF) - ((pb shr shift) and 0xFF)))
+        }
+        return max
     }
 
     // --- memory bound ----------------------------------------------------------------
@@ -253,13 +301,13 @@ class BacklitRescueBoundedBaseTest {
         return ((v and 0xFFFF).toDouble() / 0xFFFF - 0.5) * 2.0
     }
 
-    /** Subject-core bounds of the [LARGE_W]x[LARGE_H] fixture, inset well past the radius-32
+    /** Subject-core bounds of a [w]x[h] fixture, inset well past the radius-32
      *  gain-transition band so the lift metric reads the flat interior. */
-    private fun subjectInterior(): IntArray = intArrayOf(
-        LARGE_W / 4 + INSET,
-        LARGE_H / 4 + INSET,
-        (LARGE_W * 5) / 8 - INSET,
-        (LARGE_H * 3) / 4 - INSET,
+    private fun subjectInterior(w: Int, h: Int): IntArray = intArrayOf(
+        w / 4 + INSET,
+        h / 4 + INSET,
+        (w * 5) / 8 - INSET,
+        (h * 3) / 4 - INSET,
     )
 
     private fun meanLuma(frame: Frame, bounds: IntArray): Double {
@@ -275,13 +323,13 @@ class BacklitRescueBoundedBaseTest {
         return sum / n
     }
 
-    /** Chebyshev distance from (x, y) to the subject-rectangle BOUNDARY of the large
+    /** Chebyshev distance from (x, y) to the subject-rectangle BOUNDARY of a [w]x[h]
      *  fixture (0 on the boundary itself, growing inward and outward). */
-    private fun distToSubjectBoundary(x: Int, y: Int): Int {
-        val x0 = LARGE_W / 4
-        val y0 = LARGE_H / 4
-        val x1 = (LARGE_W * 5) / 8
-        val y1 = (LARGE_H * 3) / 4
+    private fun distToSubjectBoundary(x: Int, y: Int, w: Int, h: Int): Int {
+        val x0 = w / 4
+        val y0 = h / 4
+        val x1 = (w * 5) / 8
+        val y1 = (h * 3) / 4
         val inside = x in x0 until x1 && y in y0 until y1
         return if (inside) {
             minOf(x - x0, x1 - 1 - x, y - y0, y1 - 1 - y)
@@ -298,6 +346,11 @@ class BacklitRescueBoundedBaseTest {
         /** 2048x1536 = 3.1 MP, above the 2 MP threshold (downscale factor 2). */
         const val LARGE_W = 2048
         const val LARGE_H = 1536
+
+        /** 2049x1537 = 3.1 MP: factor 2 with BOTH dimensions odd, so the downsample's
+         *  last row and column blocks are partial (the remainder-block case). */
+        const val ODD_W = 2049
+        const val ODD_H = 1537
 
         /** 8192x6144 = 50.3 MP, the memory-bound scenario. */
         const val HUGE_W = 8192

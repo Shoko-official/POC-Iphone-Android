@@ -482,8 +482,9 @@ object FinishingPipeline {
      * [FinishingParams.chromaRollOff] is on, at that master strength. Returns [frame]
      * UNCHANGED (same reference, bit-exact) when the strength is 0. It carries no global
      * statistic; its isolation gate has a bounded spatial support (the box-mean
-     * neighbourhood radius), accounted for in [TiledFinishing.SUPPORT_RADIUS], so it needs
-     * nothing from [FinishingStats] and tiles seam-free with the standard halo.
+     * neighbourhood radius), accounted for in [TiledFinishing]'s width-adaptive halo
+     * ([TiledFinishing.supportRadiusFor], ceiling [TiledFinishing.SUPPORT_RADIUS]), so it
+     * needs nothing from [FinishingStats] and tiles seam-free with the standard halo.
      *
      * The gate radius is resolution-adaptive (issue #114): this call site sizes it with
      * [ChromaRollOffParams.forImageWidth] so an isolated runaway region is judged over the

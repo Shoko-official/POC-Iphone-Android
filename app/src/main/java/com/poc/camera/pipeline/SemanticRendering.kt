@@ -30,7 +30,7 @@ data class SemanticRenderingParams(
     val strength: Double = 1.0,
     val skySatGain: Double = 0.14,
     val skySmoothStrength: Double = 0.7,
-    val skySmoothRadius: Int = 8,
+    val skySmoothRadius: Int = DEFAULT_SKY_SMOOTH_RADIUS,
     val foliageSatGain: Double = 0.16,
     val foliageLumaLift: Double = 4.0,
 ) {
@@ -53,6 +53,11 @@ data class SemanticRenderingParams(
         /** Max luma lift (codes) inside foliage at full mask+strength. [FOLIAGE_CHROMA_SHIFT]
          *  + this is the foliage per-channel bound (12), matching the sky bound. */
         const val FOLIAGE_LUMA_LIFT = 4.0
+
+        /** Default sky chroma smoothing guided-filter radius. Its `2 * radius = 16` px
+         *  support closes the finishing chain's spatial tail, counted in
+         *  [TiledFinishing.FIXED_STAGES_SUPPORT]. */
+        const val DEFAULT_SKY_SMOOTH_RADIUS = 8
 
         /** Guided-filter edge regulariser for the sky chroma smooth, in squared luma units --
          *  same "~3% of full scale is flat" knee as [ChromaDenoiser], so real chroma edges that

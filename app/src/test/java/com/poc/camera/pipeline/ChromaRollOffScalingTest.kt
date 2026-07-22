@@ -24,14 +24,16 @@ import kotlin.math.sqrt
  *  3. INTENSITY-DOMAIN INVARIANCE: knee/soft/isolationFactor/strength describe chroma
  *     magnitudes, not distances, so resolution never changes them.
  *  4. SUPPORT CHAIN: [TiledFinishing.SUPPORT_RADIUS]/[TiledFinishing.OVERLAP] are sized
- *     for the radius CEILING, kept in sync by assertion.
+ *     for the radius CEILING, kept in sync by assertion, and the width-adaptive halo
+ *     ([TiledFinishing.overlapFor], issue #121) tracks the ACTUAL scaled radius while
+ *     never exceeding that ceiling.
  *  5. SCALE CONSISTENCY (the honest invariance proof): the same scene rendered at width W
  *     with radius r and at 2W with radius 2r produces the same gating decision -- the 2W
  *     output, downsampled back, matches the W output within a small tolerance -- while the
  *     UNSCALED radius at 2W visibly diverges (the #114 escape: the doubled spot fills its
  *     fixed-radius neighbourhood and under-compresses).
  *  6. TILED-VS-WHOLE-FRAME at a genuinely scaled radius (48 at width 3084) under the
- *     production [TiledFinishing.OVERLAP], within the existing tiled drift tolerance.
+ *     production width-adaptive halo, within the existing tiled drift tolerance.
  *
  * All fixtures are deterministic and closed-form; measured baselines are documented at
  * the baked bounds.
@@ -124,6 +126,29 @@ class ChromaRollOffScalingTest {
         assertTrue("OVERLAP must cover SUPPORT_RADIUS", TiledFinishing.OVERLAP >= TiledFinishing.SUPPORT_RADIUS)
     }
 
+    @Test
+    fun dynamicOverlapTracksTheScaledRadiusUnderTheCeiling() {
+        // supportRadiusFor = the fixed 62 px stage chain + the width-scaled gate radius;
+        // overlapFor adds the 2 px house margin (issue #121).
+        assertEquals(62, TiledFinishing.FIXED_STAGES_SUPPORT)
+        assertEquals(88, TiledFinishing.overlapFor(128)) // radius floor 24
+        assertEquals(88, TiledFinishing.overlapFor(ChromaRollOffParams.REFERENCE_WIDTH))
+        assertEquals(95, TiledFinishing.overlapFor(2016)) // radius 31 (3 MP working)
+        assertEquals(127, TiledFinishing.overlapFor(4032)) // radius 63: 12 MP pays 127, not the 160 ceiling
+        assertEquals(137, TiledFinishing.overlapFor(4714)) // radius 73 (12.5 MP 16:9)
+        // At the radius cap the dynamic halo meets the compile-time ceiling exactly.
+        assertEquals(TiledFinishing.OVERLAP, TiledFinishing.overlapFor(6168))
+        // The ceiling bounds the dynamic halo at EVERY width, and the margin is constant.
+        val widths = intArrayOf(1, 64, 128, 256, ChromaRollOffParams.REFERENCE_WIDTH, 2016, 3084, 4032, 4714, 6168, 10_000, 100_000)
+        for (width in widths) {
+            val support = TiledFinishing.supportRadiusFor(width)
+            val overlap = TiledFinishing.overlapFor(width)
+            assertEquals("overlapFor($width) must be supportRadiusFor + margin", support + TiledFinishing.OVERLAP_MARGIN, overlap)
+            assertTrue("supportRadiusFor($width) = $support must stay under SUPPORT_RADIUS", support <= TiledFinishing.SUPPORT_RADIUS)
+            assertTrue("overlapFor($width) = $overlap must stay under OVERLAP", overlap <= TiledFinishing.OVERLAP)
+        }
+    }
+
     // --- scale consistency ----------------------------------------------------------
 
     @Test
@@ -173,8 +198,11 @@ class ChromaRollOffScalingTest {
     fun tiledMatchesWholeFrameAtAScaledRadiusUnderTheProductionOverlap() {
         val frame = wideScene(3084, 220)
         val params = FinishingParams.DEFAULT.copy(chromaRollOff = 1.0)
-        // At width 3084 the call-site radius is genuinely scaled (48), not the floor.
+        // At width 3084 the call-site radius is genuinely scaled (48), not the floor, and
+        // the production width-adaptive halo is 112 (62 + 48 + 2, issue #121) -- the
+        // default overlap the apply call below takes.
         assertEquals(48, ChromaRollOffParams.forImageWidth(frame.width).neighborhoodRadius)
+        assertEquals(112, TiledFinishing.overlapFor(frame.width))
 
         val whole = FinishingPipeline.apply(frame, params)
         // Not vacuous: the roll-off must engage at this radius on this scene.
@@ -185,7 +213,7 @@ class ChromaRollOffScalingTest {
         )
 
         val stats = FinishingStats.compute(frame, params)
-        val tiled = TiledFinishing.apply(frame, params, tileSize = 256, overlap = TiledFinishing.OVERLAP, stats = stats)
+        val tiled = TiledFinishing.apply(frame, params, tileSize = 256, stats = stats)
 
         var mismatches = 0
         var maxDiff = 0
@@ -353,10 +381,11 @@ class ChromaRollOffScalingTest {
         //     need 4r+2, plus 8-bit re-rounding)
         //   scale-consistency, unscaled radius : mean 0.2489 / max 29 -> floor 20, and > 2x
         //     the scaled max (the #114 escape made measurable: ~20x the mean deviation)
-        //   tiled-vs-whole at radius 48        : mismatches 0 / maxChannelDiff 0, i.e.
-        //     byte-identical on this fixture -> ceilings 4 / 512, the same tolerance class
-        //     TiledFinishingBitIdentityTest allows the documented BoxBlur running-sum
-        //     drift under nonlinear masks (DEFAULT carries skinProtection 0.7)
+        //   tiled-vs-whole at radius 48        : mismatches 0 / maxChannelDiff 0
+        //     (re-measured 2026-07-23 under the width-adaptive 112 px halo, issue #121),
+        //     i.e. byte-identical on this fixture -> ceilings 4 / 512, the same tolerance
+        //     class TiledFinishingBitIdentityTest allows the documented BoxBlur
+        //     running-sum drift under nonlinear masks (DEFAULT carries skinProtection 0.7)
         const val MAX_SCALED_MEAN_DELTA = 0.05
         const val MAX_SCALED_MAX_DELTA = 4
         const val MIN_UNSCALED_MAX_DELTA = 20

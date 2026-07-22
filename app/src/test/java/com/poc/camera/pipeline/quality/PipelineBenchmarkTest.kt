@@ -120,11 +120,12 @@ class PipelineBenchmarkTest {
         )
 
         // Shared-luma census (issue #113): counted from the stage sources, the RENDITION
-        // chain runs 8 separate full-res RGB->Y passes per finished frame (detector,
+        // chain runs 7 separate full-res RGB->Y passes per finished frame (detector,
         // chroma denoise, the SHARED denoised-state plane -- one extraction replacing the
         // former skin mask, sky mask, 2x overcast mask, foliage mask and local tone
-        // passes -- detail enhance, saturation, 2x chroma roll-off, semantic render; 9
-        // with the backlit lift engaged) vs 4 in DEFAULT. Before #113 those counts were
+        // passes -- detail enhance, saturation, chroma roll-off (single since its two
+        // internal passes share one luma plane, issue #122), semantic render; 8 with the
+        // backlit lift engaged) vs 4 in DEFAULT. Before #113/#122 those counts were
         // 13 (14 engaged) and 5. The two WB cue passes run at the bounded <= 1 MP
         // analysis resolution since issue #117, so they no longer count as full-res
         // passes on either path. The remaining passes each read a DIFFERENT frame state
@@ -135,8 +136,8 @@ class PipelineBenchmarkTest {
         val luma12mp = PipelineBenchmark.lumaExtraction(native.w, native.h)
         println(luma12mp)
         println(
-            "shared-luma census: 8 RENDITION passes x %.1f ms = ~%.0f ms of RGB->Y at 12 MP (whole-frame equivalent; 13 passes before #113)".format(
-                luma12mp.millis, 8 * luma12mp.millis,
+            "shared-luma census: 7 RENDITION passes x %.1f ms = ~%.0f ms of RGB->Y at 12 MP (whole-frame equivalent; 13 passes before #113/#122)".format(
+                luma12mp.millis, 7 * luma12mp.millis,
             ),
         )
 

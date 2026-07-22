@@ -82,7 +82,8 @@ data class FinishingStats(
  *
  * Every finishing stage is one of three kinds:
  *  - PURE per-pixel: [WhiteBalance] (with fixed [FinishingStats.wbGains]), [ToneCurve],
- *    [Saturation], [Contrast] -- output at a pixel depends only on that pixel.
+ *    [Saturation], [Contrast], [ChromaRollOff] -- output at a pixel depends only on that
+ *    pixel.
  *  - WINDOWED-local: [ChromaDenoiser], [LocalToneMapper], and [DetailEnhancer]'s spatial
  *    part -- output at a pixel depends only on input within a bounded radius.
  *  - GLOBAL-statistic: [WhiteBalance] gain estimation and [DetailEnhancer]'s coring knee
@@ -272,7 +273,12 @@ object TiledFinishing {
         val toned = ToneCurve(params.shadowsLift, params.highlightRolloff).apply(enhanced)
         val saturated = Saturation.apply(toned, params.saturation, skinModulation)
         val contrasted = Contrast.apply(saturated, params.contrast)
-        return FinishingPipeline.forceOpaque(contrasted)
+        // Chroma roll-off is a PURE per-pixel op (no spatial support, no global statistic),
+        // so a tile core computes the same values the whole-frame path does -- it needs
+        // nothing from FinishingStats and adds no seam. Applied identically to
+        // FinishingPipeline via the shared helper.
+        val rolledOff = FinishingPipeline.applyChromaRollOff(contrasted, params)
+        return FinishingPipeline.forceOpaque(rolledOff)
     }
 
     /**

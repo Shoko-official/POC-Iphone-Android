@@ -41,6 +41,20 @@ package com.poc.camera.pipeline
  * detector gating engagement, so a genuinely backlit capture is rescued while every
  * non-backlit scene is left bit-exactly untouched. Unlike the other stylistic strengths it
  * is deliberately NOT reduced by [skinProtection].
+ *
+ * [chromaRollOff] is the strength of the [ChromaRollOff] chroma-magnitude shoulder in
+ * [0, 1] (0 = off). It runs LAST, after [Saturation] and [Contrast], to compress isolated
+ * extreme chroma the earlier stages pushed past the roll-off knee (e.g. lips that escaped
+ * the skin-protection ellipse and took the full saturation boost) back toward the rest of
+ * the frame, while leaving normal saturation bit-exactly untouched. Like [backlitRescue] it
+ * ships OFF in DEFAULT (0.0) and ON at 1.0 in [RENDITION]: the roll-off is a WHOLE-FRAME
+ * shoulder with no spatial isolation, so on the clean-truth fidelity axis it would compress
+ * the intentionally-saturated colorchart patches and read as error, pushing that scene's
+ * chroma MAE past its committed floor (measured: colorchart MAE 4.12 -> ~6.4 at DEFAULT on).
+ * The rendition axis stays consistent because [com.poc.camera.pipeline.quality.RenditionTargets]
+ * derives its target from [RENDITION], so the target compresses the same chroma the output
+ * does. See ChromaRollOffGoldenTest for the compression, hue-preservation and
+ * normal-saturation-untouched proofs and the measured DEFAULT-decision evidence.
  */
 data class FinishingParams(
     val shadowsLift: Double,
@@ -53,6 +67,7 @@ data class FinishingParams(
     val whiteBalance: Double = 0.0,
     val skinProtection: Double = 0.0,
     val backlitRescue: Double = 0.0,
+    val chromaRollOff: Double = 0.0,
 ) {
     companion object {
         /**
@@ -141,11 +156,22 @@ data class FinishingParams(
          * rendition/fidelity golden scene) reads a detector strength of 0 and is left
          * bit-exactly untouched -- which is why enabling it here does not move any existing
          * floor. See BacklitRescueGoldenTest for the lift, halo and detector-quiet proofs.
+         *
+         * It also ships the [ChromaRollOff] shoulder on at full strength ([chromaRollOff] =
+         * 1.0), catching the post-saturation runaway chroma the rendition look can produce
+         * on an isolated extreme-chroma region. Unlike the backlit rescue this has no scene
+         * gate, so it DOES act on the rendition golden scenes -- but the rendition axis is
+         * self-consistent: [com.poc.camera.pipeline.quality.RenditionTargets] derives its
+         * target from these same RENDITION params, so the target compresses exactly the
+         * chroma the output does and the tracking floors hold. It is kept OFF in [DEFAULT]
+         * because the clean-truth fidelity axis has no such matching target (see
+         * [chromaRollOff]). See ChromaRollOffGoldenTest for the proofs.
          */
         val RENDITION = DEFAULT.copy(
             localContrast = REF_LOCAL_CONTRAST,
             detailEnhance = REF_DETAIL_ENHANCE,
             backlitRescue = 1.0,
+            chromaRollOff = 1.0,
         )
 
         /**
@@ -214,6 +240,12 @@ data class FinishingParams(
  * filter an already-compressed signal and blunt the local pass. Saturation and
  * contrast follow, as pure per-pixel colour finishing.
  *
+ * [ChromaRollOff] runs LAST of all colour stages (after [Saturation] and [Contrast], the
+ * final operator before the opaque pass): it exists to catch the runaway chroma those
+ * stages can leave on an isolated extreme-chroma region, so it must see the post-saturation
+ * colour it is there to tame, not an earlier state. It is a pure per-pixel op with no global
+ * statistic, so its position does not perturb any upstream stats.
+ *
  * Deterministic and free of Android dependencies (no randomness, no clock).
  */
 object FinishingPipeline {
@@ -265,7 +297,20 @@ object FinishingPipeline {
         val toned = ToneCurve(params.shadowsLift, params.highlightRolloff).apply(enhanced)
         val saturated = Saturation.apply(toned, params.saturation, skinModulation)
         val contrasted = Contrast.apply(saturated, params.contrast)
-        return forceOpaque(contrasted)
+        val rolledOff = applyChromaRollOff(contrasted, params)
+        return forceOpaque(rolledOff)
+    }
+
+    /**
+     * Applies the [ChromaRollOff] chroma-magnitude shoulder to [frame] when
+     * [FinishingParams.chromaRollOff] is on, at that master strength. Returns [frame]
+     * UNCHANGED (same reference, bit-exact) when the strength is 0. It carries no global
+     * statistic and has no spatial support, so it needs nothing from [FinishingStats] and
+     * is seam-free under [TiledFinishing] by construction.
+     */
+    internal fun applyChromaRollOff(frame: Frame, params: FinishingParams): Frame {
+        if (params.chromaRollOff <= 0.0) return frame
+        return ChromaRollOff.apply(frame, ChromaRollOffParams.DEFAULT.copy(strength = params.chromaRollOff))
     }
 
     /**

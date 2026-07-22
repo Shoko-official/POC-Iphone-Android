@@ -718,6 +718,74 @@ object SyntheticScenes {
     fun backlitSkinBounds(): IntArray =
         intArrayOf(BACKLIT_SKIN_X0, BACKLIT_SKIN_Y0, BACKLIT_SKIN_X1, BACKLIT_SKIN_Y1)
 
+    // --- Chroma roll-off scene (chroma-roll-off gate) -------------------------
+    //
+    // A dedicated COLOUR scene for the chroma roll-off gate (ChromaRollOffGoldenTest), kept
+    // OUT of [names] so the existing golden report is unaffected. It reproduces the case the
+    // roll-off was tuned for (issue #97): an isolated EXTREME-chroma region (saturated red
+    // "lips") sitting inside a low-chroma skin-toned "face", surrounded by patches of NORMAL
+    // saturation. The face and every normal patch have a chroma magnitude at or under the
+    // roll-off knee (so the shoulder is a bit-exact identity there -- "does not touch normal
+    // saturation"), while the lips sit far above it (so the shoulder compresses them). All
+    // channel values are chosen to keep R > G > B (a coherent warm hue) so the hue-preservation
+    // proof is meaningful.
+    //
+    //  - FACE   rgb(175,152,138): muted skin, chroma magnitude ~26 (< knee 30) -> untouched.
+    //  - LIPS   rgb(190, 75, 82): saturated red, chroma magnitude ~85 (>> knee) -> compressed.
+    //  - normal patches: teal/gold/rose, all chroma magnitude ~21-24 (< knee) -> untouched.
+
+    /** Muted skin-tone "face" fill (R > G > B), chroma magnitude ~26, below the roll-off knee. */
+    private val CHROMA_FACE_RGB = rgb(175, 152, 138)
+
+    /** Saturated red "lips", chroma magnitude ~85 -- the isolated extreme-chroma region. */
+    private val CHROMA_LIPS_RGB = rgb(190, 75, 82)
+
+    private const val CHROMA_LIPS_X0 = 44
+    private const val CHROMA_LIPS_Y0 = 80
+    private const val CHROMA_LIPS_X1 = 84
+    private const val CHROMA_LIPS_Y1 = 96
+
+    /** One normal-saturation patch of the chroma-roll-off scene (all below the knee). */
+    data class ChromaNormalPatch(val name: String, val rgb: Int, val x0: Int, val y0: Int, val x1: Int, val y1: Int)
+
+    /** Three moderate (below-knee) colour patches proving normal saturation is left untouched. */
+    val chromaNormalPatches: List<ChromaNormalPatch> = listOf(
+        ChromaNormalPatch("teal", rgb(120, 150, 145), 8, 8, 32, 32),
+        ChromaNormalPatch("gold", rgb(160, 150, 128), 40, 8, 64, 32),
+        ChromaNormalPatch("rose", rgb(170, 140, 145), 72, 8, 96, 32),
+    )
+
+    /**
+     * The clean chroma-roll-off scene: a muted skin "face" fill with three below-knee normal
+     * patches across the top and a saturated-red "lips" band low-centre. Flat patches, so the
+     * roll-off's per-region effect is measured without noise. Alpha opaque.
+     */
+    fun chromaRollOffClean(): Frame {
+        val out = IntArray(SIZE * SIZE) { (0xFF shl 24) or CHROMA_FACE_RGB }
+        for (patch in chromaNormalPatches) {
+            fillRect(out, patch.x0, patch.y0, patch.x1, patch.y1, patch.rgb)
+        }
+        fillRect(out, CHROMA_LIPS_X0, CHROMA_LIPS_Y0, CHROMA_LIPS_X1, CHROMA_LIPS_Y1, CHROMA_LIPS_RGB)
+        return frame(out)
+    }
+
+    /** Lips-patch bounds (x0, y0, x1, y1), half-open: the extreme-chroma region. */
+    fun chromaLipsBounds(): IntArray =
+        intArrayOf(CHROMA_LIPS_X0, CHROMA_LIPS_Y0, CHROMA_LIPS_X1, CHROMA_LIPS_Y1)
+
+    /** A pure-face sample rectangle (x0, y0, x1, y1), clear of the normal patches and the lips. */
+    fun chromaFaceBounds(): IntArray = intArrayOf(30, 40, 98, 72)
+
+    private fun fillRect(out: IntArray, x0: Int, y0: Int, x1: Int, y1: Int, rgb: Int) {
+        for (y in y0 until y1) {
+            if (y < 0 || y >= SIZE) continue
+            for (x in x0 until x1) {
+                if (x < 0 || x >= SIZE) continue
+                out[y * SIZE + x] = (0xFF shl 24) or rgb
+            }
+        }
+    }
+
     private fun edges(): Frame {
         val out = IntArray(SIZE * SIZE)
         val half = SIZE / 2

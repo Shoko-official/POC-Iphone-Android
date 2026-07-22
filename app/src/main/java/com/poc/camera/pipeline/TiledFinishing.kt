@@ -166,6 +166,14 @@ object TiledFinishing {
     /** Full-tile-size `IntArray` buffers live at once (a stage's src + out). */
     const val INT_PLANES_PEAK: Int = 2
 
+    /**
+     * Timing-hook label (issue #115) for the one-off global-stats analysis pass (the
+     * block-averaged downsample plus [FinishingStats.compute]), reported once per tiled
+     * finish when no precomputed stats are supplied. The per-stage labels inside
+     * [finishRegion] are [FinishingPipeline]'s STAGE_* constants, fired once per tile.
+     */
+    const val STAGE_STATS_ANALYSIS = "stats-analysis"
+
     private const val BYTES_PER_DOUBLE = 8L
     private const val BYTES_PER_INT = 4L
 
@@ -178,6 +186,10 @@ object TiledFinishing {
      *
      * @param tileSize core tile side (padded by [overlap] on every side that has room).
      * @param overlap halo width; must be >= [SUPPORT_RADIUS] for seam-free cores.
+     * @param timingHook optional per-stage wall-clock reporter (issue #115), invoked on the
+     *   calling thread with [STAGE_STATS_ANALYSIS] once and each [FinishingPipeline] STAGE_*
+     *   label once per tile; see [FinishingPipeline.apply]. Null (the default) takes the
+     *   bare untimed path.
      */
     fun apply(
         frame: Frame,
@@ -185,6 +197,7 @@ object TiledFinishing {
         tileSize: Int = DEFAULT_TILE_SIZE,
         overlap: Int = OVERLAP,
         stats: FinishingStats? = null,
+        timingHook: ((stage: String, nanos: Long) -> Unit)? = null,
     ): Frame {
         require(tileSize > 0) { "tileSize must be positive" }
         require(overlap >= 0) { "overlap must be >= 0" }
@@ -194,7 +207,9 @@ object TiledFinishing {
             return FinishingPipeline.forceOpaque(frame)
         }
 
-        val effectiveStats = stats ?: FinishingStats.compute(analysisFrame(frame), params)
+        val effectiveStats = stats ?: timedStage(timingHook, STAGE_STATS_ANALYSIS) {
+            FinishingStats.compute(analysisFrame(frame), params)
+        }
 
         val out = IntArray(width * height)
         var cy0 = 0
@@ -203,7 +218,7 @@ object TiledFinishing {
             var cx0 = 0
             while (cx0 < width) {
                 val cx1 = minOf(cx0 + tileSize, width)
-                finishTile(frame, out, cx0, cy0, cx1, cy1, overlap, params, effectiveStats)
+                finishTile(frame, out, cx0, cy0, cx1, cy1, overlap, params, effectiveStats, timingHook)
                 cx0 = cx1
             }
             cy0 = cy1
@@ -225,6 +240,7 @@ object TiledFinishing {
         overlap: Int,
         params: FinishingParams,
         stats: FinishingStats,
+        timingHook: ((stage: String, nanos: Long) -> Unit)? = null,
     ) {
         val width = frame.width
         val height = frame.height
@@ -246,7 +262,7 @@ object TiledFinishing {
 
         // The tile's first row within the full image, so SemanticRendering's sky POSITION
         // prior matches the whole-frame weight at each absolute row.
-        val finished = finishRegion(tile, params, stats, py0, height).argb
+        val finished = finishRegion(tile, params, stats, py0, height, timingHook).argb
         for (y in cy0 until cy1) {
             val tileRow = (y - py0) * tileW + (cx0 - px0)
             val outRow = y * width + cx0
@@ -266,7 +282,8 @@ object TiledFinishing {
      * full-image height; both are threaded ONLY into [SemanticRendering]'s [SkyMask] and
      * [OvercastSkyMask] position priors so a tile reproduces the whole-frame vertical weight
      * at each absolute row (the chroma/luma/texture priors and the sky chroma smoothing are
-     * local to the tile).
+     * local to the tile). [timingHook] reports each stage's wall-clock nanos for THIS tile
+     * (issue #115, see [FinishingPipeline.apply]); null takes the bare untimed path.
      */
     internal fun finishRegion(
         tile: Frame,
@@ -274,52 +291,71 @@ object TiledFinishing {
         stats: FinishingStats,
         rowOffset: Int = 0,
         imageHeight: Int = tile.height,
+        timingHook: ((stage: String, nanos: Long) -> Unit)? = null,
     ): Frame {
-        val balanced = if (params.whiteBalance > 0.0) {
-            WhiteBalance.applyGains(tile, stats.wbGains, params.whiteBalance)
-        } else {
-            tile
+        val balanced = timedStage(timingHook, FinishingPipeline.STAGE_WHITE_BALANCE) {
+            if (params.whiteBalance > 0.0) {
+                WhiteBalance.applyGains(tile, stats.wbGains, params.whiteBalance)
+            } else {
+                tile
+            }
         }
-        val denoised = if (params.chromaDenoise > 0.0) {
-            ChromaDenoiser.apply(balanced, params.chromaDenoise)
-        } else {
-            balanced
+        val denoised = timedStage(timingHook, FinishingPipeline.STAGE_CHROMA_DENOISE) {
+            if (params.chromaDenoise > 0.0) {
+                ChromaDenoiser.apply(balanced, params.chromaDenoise)
+            } else {
+                balanced
+            }
         }
         // Skin-protection modulation is WINDOWED-local (SkinMask blur radius 8 -> support
         // 16 px, well under OVERLAP), so a tile core computes the same plane the whole-frame
         // path does and the finish stays seam-free. Computed identically to FinishingPipeline
         // via the shared helper.
-        val skinModulation = FinishingPipeline.skinModulation(denoised, params)
+        val skinModulation = timedStage(timingHook, FinishingPipeline.STAGE_SKIN_MASK) {
+            FinishingPipeline.skinModulation(denoised, params)
+        }
         // Semantic sky/overcast/foliage masks, computed on the denoised tile exactly as the
         // whole-frame path does. Their reach (32 px for sky/foliage, 44 px for the overcast
         // texture prior -- see the class doc) is inside OVERLAP and both sky position priors
         // use the absolute row offset, so the boost is seam-consistent tile-vs-whole-frame.
-        val semanticMasks = FinishingPipeline.semanticMasks(denoised, params, rowOffset, imageHeight)
-        val locallyMapped = if (params.localContrast > 0.0) {
-            LocalToneMapper.apply(denoised, FinishingPipeline.localToneParams(params.localContrast), skinModulation)
-        } else {
-            denoised
+        val semanticMasks = timedStage(timingHook, FinishingPipeline.STAGE_SEMANTIC_MASKS) {
+            FinishingPipeline.semanticMasks(denoised, params, rowOffset, imageHeight)
         }
-        val enhanced = if (params.detailEnhance > 0.0) {
-            DetailEnhancer.apply(locallyMapped, FinishingPipeline.detailParams(params.detailEnhance), stats.detailKnee, skinModulation)
-        } else {
-            locallyMapped
+        val locallyMapped = timedStage(timingHook, FinishingPipeline.STAGE_LOCAL_TONE) {
+            if (params.localContrast > 0.0) {
+                LocalToneMapper.apply(denoised, FinishingPipeline.localToneParams(params.localContrast), skinModulation)
+            } else {
+                denoised
+            }
         }
-        val toned = ToneCurve(params.shadowsLift, params.highlightRolloff).apply(enhanced)
-        val saturated = Saturation.apply(toned, params.saturation, skinModulation)
-        val contrasted = Contrast.apply(saturated, params.contrast)
+        val enhanced = timedStage(timingHook, FinishingPipeline.STAGE_DETAIL_ENHANCE) {
+            if (params.detailEnhance > 0.0) {
+                DetailEnhancer.apply(locallyMapped, FinishingPipeline.detailParams(params.detailEnhance), stats.detailKnee, skinModulation)
+            } else {
+                locallyMapped
+            }
+        }
+        val contrasted = timedStage(timingHook, FinishingPipeline.STAGE_TONE_SAT_CONTRAST) {
+            val toned = ToneCurve(params.shadowsLift, params.highlightRolloff).apply(enhanced)
+            val saturated = Saturation.apply(toned, params.saturation, skinModulation)
+            Contrast.apply(saturated, params.contrast)
+        }
         // Chroma roll-off is WINDOWED-local (its isolation gate box-means the chroma-
         // magnitude plane over radius 24, accounted for in SUPPORT_RADIUS) with no global
         // statistic, so a tile core computes the same values the whole-frame path does --
         // it needs nothing from FinishingStats. Applied identically to FinishingPipeline
         // via the shared helper (subject to the same box-blur caveat as the other windowed
         // stages).
-        val rolledOff = FinishingPipeline.applyChromaRollOff(contrasted, params)
+        val rolledOff = timedStage(timingHook, FinishingPipeline.STAGE_CHROMA_ROLL_OFF) {
+            FinishingPipeline.applyChromaRollOff(contrasted, params)
+        }
         // Semantic rendering runs AFTER the roll-off (see FinishingPipeline.apply): its sky
         // chroma smoothing is WINDOWED-local (radius 8 -> support 16, inside OVERLAP) and its
         // per-pixel boosts are element-wise, so a tile core matches the whole-frame path
         // (subject to the same box-blur caveat as the other windowed stages).
-        val semanticRendered = FinishingPipeline.applySemanticRendering(rolledOff, semanticMasks, params)
+        val semanticRendered = timedStage(timingHook, FinishingPipeline.STAGE_SEMANTIC_RENDER) {
+            FinishingPipeline.applySemanticRendering(rolledOff, semanticMasks, params)
+        }
         return FinishingPipeline.forceOpaque(semanticRendered)
     }
 

@@ -146,7 +146,9 @@ object TiledFinishing {
      * fixed fraction of the frame rather than a full-resolution guided-filter run. ~1 MP
      * keeps the white-balance gains and detail sigma statistically indistinguishable from
      * the full-frame estimate (a ~4x linear downsample of a 12.5 MP frame) while bounding
-     * the analysis working set. See TiledFinishingStatsApproximationTest.
+     * the analysis working set. See TiledFinishingStatsApproximationTest. The whole-frame
+     * [FinishingPipeline] path shares this budget (via [analysisFrame]) for its
+     * white-balance gain estimation (issue #117).
      */
     const val ANALYSIS_TARGET_PIXELS: Long = 1_000_000L
 
@@ -362,7 +364,8 @@ object TiledFinishing {
     /**
      * The frame the global stats are estimated from: [frame] itself when it is already at
      * or under [ANALYSIS_TARGET_PIXELS], otherwise a block-averaged downsample by
-     * [analysisDownsampleFactor].
+     * [analysisDownsampleFactor]. Shared with the whole-frame [FinishingPipeline] path,
+     * which estimates its white-balance gains on the same bounded frame (issue #117).
      */
     internal fun analysisFrame(frame: Frame): Frame {
         val factor = analysisDownsampleFactor(frame.width, frame.height)

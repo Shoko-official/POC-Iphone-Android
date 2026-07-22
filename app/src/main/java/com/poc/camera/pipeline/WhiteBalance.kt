@@ -36,17 +36,26 @@ data class WhiteBalanceGains(
  *    the ratios are dominated by noise) and near-clipped pixels (where a channel has
  *    saturated the sensor and the ratio is wrong).
  *
- * The per-channel means over the qualifying pixels are **trimmed means**: each channel's
- * qualifying values are sorted and [grayTrimFraction] is dropped from each tail before
+ * The per-channel means over the qualifying pixels are **trimmed means**: each channel
+ * drops [grayTrimFraction] of its qualifying sample count from each sorted tail before
  * averaging, so a residual cluster of coloured outliers that slipped under the
- * saturation gate cannot drag the estimate.
+ * saturation gate cannot drag the estimate. The samples are 8-bit, so each channel's
+ * sorted sequence is held losslessly in a 256-bin histogram and the trimmed mean is read
+ * from it exactly (issue #117) -- no boxed per-pixel sample lists, no sort.
  *
  * **2. Highlight-neutral.** Bright near-white surfaces are the best illuminant probes:
  * a specular highlight or a white wall reflects the illuminant almost directly, so its
  * captured colour is the illuminant colour with little surface tint. This cue averages
  * the pixels whose luma falls in the brightest non-clipped percentile band
  * ([highlightPercentileLow]..[highlightPercentileHigh]) with every channel strictly
- * below [highlightChannelMax] (a clipped channel carries no colour information).
+ * below [highlightChannelMax] (a clipped channel carries no colour information). The
+ * percentile band is selected by rank from an exact integer luma histogram (Rec. 601
+ * milli-weights 299/587/114, one bin per representable value -- see [milliLuma]) instead
+ * of the previous whole-frame double-luma copy + sort (issue #117); the integer ordering
+ * IS the exact mathematical luma ordering, so the band can differ from the double-sorted
+ * one only where floating-point rounding at the exact band edge disagreed with the true
+ * ordering (measured at identical gains on every equivalence scene -- see
+ * WhiteBalanceHistogramEquivalenceTest).
  *
  * ## Combining the cues
  *
@@ -163,6 +172,14 @@ object WhiteBalance {
     private const val R_WEIGHT = 0.299
     private const val G_WEIGHT = 0.587
     private const val B_WEIGHT = 0.114
+
+    // The same Rec. 601 weights in exact integer milli-form (x1000, summing to 1000), so
+    // [milliLuma] is an integer in [0, 255000] whose ordering is the exact mathematical
+    // luma ordering -- the basis of the histogram percentile in [highlightCue].
+    private const val R_WEIGHT_MILLI = 299
+    private const val G_WEIGHT_MILLI = 587
+    private const val B_WEIGHT_MILLI = 114
+    private const val MILLI_LUMA_BINS = 255 * 1000 + 1
 
     private const val EPS = 1e-6
 
@@ -308,13 +325,18 @@ object WhiteBalance {
     /**
      * The robust gray-world cue: trimmed per-channel means over pixels that are
      * near-neutral (saturation < [GRAY_SATURATION_MAX]) and mid-luma
-     * ([GRAY_LUMA_MIN]..[GRAY_LUMA_MAX]). Exposed for direct testing of the estimator.
+     * ([GRAY_LUMA_MIN]..[GRAY_LUMA_MAX]). The qualifying samples are accumulated into
+     * 256-bin per-channel histograms -- a lossless encoding of each 8-bit sample multiset,
+     * so [trimmedMean] reads the exact sorted-and-trimmed mean the previous boxed sample
+     * lists produced, at a fixed 3 KB (issue #117). The luma/saturation gates themselves
+     * are unchanged. Exposed for direct testing of the estimator.
      */
     internal fun grayWorldCue(frame: Frame): Cue {
         val src = frame.argb
-        val rs = ArrayList<Int>()
-        val gs = ArrayList<Int>()
-        val bs = ArrayList<Int>()
+        val rHist = IntArray(256)
+        val gHist = IntArray(256)
+        val bHist = IntArray(256)
+        var count = 0
         for (pixel in src) {
             val r = (pixel shr 16) and 0xFF
             val g = (pixel shr 8) and 0xFF
@@ -325,47 +347,44 @@ object WhiteBalance {
             val min = minOf(r, g, b)
             val sat = if (max == 0) 0.0 else (max - min).toDouble() / max
             if (sat > GRAY_SATURATION_MAX) continue
-            rs.add(r); gs.add(g); bs.add(b)
+            rHist[r]++; gHist[g]++; bHist[b]++; count++
         }
-        if (rs.isEmpty()) return Cue(0.0, 0.0, 0.0, 0)
+        if (count == 0) return Cue(0.0, 0.0, 0.0, 0)
         return Cue(
-            meanR = trimmedMean(rs, GRAY_TRIM_FRACTION),
-            meanG = trimmedMean(gs, GRAY_TRIM_FRACTION),
-            meanB = trimmedMean(bs, GRAY_TRIM_FRACTION),
-            count = rs.size,
+            meanR = trimmedMean(rHist, count, GRAY_TRIM_FRACTION),
+            meanG = trimmedMean(gHist, count, GRAY_TRIM_FRACTION),
+            meanB = trimmedMean(bHist, count, GRAY_TRIM_FRACTION),
+            count = count,
         )
     }
 
     /**
      * The highlight-neutral cue: mean colour over the brightest non-clipped luma band
      * ([HIGHLIGHT_PERCENTILE_LOW]..[HIGHLIGHT_PERCENTILE_HIGH] of the luma distribution,
-     * every channel < [HIGHLIGHT_CHANNEL_MAX]). Exposed for direct testing.
+     * every channel < [HIGHLIGHT_CHANNEL_MAX]). The band edges are the same percentile
+     * ranks as before, but selected from an exact integer [milliLuma] histogram instead
+     * of a whole-frame double-luma copy + sort (issue #117; see the class doc for the
+     * bounded difference this can make at the exact band edge). Exposed for direct
+     * testing.
      */
     internal fun highlightCue(frame: Frame): Cue {
         val src = frame.argb
         val n = src.size
         if (n == 0) return Cue(0.0, 0.0, 0.0, 0)
-        val lumas = DoubleArray(n)
-        for (i in 0 until n) {
-            val pixel = src[i]
-            val r = (pixel shr 16) and 0xFF
-            val g = (pixel shr 8) and 0xFF
-            val b = pixel and 0xFF
-            lumas[i] = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
+        val hist = IntArray(MILLI_LUMA_BINS)
+        for (pixel in src) {
+            hist[milliLuma(pixel)]++
         }
-        val sorted = lumas.copyOf()
-        sorted.sort()
-        val lowThreshold = sorted[percentileIndex(n, HIGHLIGHT_PERCENTILE_LOW)]
-        val highThreshold = sorted[percentileIndex(n, HIGHLIGHT_PERCENTILE_HIGH)]
+        val lowThreshold = rankValue(hist, percentileIndex(n, HIGHLIGHT_PERCENTILE_LOW))
+        val highThreshold = rankValue(hist, percentileIndex(n, HIGHLIGHT_PERCENTILE_HIGH))
 
         var sumR = 0L
         var sumG = 0L
         var sumB = 0L
         var count = 0
-        for (i in 0 until n) {
-            val luma = lumas[i]
+        for (pixel in src) {
+            val luma = milliLuma(pixel)
             if (luma < lowThreshold || luma > highThreshold) continue
-            val pixel = src[i]
             val r = (pixel shr 16) and 0xFF
             val g = (pixel shr 8) and 0xFF
             val b = pixel and 0xFF
@@ -381,23 +400,58 @@ object WhiteBalance {
         )
     }
 
+    /**
+     * Exact integer Rec. 601 luma of an ARGB pixel in milli-units (`299r + 587g + 114b`,
+     * in [0, 255000]). Adjacent representable lumas differ by 1/1000 of a code while the
+     * double form's rounding error is ~1e-13 of a code, so this ordering is the exact
+     * mathematical luma ordering the double form approximates.
+     */
+    private fun milliLuma(pixel: Int): Int =
+        R_WEIGHT_MILLI * ((pixel shr 16) and 0xFF) +
+            G_WEIGHT_MILLI * ((pixel shr 8) and 0xFF) +
+            B_WEIGHT_MILLI * (pixel and 0xFF)
+
     /** Index into a sorted array of [n] elements for percentile [p] in [0, 1]. */
     private fun percentileIndex(n: Int, p: Double): Int =
         (p * (n - 1)).roundToInt().coerceIn(0, n - 1)
 
+    /** The [rank]-th smallest (0-based) sample recorded in [hist]. */
+    private fun rankValue(hist: IntArray, rank: Int): Int {
+        var seen = 0
+        for (value in hist.indices) {
+            seen += hist[value]
+            if (seen > rank) return value
+        }
+        return hist.size - 1
+    }
+
     /**
-     * Mean of [values] after dropping [trimFraction] of the count from each sorted tail.
-     * With enough samples this discards outliers on both sides; if trimming would remove
-     * everything it falls back to the untrimmed mean.
+     * Mean of the [count] samples in the 256-bin [hist] after dropping [trimFraction] of
+     * the count from each sorted tail. Walking the histogram in bin order visits exactly
+     * the sorted 8-bit sample sequence, so this equals the previous sort-then-trim mean
+     * bit for bit (the tail drop count, the trimmed integer sum and the divisor are all
+     * identical). If trimming would remove everything it falls back to the untrimmed
+     * mean, as before.
      */
-    private fun trimmedMean(values: List<Int>, trimFraction: Double): Double {
-        val sorted = values.sorted()
-        val drop = (sorted.size * trimFraction).toInt()
-        val from = drop
-        val to = sorted.size - drop
-        if (to <= from) return sorted.average()
+    private fun trimmedMean(hist: IntArray, count: Int, trimFraction: Double): Double {
+        val drop = (count * trimFraction).toInt()
+        var from = drop
+        var to = count - drop
+        if (to <= from) {
+            from = 0
+            to = count
+        }
         var sum = 0L
-        for (i in from until to) sum += sorted[i]
+        var seen = 0
+        for (value in hist.indices) {
+            val binCount = hist[value]
+            if (binCount == 0) continue
+            val binFrom = maxOf(seen, from)
+            val binTo = minOf(seen + binCount, to)
+            if (binTo > binFrom) sum += value.toLong() * (binTo - binFrom)
+            seen += binCount
+            if (seen >= to) break
+        }
         return sum.toDouble() / (to - from)
     }
 }

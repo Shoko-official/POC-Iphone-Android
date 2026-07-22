@@ -211,6 +211,47 @@ data class FinishingParams(
         )
 
         /**
+         * Reference-matched rendition profile: the constants FITTED against a real
+         * reference pair rather than hand-picked. It is [RENDITION] retuned on four global
+         * stage strengths so its output tracks the measured look of a real iPhone HEIC
+         * rendition of the same scene:
+         *
+         *  - [saturation] 1.08 -> 1.15: the reference rendition runs a visibly richer global
+         *    colour than the restrained RENDITION baseline.
+         *  - [chromaDenoise] 0.6 -> 1.0: the reference is chroma-clean even in noisy shadow /
+         *    sky regions, so this profile leans fully on the luma-guided denoiser.
+         *  - [shadowsLift] 0.12 -> 0.18: the reference opens the shadows more (matching NIGHT's
+         *    toe), lifting the shadow luma percentiles toward the measured reference tone.
+         *  - [skinProtection] 0.7 -> 0.85: with the stronger global saturation and shadow lift,
+         *    skin is bounded harder so the richer look never over-cooks faces; the
+         *    hue-preserving guarantees still hold at 0.85 (see ReferenceProfileGoldenTest).
+         *
+         * Everything else is inherited from [RENDITION] unchanged, including [detailEnhance]
+         * ([REF_DETAIL_ENHANCE] = 0.5, already the fitted value), the adaptive [backlitRescue]
+         * (1.0, detector-gated), the [chromaRollOff] shoulder (1.0) and [semanticRendering]
+         * (1.0) -- the last two productised from the SAME fit (see [ChromaRollOff]).
+         *
+         * FITTED 2026-07-22 against a real Pixel-RAW / iPhone-HEIC pair on a severe backlit
+         * portrait, the fitted config judged against the iPhone rendition. This is a
+         * SINGLE-PAIR fit and is expected to be refined as more reference pairs arrive. The
+         * measured iPhone style signature, documented for posterity: luma percentiles
+         * p25=62 / p50=100 / p75=139, mean saturation 15.3, skin luma 134, skin R-B 52.
+         *
+         * It is a SHIPPING preset (wired to [com.poc.camera.settings.FinishingPreset.Natural]),
+         * NOT a replacement for [RENDITION] on the rendition evaluation axis:
+         * [com.poc.camera.pipeline.quality.RenditionTargets] stays anchored on [RENDITION], so
+         * this profile does not perturb any rendition/fidelity floor. Its own behaviour is
+         * gated by ReferenceProfileGoldenTest (saturation/chroma-noise/shadow direction vs
+         * RENDITION, skin fairness at 0.85, determinism).
+         */
+        val REFERENCE = RENDITION.copy(
+            saturation = 1.15,
+            chromaDenoise = 1.0,
+            shadowsLift = 0.18,
+            skinProtection = 0.85,
+        )
+
+        /**
          * Night finishing profile, paired with [NightMergeParams] by [NightPipeline].
          * Identical to [DEFAULT] except it retunes three stages for a strongly-noisy
          * low-light merge, each justified empirically against the "nightscene" golden

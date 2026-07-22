@@ -8,8 +8,11 @@ import org.junit.Test
 class FinishingPresetTest {
 
     @Test
-    fun naturalIsExactlyTheTestedRenditionProfile() {
-        assertEquals(FinishingParams.RENDITION, FinishingPreset.Natural.params)
+    fun naturalIsExactlyTheReferenceMatchedProfile() {
+        // The default preset maps to the reference-matched profile (issue #99): "closest to
+        // the reference-class rendition we have measured", not the restrained RENDITION
+        // baseline the rendition evaluation axis is anchored on.
+        assertEquals(FinishingParams.REFERENCE, FinishingPreset.Natural.params)
     }
 
     @Test

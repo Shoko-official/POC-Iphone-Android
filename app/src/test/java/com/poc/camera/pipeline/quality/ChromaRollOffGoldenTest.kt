@@ -16,11 +16,12 @@ import kotlin.math.atan2
 import kotlin.math.sqrt
 
 /**
- * Objective golden gate for the chroma roll-off (issue #97), productised from the validated
- * local pair-tuning (knee 30, soft 18). Every claim is measured on the synthetic
- * "chromaRollOff" scene -- an isolated saturated-red "lips" band inside a low-chroma
- * skin-toned "face", with three below-knee normal-saturation patches -- so the numbers are
- * deterministic and reproducible across machines.
+ * Objective golden gate for the spatially gated chroma roll-off (issues #97, #107),
+ * productised from the validated local pair-tuning (knee 30, soft 18) plus the isolation
+ * gate (isolationFactor 1.5, neighbourhood radius 24). Every claim is measured on
+ * deterministic synthetic scenes, so the numbers are reproducible across machines. The
+ * anchor scene is "chromaRollOff" -- an isolated saturated-red "lips" band inside a
+ * low-chroma skin-toned "face", with three below-knee normal-saturation patches.
  *
  * The suite proves:
  *  1. COMPRESSION: the extreme-chroma lips are compressed by at least [MIN_LIPS_COMPRESSION]x
@@ -28,17 +29,27 @@ import kotlin.math.sqrt
  *  2. NORMAL SATURATION UNTOUCHED: the face and every normal patch (all at/under the knee)
  *     shift less than [MAX_NORMAL_SHIFT] code of mean chroma -- in fact bit-exactly, proven
  *     separately.
- *  3. HUE PRESERVED: the lips chroma angle shifts under [MAX_HUE_SHIFT_DEG] degrees (the
+ *  3. UNIFORM SATURATION PASSES THROUGH (issue #107, the gate's whole point): a uniformly
+ *     saturated frame far above the knee is BIT-EXACT, and the colorchart's uniformly
+ *     saturated patches shift under [MAX_UNIFORM_SHIFT] codes of mean chroma -- where the
+ *     ungated whole-frame shoulder desaturated them broadly.
+ *  4. ISOLATION IS THE GATE: an isolated extreme-chroma spot on a low-chroma surround
+ *     compresses along the UNGATED shoulder (the local mean is too low to lift the
+ *     effective knee), matching the original operator on the validated real case.
+ *  5. HUE PRESERVED: the lips chroma angle shifts under [MAX_HUE_SHIFT_DEG] degrees (the
  *     roll-off scales cr and cb by the same factor, so hue is preserved up to 8-bit rounding).
- *  4. STRENGTH BLEND + DETERMINISM + parallel bit-identity.
- *  5. INTEGRATION: the full pipeline with the roll-off on compresses the lips vs the roll-off
+ *  6. STRENGTH BLEND + DETERMINISM + parallel bit-identity.
+ *  7. INTEGRATION: the full pipeline with the roll-off on compresses the lips vs the roll-off
  *     off, while leaving the below-knee normal patches essentially unchanged.
- *  6. DEFAULT DECISION EVIDENCE: with the roll-off forced on at DEFAULT it pushes the
- *     colorchart clean-truth chroma MAE far past its committed fidelity floor, which is why
- *     it ships OFF in DEFAULT and ON only in RENDITION (whose target tracks it).
+ *  8. DEFAULT DECISION EVIDENCE: the ungated shoulder forced on at DEFAULT pushed the
+ *     colorchart clean-truth MAE far past its committed fidelity floor (measured ~10.7 vs
+ *     floor 4.21, the original reason DEFAULT ships it off). With the gate the same forced-on
+ *     run stays WITHIN the floor -- the fidelity threat is gone; DEFAULT still ships it off
+ *     because the clean-truth axis has no matching target for the residual isolated-spot
+ *     compression (a conservative choice, no longer a forced one).
  *
- * Baselines were measured 2026-07-22 and are documented at each assertion; bounds carry
- * margin so the test is a regression gate, not a brittle snapshot.
+ * Baselines re-measured 2026-07-22 with the spatial gate and documented at each assertion;
+ * bounds carry margin so the test is a regression gate, not a brittle snapshot.
  */
 class ChromaRollOffGoldenTest {
 
@@ -83,6 +94,80 @@ class ChromaRollOffGoldenTest {
         for (patch in SyntheticScenes.chromaNormalPatches) {
             assertRegionByteIdentical(patch.name, scene, rolled, intArrayOf(patch.x0, patch.y0, patch.x1, patch.y1))
         }
+    }
+
+    // --- uniform saturation passes through (the issue #107 gate) --------------------
+
+    @Test
+    fun uniformlySaturatedFrameIsBitExact() {
+        // Edge-to-edge extreme chroma (the lips colour, magnitude ~85 >> knee 30): every
+        // pixel IS its own neighbourhood, so the effective knee (1.5x local mean ~127) sits
+        // far above the magnitude and the whole frame passes through bit-exactly -- the
+        // ungated shoulder compressed this frame by ~2x.
+        val uniform = Frame(
+            SyntheticScenes.SIZE,
+            SyntheticScenes.SIZE,
+            IntArray(SyntheticScenes.SIZE * SyntheticScenes.SIZE) { UNIFORM_SATURATED_ARGB },
+            timestampMillis = 1L,
+        )
+        val rolled = ChromaRollOff.apply(uniform)
+        assertTrue("a uniformly saturated frame must pass through bit-exactly", uniform.argb.contentEquals(rolled.argb))
+    }
+
+    @Test
+    fun colorChartUniformPatchesPassThroughNearlyUntouched() {
+        // The colorchart's patches carry chroma magnitudes up to ~116, far past the knee --
+        // exactly the uniformly saturated content the ungated whole-frame shoulder
+        // desaturated broadly. With the gate each patch reads as its own neighbourhood, so
+        // the whole-frame MEAN chroma shift collapses to well under a code (residual
+        // compression survives only at patch borders, where a saturated patch abuts a
+        // neutral one and genuinely reads as partially isolated).
+        val chart = SyntheticScenes.clean("colorchart")
+        val rolled = ChromaRollOff.apply(chart)
+        var shiftSum = 0.0
+        for (i in chart.argb.indices) {
+            shiftSum += abs(chromaMagOf(chart.argb[i]) - chromaMagOf(rolled.argb[i]))
+        }
+        val meanShift = shiftSum / chart.argb.size
+        println("[chroma] colorchart mean chroma shift ${"%.4f".format(meanShift)} (gate on, full strength)")
+        assertTrue(
+            "uniformly saturated colorchart must shift < $MAX_UNIFORM_SHIFT codes of mean chroma (was $meanShift)",
+            meanShift < MAX_UNIFORM_SHIFT,
+        )
+    }
+
+    // --- isolation is the gate -------------------------------------------------------
+
+    @Test
+    fun isolatedSpotOnLowChromaSurroundCompressesAlongTheUngatedShoulder() {
+        // A 4x4 spot of the lips colour on a near-gray surround (magnitude ~3): the spot's
+        // local mean (~3.4) is far under knee / isolationFactor, so its effective knee IS
+        // the global knee and it compresses along the original ungated shoulder -- the
+        // validated real case (isolated runaway lips) is preserved exactly.
+        val size = SyntheticScenes.SIZE
+        val surround = (0xFF shl 24) or (120 shl 16) or (118 shl 8) or 116
+        val px = IntArray(size * size) { surround }
+        for (y in size / 2 - 2 until size / 2 + 2) {
+            for (x in size / 2 - 2 until size / 2 + 2) {
+                px[y * size + x] = UNIFORM_SATURATED_ARGB
+            }
+        }
+        val spotFrame = Frame(size, size, px, timestampMillis = 1L)
+        val rolled = ChromaRollOff.apply(spotFrame)
+
+        val before = chromaMagOf(UNIFORM_SATURATED_ARGB)
+        val after = chromaMagOf(rolled.argb[(size / 2) * size + size / 2])
+        val ungated = ChromaRollOff.shoulder(before, ChromaRollOffParams.DEFAULT)
+        val factor = before / after
+        println(
+            "[chroma] isolated spot ${"%.2f".format(before)} -> ${"%.2f".format(after)} " +
+                "(ungated shoulder ${"%.2f".format(ungated)}, x${"%.2f".format(factor)})",
+        )
+        assertTrue("isolated spot must compress by at least ${MIN_SPOT_COMPRESSION}x (was x$factor)", factor >= MIN_SPOT_COMPRESSION)
+        assertTrue(
+            "isolated spot must land on the ungated shoulder within $MAX_SHOULDER_DEVIATION codes (was ${abs(after - ungated)})",
+            abs(after - ungated) <= MAX_SHOULDER_DEVIATION,
+        )
     }
 
     // --- hue preserved -------------------------------------------------------------
@@ -143,13 +228,16 @@ class ChromaRollOffGoldenTest {
     // --- DEFAULT-decision evidence -------------------------------------------------
 
     @Test
-    fun defaultOnWouldBreakTheColorChartFidelityFloor() {
-        // The measured justification for shipping chromaRollOff OFF in DEFAULT: on the
-        // clean-truth fidelity axis it compresses the intentionally-saturated colorchart
-        // patches (no matching target), pushing that scene's chroma MAE far past its
-        // committed floor. Every low-chroma scene is a no-op (below the knee), so only
-        // colorchart is threatened -- which is exactly why RENDITION (whose target tracks
-        // the roll-off) can ship it on while DEFAULT cannot.
+    fun spatialGateKeepsColorChartFidelityWithinFloorEvenForcedOn() {
+        // The measured DEFAULT-decision evidence, updated for the spatial gate (issue #107).
+        // The UNGATED whole-frame shoulder forced on at DEFAULT compressed the intentionally-
+        // saturated colorchart patches and pushed the scene's clean-truth MAE to ~10.7, far
+        // past the committed 4.21 floor -- the original reason chromaRollOff ships OFF in
+        // DEFAULT. The gate removes that threat: the patches read as their own neighbourhood
+        // and pass through, so the SAME forced-on run now stays WITHIN the committed floor.
+        // DEFAULT still ships the roll-off off -- the clean-truth axis has no matching target
+        // for the residual isolated-spot compression -- but the decision is now conservative
+        // rather than forced by a broken floor.
         val clean = SyntheticScenes.clean("colorchart")
         val seed = FIDELITY_SEED + 5 * FIDELITY_STRIDE // colorchart is scene index 5
         val merged = BurstMergePipeline.merge(
@@ -159,7 +247,10 @@ class ChromaRollOffGoldenTest {
         val maeOn = Mae.between(FinishingPipeline.apply(merged, FinishingParams.DEFAULT.copy(chromaRollOff = 1.0)), clean)
         println("[chroma] colorchart fidelity MAE roll-off off=${"%.2f".format(maeOff)} on=${"%.2f".format(maeOn)} (committed floor $COLORCHART_MAE_FLOOR)")
         assertTrue("roll-off off must clear the committed colorchart floor (was $maeOff)", maeOff <= COLORCHART_MAE_FLOOR)
-        assertTrue("roll-off on must BREAK the committed colorchart floor, justifying DEFAULT off (was $maeOn)", maeOn > COLORCHART_MAE_FLOOR)
+        assertTrue(
+            "the gated roll-off forced on must STAY WITHIN the committed colorchart floor (was $maeOn)",
+            maeOn <= COLORCHART_MAE_FLOOR,
+        )
     }
 
     // --- helpers -------------------------------------------------------------------
@@ -169,18 +260,21 @@ class ChromaRollOffGoldenTest {
         var n = 0
         for (y in bounds[1] until bounds[3]) {
             for (x in bounds[0] until bounds[2]) {
-                val px = frame.argb[y * frame.width + x]
-                val r = ((px shr 16) and 0xFF).toDouble()
-                val g = ((px shr 8) and 0xFF).toDouble()
-                val b = (px and 0xFF).toDouble()
-                val yl = 0.299 * r + 0.587 * g + 0.114 * b
-                val cr = r - yl
-                val cb = b - yl
-                sum += sqrt(cr * cr + cb * cb)
+                sum += chromaMagOf(frame.argb[y * frame.width + x])
                 n++
             }
         }
         return sum / n
+    }
+
+    private fun chromaMagOf(px: Int): Double {
+        val r = ((px shr 16) and 0xFF).toDouble()
+        val g = ((px shr 8) and 0xFF).toDouble()
+        val b = (px and 0xFF).toDouble()
+        val yl = 0.299 * r + 0.587 * g + 0.114 * b
+        val cr = r - yl
+        val cb = b - yl
+        return sqrt(cr * cr + cb * cb)
     }
 
     /** Angle (degrees) of the mean (cr, cb) chroma vector over [bounds]. */
@@ -213,15 +307,32 @@ class ChromaRollOffGoldenTest {
     }
 
     private companion object {
-        // MEASURED 2026-07-22 on the deterministic "chromaRollOff" scene (knee 30, soft 18).
-        // Actuals -> baked bound (with margin):
-        //   lips chroma compression factor : x1.96      -> floor 1.6
+        /** The lips colour rgb(190, 75, 82): chroma magnitude ~84.6, far above the knee. */
+        const val UNIFORM_SATURATED_ARGB = (0xFF shl 24) or (190 shl 16) or (75 shl 8) or 82
+
+        // MEASURED 2026-07-22 on the deterministic scenes with the SPATIAL GATE (knee 30,
+        // soft 18, isolationFactor 1.5, neighbourhood radius 24). Actuals -> baked bound
+        // (with margin):
+        //   lips chroma compression factor : x1.21      -> floor 1.15 (was x1.96 ungated: the
+        //     40x16 lips band partially fills its own radius-24 neighbourhood, lifting its
+        //     effective knee to ~63 -- by design, a larger saturated region reads as less
+        //     isolated; a genuinely small spot still compresses fully, proven separately)
         //   face / normal patch shift      : 0.00 codes -> ceiling 1.0 (bit-exact below knee)
-        //   lips hue angle shift           : ~0.4 deg   -> ceiling 1.5
-        //   pipeline lips drop (roll on)   : measured   -> floor (see MIN_PIPELINE_LIPS_DROP)
-        //   colorchart fidelity MAE on     : ~10.7      -> committed floor 4.21 (broken -> DEFAULT off)
-        const val MIN_LIPS_COMPRESSION = 1.6
+        //   uniform frame                  : bit-exact  -> asserted exactly
+        //   colorchart mean chroma shift   : 0.87 codes -> ceiling 2.0 (ungated compressed it
+        //     broadly; residual is patch-border-only)
+        //   isolated 4x4 spot factor       : x1.96      -> floor 1.85, and lands on the
+        //     ungated shoulder (43.26 vs 43.54) -> deviation ceiling 1.0 code
+        //   lips hue angle shift           : ~0.05 deg  -> ceiling 1.5
+        //   pipeline lips drop (roll on)   : 16.0 codes -> floor 5.0 (off=81.4 on=65.4)
+        //   pipeline face shift            : 0.0 codes  -> ceiling 1.0
+        //   colorchart fidelity MAE on     : 3.97 (off 3.89) -> committed floor 4.21 HELD
+        //     (the ungated shoulder measured ~10.7, breaking it -- see the evidence test)
+        const val MIN_LIPS_COMPRESSION = 1.15
         const val MAX_NORMAL_SHIFT = 1.0
+        const val MAX_UNIFORM_SHIFT = 2.0
+        const val MIN_SPOT_COMPRESSION = 1.85
+        const val MAX_SHOULDER_DEVIATION = 1.0
         const val MAX_HUE_SHIFT_DEG = 1.5
         const val MIN_PIPELINE_LIPS_DROP = 5.0
         const val MAX_PIPELINE_FACE_SHIFT = 1.0

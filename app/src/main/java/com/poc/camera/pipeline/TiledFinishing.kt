@@ -82,11 +82,10 @@ data class FinishingStats(
  *
  * Every finishing stage is one of three kinds:
  *  - PURE per-pixel: [WhiteBalance] (with fixed [FinishingStats.wbGains]), [ToneCurve],
- *    [Saturation], [Contrast], [ChromaRollOff] -- output at a pixel depends only on that
- *    pixel.
+ *    [Saturation], [Contrast] -- output at a pixel depends only on that pixel.
  *  - WINDOWED-local: [ChromaDenoiser], [LocalToneMapper], [DetailEnhancer]'s spatial part,
- *    and [SemanticRendering]'s sky chroma smoothing -- output at a pixel depends only on
- *    input within a bounded radius.
+ *    [ChromaRollOff]'s isolation gate, and [SemanticRendering]'s sky chroma smoothing --
+ *    output at a pixel depends only on input within a bounded radius.
  *  - GLOBAL-statistic: [WhiteBalance] gain estimation and [DetailEnhancer]'s coring knee
  *    -- fixed once in [FinishingStats] and passed in, so no tile re-estimates them.
  *
@@ -94,19 +93,22 @@ data class FinishingStats(
  * value at a pixel depends only on merged input within a finite radius -- the SUM of the
  * per-stage supports. Each [GuidedFilter] pass is two [BoxBlur] passes, so its support is
  * `2 * radius`, giving per-stage supports of chroma `2*4 = 8`, local-tone `2*16 = 32`,
- * detail `2*3 = 6` (its 3x3 morphology adds 1, subsumed), plus [SemanticRendering]'s sky
- * chroma smoothing `2*8 = 16` at the tail. The pure stages add 0. The chain support is
- * therefore `8 + 32 + 6 + 16 = 62` px ([SUPPORT_RADIUS]). Two windowed-local pieces do NOT
+ * detail `2*3 = 6` (its 3x3 morphology adds 1, subsumed); [ChromaRollOff]'s isolation gate
+ * is a SINGLE [BoxBlur] of the chroma-magnitude plane, so its support is its
+ * neighbourhood radius `24`; and [SemanticRendering]'s sky chroma smoothing adds `2*8 = 16`
+ * at the tail. The pure stages add 0. The chain support is therefore
+ * `8 + 32 + 6 + 24 + 16 = 86` px ([SUPPORT_RADIUS]). Two windowed-local pieces do NOT
  * extend this, because they feed a stage as per-pixel coefficients rather than widening its
  * read radius and their own reach is inside the chain support: the [SkinMask] modulation
  * (denoised support 8, blur radius 8 -> reach 16) and the [SemanticRendering] sky/foliage
- * masks (denoised support 8, blur radius 12 -> reach 32), both under 62. The sky chroma
- * smoothing is the one tail stage that DOES read a neighbourhood of the post-roll-off frame
- * (the roll-off is per-pixel, so this equals the post-[Contrast] reach), so it adds its
- * `2*8 = 16` on top. Give every tile a halo of at least that many
- * pixels of real neighbouring content and its CORE (the halo cropped off) sees exactly the
- * neighbourhood the whole-frame pass saw, so tile cores agree in their interior with no
- * feathering. [OVERLAP] is 64 (>= 62, a 2 px margin). The sky position prior is geometric,
+ * masks (denoised support 8, blur radius 12 -> reach 32), both under 86. The two tail
+ * stages DO widen the read radius in sequence: the roll-off's local reference reads a
+ * radius-24 neighbourhood of the post-[Contrast] frame (reach 8+32+6 = 46 from the input,
+ * so 70 total), and the sky chroma smoothing reads a `2*8 = 16` neighbourhood of the
+ * post-roll-off frame, closing the chain at 86. Give every tile a halo of at least that
+ * many pixels of real neighbouring content and its CORE (the halo cropped off) sees exactly
+ * the neighbourhood the whole-frame pass saw, so tile cores agree in their interior with no
+ * feathering. [OVERLAP] is 88 (>= 86, a 2 px margin). The sky position prior is geometric,
  * not content-derived, so each tile reproduces it exactly from its absolute row offset (see
  * [finishRegion]) -- it adds no spatial support.
  *
@@ -126,12 +128,12 @@ data class FinishingStats(
  */
 object TiledFinishing {
 
-    /** Chain spatial support in pixels (chroma 8 + local-tone 32 + detail 6 + sky-smooth 16);
-     *  see class doc. */
-    const val SUPPORT_RADIUS: Int = 62
+    /** Chain spatial support in pixels (chroma 8 + local-tone 32 + detail 6 + roll-off
+     *  gate 24 + sky-smooth 16); see class doc. */
+    const val SUPPORT_RADIUS: Int = 86
 
     /** Tile halo in pixels: >= [SUPPORT_RADIUS], with a small margin. */
-    const val OVERLAP: Int = 64
+    const val OVERLAP: Int = 88
 
     /** Default core tile side; the padded tile is `tileSize + 2 * OVERLAP` per axis. */
     const val DEFAULT_TILE_SIZE: Int = 512
@@ -300,10 +302,12 @@ object TiledFinishing {
         val toned = ToneCurve(params.shadowsLift, params.highlightRolloff).apply(enhanced)
         val saturated = Saturation.apply(toned, params.saturation, skinModulation)
         val contrasted = Contrast.apply(saturated, params.contrast)
-        // Chroma roll-off is a PURE per-pixel op (no spatial support, no global statistic),
-        // so a tile core computes the same values the whole-frame path does -- it needs
-        // nothing from FinishingStats and adds no seam. Applied identically to
-        // FinishingPipeline via the shared helper.
+        // Chroma roll-off is WINDOWED-local (its isolation gate box-means the chroma-
+        // magnitude plane over radius 24, accounted for in SUPPORT_RADIUS) with no global
+        // statistic, so a tile core computes the same values the whole-frame path does --
+        // it needs nothing from FinishingStats. Applied identically to FinishingPipeline
+        // via the shared helper (subject to the same box-blur caveat as the other windowed
+        // stages).
         val rolledOff = FinishingPipeline.applyChromaRollOff(contrasted, params)
         // Semantic rendering runs AFTER the roll-off (see FinishingPipeline.apply): its sky
         // chroma smoothing is WINDOWED-local (radius 8 -> support 16, inside OVERLAP) and its

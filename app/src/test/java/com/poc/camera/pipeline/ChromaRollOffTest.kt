@@ -10,9 +10,11 @@ import kotlin.math.sqrt
 /**
  * Unit proofs for the pure pieces of [ChromaRollOff]: the chroma-magnitude shoulder's
  * continuity at its knee, its monotonicity and asymptote, the strength blend endpoints
- * (0 = bit-exact passthrough, 1 = full compression) and its intermediate blend, and the
- * invariant that gray (zero-chroma) pixels are left untouched. All numbers are closed-form,
- * so the tests are deterministic and machine-independent.
+ * (0 = bit-exact passthrough, 1 = full compression) and its intermediate blend, the
+ * spatial isolation gate (issue #107: a uniformly saturated frame passes through
+ * bit-exactly, an isolated spot compresses) and the invariant that gray (zero-chroma)
+ * pixels are left untouched. All numbers are closed-form, so the tests are deterministic
+ * and machine-independent.
  */
 class ChromaRollOffTest {
 
@@ -53,35 +55,70 @@ class ChromaRollOffTest {
         }
     }
 
+    @Test
+    fun shoulderAtAnExplicitKneeMatchesClosedForm() {
+        // The gated apply loop calls the shoulder with the per-pixel EFFECTIVE knee, so the
+        // explicit-knee overload must match the closed form at any knee.
+        for (knee in doubleArrayOf(30.0, 45.0, 62.5)) {
+            assertEquals(knee - 1.0, ChromaRollOff.shoulder(knee - 1.0, knee, params.soft), 0.0)
+            val over = 80.0 - knee
+            val expected = knee + over / (1.0 + over / params.soft)
+            assertEquals("shoulder(80, knee=$knee)", expected, ChromaRollOff.shoulder(80.0, knee, params.soft), 1e-9)
+        }
+    }
+
     // --- strength blend endpoints --------------------------------------------------
 
     @Test
     fun strengthZeroIsBitExactPassthrough() {
-        val frame = saturated(8, 8, 200, 50, 50)
+        val frame = isolatedSpot()
         val out = ChromaRollOff.apply(frame, params.copy(strength = 0.0))
         assertSame("strength 0 must return the input frame untouched", frame, out)
     }
 
     @Test
-    fun strengthOneFullyCompressesAnExtremeChromaPixel() {
-        val frame = saturated(16, 16, 200, 50, 50)
-        val before = chromaMag(frame, 8, 8)
+    fun strengthOneFullyCompressesAnIsolatedExtremeChromaSpot() {
+        val frame = isolatedSpot()
+        val before = chromaMag(frame, SPOT_CENTER, SPOT_CENTER)
         val out = ChromaRollOff.apply(frame, params.copy(strength = 1.0))
-        val after = chromaMag(out, 8, 8)
-        // The uniform patch is far above the knee, so full strength compresses it toward the
-        // knee+soft asymptote -- a large, measurable chroma reduction.
-        assertTrue("extreme chroma must be compressed at full strength ($before -> $after)", after < before * 0.6)
+        val after = chromaMag(out, SPOT_CENTER, SPOT_CENTER)
+        // The spot's low-chroma surround keeps the effective knee at the global knee, so
+        // full strength compresses it toward the knee+soft asymptote -- a large, measurable
+        // chroma reduction.
+        assertTrue("isolated extreme chroma must be compressed at full strength ($before -> $after)", after < before * 0.6)
     }
 
     @Test
     fun strengthBlendIsBetweenIdentityAndFull() {
-        val frame = saturated(16, 16, 200, 50, 50)
-        val orig = chromaMag(frame, 8, 8)
-        val half = chromaMag(ChromaRollOff.apply(frame, params.copy(strength = 0.5)), 8, 8)
-        val full = chromaMag(ChromaRollOff.apply(frame, params.copy(strength = 1.0)), 8, 8)
+        val frame = isolatedSpot()
+        val orig = chromaMag(frame, SPOT_CENTER, SPOT_CENTER)
+        val half = chromaMag(ChromaRollOff.apply(frame, params.copy(strength = 0.5)), SPOT_CENTER, SPOT_CENTER)
+        val full = chromaMag(ChromaRollOff.apply(frame, params.copy(strength = 1.0)), SPOT_CENTER, SPOT_CENTER)
         // A partial strength sits strictly between the untouched original and full compression.
         assertTrue("half strength must compress less than full ($half vs $full)", half > full)
         assertTrue("half strength must still compress vs the original ($half vs $orig)", half < orig)
+    }
+
+    // --- the spatial isolation gate ------------------------------------------------
+
+    @Test
+    fun uniformlySaturatedFrameIsBitExactlyUntouched() {
+        // A frame filled edge-to-edge with one extreme-chroma colour (magnitude ~85, far
+        // above the global knee): the local mean equals the pixel magnitude everywhere, so
+        // the effective knee (isolationFactor * localMean) sits well above the magnitude and
+        // NOTHING compresses -- the issue #107 fix's core guarantee, at full strength.
+        val frame = filled(64, 64, 190, 75, 82)
+        val out = ChromaRollOff.apply(frame, params.copy(strength = 1.0))
+        assertTrue("uniform saturation must pass through bit-exactly", frame.argb.contentEquals(out.argb))
+    }
+
+    @Test
+    fun isolationFactorOneStillPassesUniformSaturationThrough() {
+        // The gate's lower bound: even at isolationFactor 1.0 the effective knee equals the
+        // (uniform) magnitude itself, and compression requires mag STRICTLY above the knee.
+        val frame = filled(64, 64, 190, 75, 82)
+        val out = ChromaRollOff.apply(frame, params.copy(strength = 1.0, isolationFactor = 1.0))
+        assertTrue("uniform saturation must pass through at isolationFactor 1", frame.argb.contentEquals(out.argb))
     }
 
     // --- gray pixels untouched -----------------------------------------------------
@@ -91,7 +128,7 @@ class ChromaRollOffTest {
         // R == G == B -> zero chroma magnitude, below any knee -> exact identity, even at
         // full strength and across the whole 0..255 range.
         for (v in intArrayOf(0, 30, 128, 200, 255)) {
-            val frame = saturated(8, 8, v, v, v)
+            val frame = filled(8, 8, v, v, v)
             val out = ChromaRollOff.apply(frame, params.copy(strength = 1.0))
             assertTrue("gray $v must be untouched", frame.argb.contentEquals(out.argb))
         }
@@ -114,13 +151,34 @@ class ChromaRollOffTest {
         assertThrows(IllegalArgumentException::class.java) { ChromaRollOffParams(soft = 0.0) }
         assertThrows(IllegalArgumentException::class.java) { ChromaRollOffParams(strength = 1.5) }
         assertThrows(IllegalArgumentException::class.java) { ChromaRollOffParams(strength = -0.1) }
+        assertThrows(IllegalArgumentException::class.java) { ChromaRollOffParams(isolationFactor = 0.9) }
+        assertThrows(IllegalArgumentException::class.java) { ChromaRollOffParams(neighborhoodRadius = 0) }
     }
 
     // --- helpers -------------------------------------------------------------------
 
-    private fun saturated(w: Int, h: Int, r: Int, g: Int, b: Int): Frame {
+    private fun filled(w: Int, h: Int, r: Int, g: Int, b: Int): Frame {
         val px = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
         return Frame(w, h, IntArray(w * h) { px }, timestampMillis = 1L)
+    }
+
+    /**
+     * A 4x4 extreme-chroma spot (magnitude ~85) centred at ([SPOT_CENTER], [SPOT_CENTER])
+     * on a near-gray surround (magnitude ~3): the surround keeps the spot's local mean far
+     * below `knee / isolationFactor`, so its effective knee is the global knee and the spot
+     * compresses along the ungated shoulder.
+     */
+    private fun isolatedSpot(): Frame {
+        val size = 64
+        val surround = (0xFF shl 24) or (120 shl 16) or (118 shl 8) or 116
+        val spot = (0xFF shl 24) or (190 shl 16) or (75 shl 8) or 82
+        val px = IntArray(size * size) { surround }
+        for (y in SPOT_CENTER - 2 until SPOT_CENTER + 2) {
+            for (x in SPOT_CENTER - 2 until SPOT_CENTER + 2) {
+                px[y * size + x] = spot
+            }
+        }
+        return Frame(size, size, px, timestampMillis = 1L)
     }
 
     private fun chromaMag(frame: Frame, x: Int, y: Int): Double {
@@ -132,5 +190,9 @@ class ChromaRollOffTest {
         val cr = r - yl
         val cb = b - yl
         return sqrt(cr * cr + cb * cb)
+    }
+
+    private companion object {
+        const val SPOT_CENTER = 32
     }
 }

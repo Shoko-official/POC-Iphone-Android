@@ -214,7 +214,7 @@ class BacklitRescueBoundedBaseTest {
             val r = BacklitRescue.shoulder(((px shr 16) and 0xFF) * effGain * wr)
             val g = BacklitRescue.shoulder(((px shr 8) and 0xFF) * effGain)
             val bch = BacklitRescue.shoulder((px and 0xFF) * effGain * wb)
-            out[i] = (0xFF shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or bch.toInt()
+            out[i] = (0xFF shl 24) or (r.roundToInt() shl 16) or (g.roundToInt() shl 8) or bch.roundToInt()
         }
         return out
     }

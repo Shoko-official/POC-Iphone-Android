@@ -198,6 +198,17 @@ class RenditionGoldenRegressionTest {
         //     was 2.812, ceiling 2.87); the gate restores the chart's real chroma spread and
         //     tracking returns to just UNDER its pre-shoulder level -- while the fidelity
         //     floor recovers ~6.5 dB.)
+        // UNCHANGED after [OvercastSkyMask] joined [SemanticRendering] (issue #106), seed
+        // 0xC0FFEE. The overcast prior deliberately fires on bright smooth neutral upper
+        // regions, which includes parts of the grayscale "gradients" and "highcontrast"
+        // scenes -- but it drives only the mean-preserving chroma smoothing. Measured
+        // semantic-on vs semantic-off with the prior in place:
+        //   gradients    renPSNR->clean 37.082 -> 37.084, renMAE->tgt 1.494 -> 1.492
+        //   highcontrast renPSNR->clean 34.089 -> 34.111, renMAE->tgt 2.553 -> 2.547
+        // The smoothing removes residual merged chroma speckle that the (speckle-free)
+        // target never carried, so BOTH tracking and fidelity improve marginally; "edges"
+        // (whose thin lines texture every window) and the remaining scenes are
+        // byte-identical on vs off. No floor moves. See OvercastSkyGoldenTest.
         val FLOORS = listOf(
             Floor("edges", maxMaeVsTarget = 1.74, minPsnrVsClean = 34.3),
             Floor("texture", maxMaeVsTarget = 1.71, minPsnrVsClean = 36.0),

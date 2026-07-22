@@ -903,6 +903,128 @@ object SyntheticScenes {
         return Frame(clean.width, clean.height, out, clean.timestampMillis)
     }
 
+    // --- Overcast scene (overcast-sky rendering gate) ---------------------------
+    //
+    // A dedicated GRAYSCALE-sky scene for the overcast-sky gate (OvercastSkyGoldenTest, issue
+    // #106), kept OUT of [names] so the existing golden report is unaffected. It stresses the
+    // [com.poc.camera.pipeline.OvercastSkyMask] priors the way "landscape" stresses the blue
+    // [com.poc.camera.pipeline.SkyMask]:
+    //  - an upper OVERCAST SKY band: a NEUTRAL gray vertical gradient (brighter at the top),
+    //    bright + smooth + neutral + upper -- all four overcast priors fire. The gradient
+    //    matters: the texture measure must read a smooth luma RAMP as sky, not as texture.
+    //  - a mid WALL band: an equally bright, equally NEUTRAL but clearly TEXTURED gray band
+    //    (a sunlit wall). Bright, neutrality and (partially) position all fire here, so ONLY
+    //    the texture prior separates it from the sky -- the false-positive control the gate
+    //    bakes a ceiling for.
+    //  - a lower NEUTRAL ground band: textured mid-gray (dark relative to the bright prior),
+    //    the everything-quiet control.
+
+    private const val OVERCAST_SKY_Y1 = 44
+    private const val OVERCAST_WALL_Y1 = 84
+
+    /** Sky gradient endpoints: bright at the top, still bright at the horizon, NEUTRAL gray.
+     *  The horizon value matches the wall base so no artificial luma step separates the two
+     *  bands (the texture prior alone must do it). */
+    private const val OVERCAST_SKY_TOP_LUMA = 215.0
+    private const val OVERCAST_SKY_HORIZON_LUMA = 200.0
+
+    /** Wall texture: as bright as the sky horizon, clearly textured (peak-to-peak ~40). */
+    private const val OVERCAST_WALL_LUMA = 200
+    private const val OVERCAST_WALL_TEX = 20
+
+    /** Extra CHROMA-ONLY speckle sigma injected into the SKY band of an overcast burst (per
+     *  opponent axis, pre-merge). Constructed luma-neutral (see [overcastNoisy]) so the noise
+     *  exercises the chroma smoothing WITHOUT inflating the luma-texture measure -- a gray
+     *  sky's chroma noise is what the overcast path exists to clean. */
+    private const val OVERCAST_SKY_CHROMA_NOISE = 12.0
+
+    /** The clean, noise-free overcast ground truth. */
+    fun overcastClean(): Frame {
+        val out = IntArray(SIZE * SIZE)
+        val wallTex = texturedCanvas(seed = 0x0CA5L, cell = 7, low = 0, high = 255)
+        val groundTex = texturedCanvas(seed = 0x2F91L, cell = 10, low = 0, high = 255)
+        for (y in 0 until SIZE) {
+            for (x in 0 until SIZE) {
+                val i = y * SIZE + x
+                out[i] = when {
+                    y < OVERCAST_SKY_Y1 -> {
+                        // Neutral gray vertical gradient: bright top -> bright horizon.
+                        val t = y.toDouble() / (OVERCAST_SKY_Y1 - 1)
+                        gray(lerp(OVERCAST_SKY_TOP_LUMA, OVERCAST_SKY_HORIZON_LUMA, t).roundToInt())
+                    }
+                    y < OVERCAST_WALL_Y1 -> {
+                        // Bright textured neutral wall (luma-only texture, no chroma).
+                        val t = (wallTex[i] / 255.0 - 0.5) * 2.0
+                        gray((OVERCAST_WALL_LUMA + OVERCAST_WALL_TEX * t).roundToInt().coerceIn(0, 255))
+                    }
+                    else -> {
+                        // Neutral textured ground (mid-gray, below the bright prior).
+                        val v = (118 + (groundTex[i] * 28 / 255) - 14).coerceIn(0, 255)
+                        gray(v)
+                    }
+                }
+            }
+        }
+        return frame(out)
+    }
+
+    /** Overcast sky-band bounds (x0, y0, x1, y1), half-open. */
+    fun overcastSkyBounds(): IntArray = intArrayOf(0, 0, SIZE, OVERCAST_SKY_Y1)
+
+    /** Wall-band bounds (x0, y0, x1, y1), half-open: the bright textured false-positive control. */
+    fun overcastWallBounds(): IntArray = intArrayOf(0, OVERCAST_SKY_Y1, SIZE, OVERCAST_WALL_Y1)
+
+    /** Ground-band bounds (x0, y0, x1, y1), half-open. */
+    fun overcastGroundBounds(): IntArray = intArrayOf(0, OVERCAST_WALL_Y1, SIZE, SIZE)
+
+    /**
+     * A [count]-frame noisy overcast burst: the shared sensor model everywhere plus an extra
+     * CHROMA-ONLY speckle in the sky band (see [OVERCAST_SKY_CHROMA_NOISE]), so the
+     * chroma-noise-reduction proof has real gray-sky speckle to remove while the luma-texture
+     * prior still sees the true smooth sky. Per-frame seeds derive from [baseSeed].
+     */
+    fun overcastBurst(baseSeed: Long, count: Int): List<Frame> {
+        require(count >= 1) { "count must be >= 1" }
+        val clean = overcastClean()
+        return (0 until count).map { i -> overcastNoisy(clean, baseSeed + i * SEED_STRIDE) }
+    }
+
+    /**
+     * A single overcast capture: the shared per-channel sensor model, with the sky band
+     * carrying an additional LUMA-NEUTRAL chroma speckle -- two independent Gaussian deltas
+     * on R and B with the G delta chosen so the Rec. 601 luma change is exactly 0, i.e. pure
+     * opponent-chroma noise of sigma [OVERCAST_SKY_CHROMA_NOISE] per axis.
+     */
+    private fun overcastNoisy(clean: Frame, seed: Long): Frame {
+        val rng = Lcg(seed)
+        val src = clean.argb
+        val out = IntArray(src.size)
+        for (i in src.indices) {
+            val y = i / SIZE
+            val pixel = src[i]
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            val luma = 0.299 * r + 0.587 * g + 0.114 * b
+            val sigma = sqrt(READ_NOISE * READ_NOISE + SHOT_GAIN * luma)
+            var nr = r + sigma * rng.nextGaussian()
+            var ng = g + sigma * rng.nextGaussian()
+            var nb = b + sigma * rng.nextGaussian()
+            if (y < OVERCAST_SKY_Y1) {
+                val dCr = OVERCAST_SKY_CHROMA_NOISE * rng.nextGaussian()
+                val dCb = OVERCAST_SKY_CHROMA_NOISE * rng.nextGaussian()
+                nr += dCr
+                nb += dCb
+                ng -= (0.299 * dCr + 0.114 * dCb) / 0.587
+            }
+            out[i] = (0xFF shl 24) or
+                (nr.roundToInt().coerceIn(0, 255) shl 16) or
+                (ng.roundToInt().coerceIn(0, 255) shl 8) or
+                nb.roundToInt().coerceIn(0, 255)
+        }
+        return Frame(clean.width, clean.height, out, clean.timestampMillis)
+    }
+
     private fun lerp(a: Double, b: Double, t: Double): Double = a + (b - a) * t
 
     private fun edges(): Frame {

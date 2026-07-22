@@ -1,5 +1,6 @@
 package com.poc.camera.pipeline
 
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -16,7 +17,8 @@ import kotlin.math.sqrt
  *    (before the shift cap): sky blue is deepened, foliage green enriched.
  *  - [skySmoothStrength] the in-sky blend toward the luma-guided smoothed chroma, at
  *    [skySmoothRadius]: skies show chroma noise most, so this reduces it (and smooths gradient
- *    banding) inside the sky mask while leaving the rest of the frame untouched.
+ *    banding) inside the sky masks -- blue ([SkyMask]) OR overcast ([OvercastSkyMask]) --
+ *    while leaving the rest of the frame untouched.
  *  - [foliageLumaLift] the additive luma lift (codes) for foliage at full mask: vegetation is
  *    often a touch underexposed, so its low-mid tones are lifted slightly.
  *
@@ -64,10 +66,16 @@ data class SemanticRenderingParams(
 /**
  * Semantic-region rendering: the stage that separates an iPhone-class look from a global-only
  * pipeline (issue #98). Skin is already handled by [SkinMask] (as a protection prior); this
- * stage adds SKY and FOLIAGE as rendition BOOSTS, region-targeted by [SkyMask] / [FoliageMask]:
+ * stage adds SKY and FOLIAGE as rendition BOOSTS, region-targeted by [SkyMask] /
+ * [OvercastSkyMask] / [FoliageMask]:
  *
  *  - SKY: a bounded blue DEEPENING plus a luma-guided chroma SMOOTHING (noise + gradient-band
- *    reduction) inside the sky mask -- skies carry the most visible chroma noise.
+ *    reduction) inside the sky masks -- skies carry the most visible chroma noise. The two
+ *    sky priors drive DIFFERENT subsets of that treatment (issue #106): the chroma smoothing
+ *    is weighted by `max(blueSky, overcastSky)`, so a gray overcast sky is denoised and
+ *    de-banded like a blue one, but the blue deepening is weighted by the BLUE prior ONLY --
+ *    an overcast sky must stay gray, and the smoothing is mean-preserving, so a pure-overcast
+ *    region receives no colour shift whatsoever.
  *  - FOLIAGE: a bounded green ENRICHMENT plus a small luma (shadow) lift inside the foliage
  *    mask -- vegetation is often a touch underexposed.
  *
@@ -118,10 +126,13 @@ object SemanticRendering {
     private const val B_WEIGHT = 0.114
 
     /**
-     * Returns [frame] with sky/foliage rendering applied, driven by [skyMask] and
-     * [foliageMask] (each row-major, one value per pixel in [0, 1], typically from
-     * [SkyMask.compute] / [FoliageMask.compute]). At [SemanticRenderingParams.strength] <= 0
-     * the frame is returned unchanged (bit-exact passthrough). Alpha is forced opaque.
+     * Returns [frame] with sky/foliage rendering applied, driven by [skyMask] (blue sky,
+     * typically [SkyMask.compute]), [overcastSkyMask] (gray sky, typically
+     * [OvercastSkyMask.compute]) and [foliageMask] (typically [FoliageMask.compute]), each
+     * row-major with one value per pixel in [0, 1]. The chroma smoothing is weighted by
+     * `max(skyMask, overcastSkyMask)`; the blue deepening by [skyMask] alone (a gray sky
+     * must stay gray -- see the class doc). At [SemanticRenderingParams.strength] <= 0 the
+     * frame is returned unchanged (bit-exact passthrough). Alpha is forced opaque.
      *
      * @param chunkCount row-parallel chunk count for the element-wise passes;
      *   [PipelineParallel.SERIAL_CHUNKS] forces the serial reference path.
@@ -129,6 +140,7 @@ object SemanticRendering {
     fun apply(
         frame: Frame,
         skyMask: DoubleArray,
+        overcastSkyMask: DoubleArray,
         foliageMask: DoubleArray,
         params: SemanticRenderingParams = SemanticRenderingParams.DEFAULT,
         chunkCount: Int = PipelineParallel.parallelism,
@@ -137,6 +149,7 @@ object SemanticRendering {
         val src = frame.argb
         val n = src.size
         require(skyMask.size == n) { "skyMask must have one value per pixel" }
+        require(overcastSkyMask.size == n) { "overcastSkyMask must have one value per pixel" }
         require(foliageMask.size == n) { "foliageMask must have one value per pixel" }
 
         // Opponent-space split (element-wise, row-parallel).
@@ -178,8 +191,10 @@ object SemanticRendering {
                 val fol = foliageMask[i]
                 val y = luma[i]
                 // 1. Sky chroma smoothing (mean-preserving noise/banding reduction) blended by
-                //    the sky mask and the smoothing strength.
-                val skySmooth = strength * params.skySmoothStrength * sky
+                //    EITHER sky prior -- blue or overcast -- and the smoothing strength. The
+                //    overcast prior stops here: it never feeds the deepening below, so a gray
+                //    sky is denoised without any colour shift.
+                val skySmooth = strength * params.skySmoothStrength * max(sky, overcastSkyMask[i])
                 var chB = cb[i] + skySmooth * (cbFiltered[i] - cb[i])
                 var chR = cr[i] + skySmooth * (crFiltered[i] - cr[i])
                 // 2. Bounded chroma deepening: a single scale on both chroma components (so hue

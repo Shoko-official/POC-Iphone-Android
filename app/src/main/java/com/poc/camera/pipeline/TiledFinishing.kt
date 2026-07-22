@@ -97,11 +97,13 @@ data class FinishingStats(
  * is a SINGLE [BoxBlur] of the chroma-magnitude plane, so its support is its
  * neighbourhood radius `24`; and [SemanticRendering]'s sky chroma smoothing adds `2*8 = 16`
  * at the tail. The pure stages add 0. The chain support is therefore
- * `8 + 32 + 6 + 24 + 16 = 86` px ([SUPPORT_RADIUS]). Two windowed-local pieces do NOT
+ * `8 + 32 + 6 + 24 + 16 = 86` px ([SUPPORT_RADIUS]). The windowed-local mask pieces do NOT
  * extend this, because they feed a stage as per-pixel coefficients rather than widening its
  * read radius and their own reach is inside the chain support: the [SkinMask] modulation
- * (denoised support 8, blur radius 8 -> reach 16) and the [SemanticRendering] sky/foliage
- * masks (denoised support 8, blur radius 12 -> reach 32), both under 86. The two tail
+ * (denoised support 8, blur radius 8 -> reach 16), the [SemanticRendering] sky/foliage
+ * masks (denoised support 8, blur radius 12 -> reach 32) and the [OvercastSkyMask] (denoised
+ * support 8, texture detail energy two sequential box means 2*12 = 24, mask blur 12 ->
+ * reach 44), all under 86. The two tail
  * stages DO widen the read radius in sequence: the roll-off's local reference reads a
  * radius-24 neighbourhood of the post-[Contrast] frame (reach 8+32+6 = 46 from the input,
  * so 70 total), and the sky chroma smoothing reads a `2*8 = 16` neighbourhood of the
@@ -153,11 +155,13 @@ object TiledFinishing {
      * finishing chain holds live at once. Two stages contend for the peak: [LocalToneMapper]'s
      * [GuidedFilter.selfGuided] holds the luma plane plus meanI, meanII, squares, a, b, meanA,
      * meanB and the output (~9), and a [BoxBlur] call adds two scratch planes (~11); and
-     * [SemanticRendering]'s sky chroma smoothing holds luma, cb, cr (3) while a [GuidedFilter.guided]
-     * pass over one chroma plane holds its ~9 estimator planes plus two [BoxBlur] scratch (~14).
-     * 14 covers both with a small margin. Used only by [peakBytesEstimate].
+     * [SemanticRendering]'s sky chroma smoothing, which holds luma, cb, cr and the first
+     * filtered chroma plane (4) plus the three semantic mask planes (sky, overcast, foliage)
+     * while a [GuidedFilter.guided] pass over the second chroma plane holds its ~9 estimator
+     * planes plus two [BoxBlur] scratch (4 + 3 + 11 = 18, the peak). Used only by
+     * [peakBytesEstimate].
      */
-    const val FLOAT_PLANES_PEAK: Int = 14
+    const val FLOAT_PLANES_PEAK: Int = 18
 
     /** Full-tile-size `IntArray` buffers live at once (a stage's src + out). */
     const val INT_PLANES_PEAK: Int = 2
@@ -259,9 +263,10 @@ object TiledFinishing {
      * class doc).
      *
      * [rowOffset] is the tile's first row within the full image and [imageHeight] the
-     * full-image height; both are threaded ONLY into [SemanticRendering]'s [SkyMask] position
-     * prior so a tile reproduces the whole-frame vertical weight at each absolute row (the
-     * chroma/luma priors and the sky chroma smoothing are local to the tile).
+     * full-image height; both are threaded ONLY into [SemanticRendering]'s [SkyMask] and
+     * [OvercastSkyMask] position priors so a tile reproduces the whole-frame vertical weight
+     * at each absolute row (the chroma/luma/texture priors and the sky chroma smoothing are
+     * local to the tile).
      */
     internal fun finishRegion(
         tile: Frame,
@@ -285,9 +290,10 @@ object TiledFinishing {
         // path does and the finish stays seam-free. Computed identically to FinishingPipeline
         // via the shared helper.
         val skinModulation = FinishingPipeline.skinModulation(denoised, params)
-        // Semantic sky/foliage masks, computed on the denoised tile exactly as the whole-frame
-        // path does. Their blur reach (32 px) is inside OVERLAP and the sky position prior uses
-        // the absolute row offset, so the boost is seam-consistent tile-vs-whole-frame.
+        // Semantic sky/overcast/foliage masks, computed on the denoised tile exactly as the
+        // whole-frame path does. Their reach (32 px for sky/foliage, 44 px for the overcast
+        // texture prior -- see the class doc) is inside OVERLAP and both sky position priors
+        // use the absolute row offset, so the boost is seam-consistent tile-vs-whole-frame.
         val semanticMasks = FinishingPipeline.semanticMasks(denoised, params, rowOffset, imageHeight)
         val locallyMapped = if (params.localContrast > 0.0) {
             LocalToneMapper.apply(denoised, FinishingPipeline.localToneParams(params.localContrast), skinModulation)

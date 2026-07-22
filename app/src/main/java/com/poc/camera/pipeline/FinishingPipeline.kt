@@ -62,8 +62,9 @@ package com.poc.camera.pipeline
  *
  * [semanticRendering] is the strength of the [SemanticRendering] sky/foliage rendering in
  * [0, 1] (0 = off). It runs LAST of all colour stages, AFTER [ChromaRollOff]: the [SkyMask] /
- * [FoliageMask] priors drive region-targeted BOOSTS -- a bounded blue deepening + chroma-noise
- * smoothing inside sky, a bounded green enrichment + shadow lift inside foliage. It follows
+ * [OvercastSkyMask] / [FoliageMask] priors drive region-targeted BOOSTS -- a bounded blue
+ * deepening + chroma-noise smoothing inside blue sky, the SMOOTHING ONLY inside overcast
+ * (gray) sky, a bounded green enrichment + shadow lift inside foliage. It follows
  * the roll-off deliberately: the roll-off is a whole-frame chroma-magnitude SHOULDER that
  * compresses everything past its knee, and a blue sky sits above that knee, so running the
  * deepening before the roll-off would let the shoulder compress the deliberate boost straight
@@ -73,16 +74,21 @@ package com.poc.camera.pipeline
  * "semantic rendering" that separates an iPhone-class look from a global-only pipeline (skin
  * is already handled by [skinProtection]). Like
  * [backlitRescue] / [chromaRollOff] it ships OFF in DEFAULT (0.0) and ON at 1.0 in [RENDITION].
- * The masks read EXACTLY 0 on any grayscale content (no sky/foliage chroma), so it is a strict
- * no-op on every grayscale scene and the clean-truth fidelity floors on those scenes are
- * bit-unaffected. Its region boosts are ZERO outside the masks, so ground/skin/neutral content
- * is left bit-exactly untouched. On the colour scenes the masks fire and the boost applies,
+ * The blue-sky and foliage masks read EXACTLY 0 on any grayscale content (no sky/foliage
+ * chroma), and the [OvercastSkyMask] -- which exists precisely to fire on GRAY skies (issue
+ * #106) -- drives only the mean-preserving chroma smoothing, never a colour shift, so on
+ * grayscale content the stage removes residual chroma speckle at most and cannot tint it
+ * (gray stays gray). DEFAULT keeps the stage off, so the clean-truth fidelity floors are
+ * bit-unaffected regardless. Its region boosts are ZERO outside the masks, so ground/skin/
+ * neutral-but-dark-or-textured content is left bit-exactly untouched. On the colour scenes
+ * the masks fire and the boost applies,
  * bounded to <= 12 codes per channel; the rendition axis stays consistent because
  * [com.poc.camera.pipeline.quality.RenditionTargets] derives its target from [RENDITION], so
  * the target renders the same sky/foliage the output does. It is kept OFF in DEFAULT because
  * the clean-truth fidelity axis has no matching target (a deliberate deepening reads as error
  * against the clean truth). See SemanticRenderingGoldenTest for the chroma-noise-reduction,
- * bounded-deepening, hue-stability and mask false-positive proofs.
+ * bounded-deepening, hue-stability and mask false-positive proofs, and OvercastSkyGoldenTest
+ * for the overcast-sky smoothing, gray-stays-gray and texture-prior false-positive proofs.
  */
 data class FinishingParams(
     val shadowsLift: Double,
@@ -198,14 +204,20 @@ data class FinishingParams(
          * [chromaRollOff]). See ChromaRollOffGoldenTest for the proofs.
          *
          * Finally it ships the [SemanticRendering] sky/foliage stage on at full strength
-         * ([semanticRendering] = 1.0). Like the roll-off it has no scene gate, but the
-         * [SkyMask] / [FoliageMask] priors are EXACTLY zero on grayscale content, so it is a
-         * bit-exact no-op on the five grayscale rendition scenes and moves only "colorchart"
-         * (whose blue/green patches fire the priors); [RenditionTargets] derives from these
-         * same params so the target renders the identical sky/foliage boost and the tracking
-         * floor holds. It is kept OFF in [DEFAULT] for the same reason as the roll-off -- the
+         * ([semanticRendering] = 1.0). Like the roll-off it has no scene gate. The [SkyMask] /
+         * [FoliageMask] priors are EXACTLY zero on grayscale content, so their deepening /
+         * enrichment moves only "colorchart" (whose blue/green patches fire them). The
+         * [OvercastSkyMask] prior (issue #106) deliberately CAN fire on grayscale content --
+         * bright, smooth, neutral upper regions read as gray sky -- but it drives only the
+         * mean-preserving chroma smoothing, so on the grayscale rendition scenes whose upper
+         * areas fire partially ("gradients", "highcontrast") the stage removes residual merged
+         * chroma speckle and nothing else; measured, this leaves every rendition floor intact
+         * (tracking even improves slightly, since the target derives from these same params
+         * and carries no speckle to begin with). [RenditionTargets] derives from these same
+         * params so the target renders the identical sky/foliage treatment and the tracking
+         * floors hold. It is kept OFF in [DEFAULT] for the same reason as the roll-off -- the
          * clean-truth axis has no matching target (see [semanticRendering]). See
-         * SemanticRenderingGoldenTest for the proofs.
+         * SemanticRenderingGoldenTest and OvercastSkyGoldenTest for the proofs.
          */
         val RENDITION = DEFAULT.copy(
             localContrast = REF_LOCAL_CONTRAST,
@@ -330,7 +342,7 @@ data class FinishingParams(
  *
  * [SemanticRendering] runs LAST of all, after [ChromaRollOff], as the final colour word before
  * the opaque pass. It applies bounded, region-targeted sky/foliage boosts driven by the
- * [SkyMask] / [FoliageMask] priors. It follows the roll-off deliberately: the roll-off shoulder
+ * [SkyMask] / [OvercastSkyMask] / [FoliageMask] priors. It follows the roll-off deliberately: the roll-off shoulder
  * would otherwise compress the deliberate sky deepening (a blue sky sits above the roll-off
  * knee) straight back out, so the region boost is applied after the whole-frame shoulder has
  * done its taming. Its masks are computed once on the denoised frame (shared with the tiled
@@ -409,18 +421,19 @@ object FinishingPipeline {
         return ChromaRollOff.apply(frame, ChromaRollOffParams.DEFAULT.copy(strength = params.chromaRollOff))
     }
 
-    /** The precomputed sky/foliage masks feeding [SemanticRendering], shared by the whole-frame
-     *  and tiled paths so both build the same region boosts. */
-    internal class SemanticMasks(val sky: DoubleArray, val foliage: DoubleArray)
+    /** The precomputed sky/overcast/foliage masks feeding [SemanticRendering], shared by the
+     *  whole-frame and tiled paths so both build the same region boosts. */
+    internal class SemanticMasks(val sky: DoubleArray, val overcast: DoubleArray, val foliage: DoubleArray)
 
     /**
-     * The sky/foliage likelihood masks for [denoisedFrame] under [params], or null when
-     * [FinishingParams.semanticRendering] is 0 (the stage is disabled -> the tail takes its
-     * original path unchanged). Both are computed on the DENOISED frame (cleaner chroma),
+     * The sky/overcast/foliage likelihood masks for [denoisedFrame] under [params], or null
+     * when [FinishingParams.semanticRendering] is 0 (the stage is disabled -> the tail takes
+     * its original path unchanged). All are computed on the DENOISED frame (cleaner chroma),
      * exactly as [skinModulation] is, so the whole-frame and tiled paths build the same masks.
      * [rowOffset] and [imageHeight] locate the frame within the full image for the [SkyMask]
-     * position prior: the whole-frame path passes (0, full height); a [TiledFinishing] tile
-     * passes its top row and the full-image height so its sky position prior matches.
+     * and [OvercastSkyMask] position priors: the whole-frame path passes (0, full height); a
+     * [TiledFinishing] tile passes its top row and the full-image height so its sky position
+     * priors match.
      */
     internal fun semanticMasks(
         denoisedFrame: Frame,
@@ -430,8 +443,9 @@ object FinishingPipeline {
     ): SemanticMasks? {
         if (params.semanticRendering <= 0.0) return null
         val sky = SkyMask.compute(denoisedFrame, rowOffset = rowOffset, imageHeight = imageHeight)
+        val overcast = OvercastSkyMask.compute(denoisedFrame, rowOffset = rowOffset, imageHeight = imageHeight)
         val foliage = FoliageMask.compute(denoisedFrame)
-        return SemanticMasks(sky, foliage)
+        return SemanticMasks(sky, overcast, foliage)
     }
 
     /**
@@ -445,6 +459,7 @@ object FinishingPipeline {
         return SemanticRendering.apply(
             frame,
             masks.sky,
+            masks.overcast,
             masks.foliage,
             SemanticRenderingParams.DEFAULT.copy(strength = params.semanticRendering),
         )

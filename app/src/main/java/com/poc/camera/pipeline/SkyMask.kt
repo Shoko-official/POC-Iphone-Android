@@ -45,13 +45,14 @@ package com.poc.camera.pipeline
  * the same weight the whole frame would at that row (the chroma/luma priors are local to the
  * tile, but the geometric prior must know where the tile sits in the full image).
  *
- * ### Overcast / gray sky limitation (documented by design)
+ * ### Overcast / gray sky (handled by [OvercastSkyMask])
  *
  * A gray or overcast sky has near-neutral chroma, so it FAILS the blue chroma prior and
- * reads ~0. This is accepted for this stage: a robust overcast prior would need a luminance-
- * texture cue (flat, bright, textureless upper region) rather than colour, which is left as
- * future work. The conservative failure mode -- a gray sky is simply not boosted -- is the
- * safe one.
+ * reads ~0 here -- by design, this mask stays blue-only (and therefore exactly zero on any
+ * grayscale frame). The luminance-texture cue that covers gray skies lives in
+ * [OvercastSkyMask] (issue #106): bright, low-texture, near-neutral upper regions get a
+ * membership that drives the sky chroma-noise / gradient smoothing ONLY, never the blue
+ * deepening, so an overcast sky is cleaned but stays gray.
  *
  * The raw per-pixel prior is smoothed with a [BoxBlur] of [DEFAULT_BLUR_RADIUS] and clamped,
  * so the boost applies over coherent regions rather than flickering per pixel. Pure Kotlin,

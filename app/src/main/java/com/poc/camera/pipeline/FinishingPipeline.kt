@@ -474,13 +474,11 @@ object FinishingPipeline {
      * lift is dialled by both the master strength and how strongly the scene reads as
      * backlit.
      *
-     * NOTE ON LARGE FRAMES: the rescue runs whole-frame (the detector is a global histogram
-     * and the guided base is a global edge-preserving smooth), so on a native-resolution
-     * capture that the detector DOES engage it allocates the guided filter's luma-plane
-     * intermediates over the full pixel count -- outside the bounded-memory tiling that
-     * finishes the rest of the chain. This only happens on a genuinely backlit capture under
-     * a rescue-enabled profile (DEFAULT keeps it off), so it is not on the common path;
-     * tiling the rescue's guided base for very large backlit captures is left as future work.
+     * The rescue is memory-bounded at any resolution (issue #108): the detector histogram
+     * is a cheap full-resolution pass, and above [BacklitRescue.MAX_BASE_PIXELS] the
+     * rescue computes its guided base on a bounded downsampled luma plane and interpolates
+     * the smooth gain field back up, so even a native-resolution backlit capture allocates
+     * no full-resolution double plane (see the bounded-base design in [BacklitRescue]).
      */
     internal fun applyBacklitRescue(frame: Frame, params: FinishingParams): Frame {
         if (params.backlitRescue <= 0.0) return frame

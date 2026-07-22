@@ -83,22 +83,34 @@ object LocalToneMapper {
      * proportionally less base compression and detail gain. Used by [FinishingPipeline] to
      * limit local-contrast strength inside skin regions; passing null keeps the original
      * global behaviour with no extra work.
+     *
+     * [luma] may supply the frame's precomputed Rec. 601 luma plane (issue #113: this
+     * mapper's input IS the denoised state in both finishing paths, the same state the
+     * skin/sky/foliage masks read, so the shared extraction serves it too), read-only;
+     * null derives it internally with the identical weights and expression order, so the
+     * output is bit-identical either way (see SharedLumaPlaneTest).
      */
-    fun apply(frame: Frame, params: LocalToneParams = LocalToneParams(), modulation: FloatArray? = null): Frame {
+    fun apply(
+        frame: Frame,
+        params: LocalToneParams = LocalToneParams(),
+        modulation: FloatArray? = null,
+        luma: DoubleArray? = null,
+    ): Frame {
         val src = frame.argb
-        val luma = DoubleArray(src.size) { i ->
+        require(luma == null || luma.size == src.size) { "luma must have one value per pixel" }
+        val lumaPlane = luma ?: DoubleArray(src.size) { i ->
             val pixel = src[i]
             R_WEIGHT * ((pixel shr 16) and 0xFF) +
                 G_WEIGHT * ((pixel shr 8) and 0xFF) +
                 B_WEIGHT * (pixel and 0xFF)
         }
 
-        val base = GuidedFilter.selfGuided(luma, frame.width, frame.height, params.radius, params.eps)
+        val base = GuidedFilter.selfGuided(lumaPlane, frame.width, frame.height, params.radius, params.eps)
         // Per-pixel re-application from same-index luma/base: element-wise, row-parallel.
         val out = IntArray(src.size)
         PipelineParallel.parallelRows(src.size) { start, end ->
             for (i in start until end) {
-                val inLuma = luma[i]
+                val inLuma = lumaPlane[i]
                 val detail = inLuma - base[i]
                 val compressedBase = 128.0 + (base[i] - 128.0) * (1.0 - params.baseCompression)
                 val outLuma = compressedBase + params.detailGain * detail

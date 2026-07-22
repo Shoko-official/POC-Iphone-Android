@@ -371,10 +371,14 @@ object FinishingPipeline {
      * [STAGE_WHITE_BALANCE] covers only the per-tile gain application, the estimation being
      * part of the analysis pass. The whole-frame path's [STAGE_WHITE_BALANCE] covers its
      * bounded analysis downsample + estimation + full-resolution application (issue #117).
+     * [STAGE_SHARED_LUMA] covers the one shared RGB -> Y extraction of the denoised state
+     * (issue #113, see [sharedLumaPlane]); it reports a near-zero guard time when fewer
+     * than two consumers would read the plane.
      */
     const val STAGE_BACKLIT = "backlit"
     const val STAGE_WHITE_BALANCE = "white-balance"
     const val STAGE_CHROMA_DENOISE = "chroma-denoise"
+    const val STAGE_SHARED_LUMA = "shared-luma"
     const val STAGE_SKIN_MASK = "skin-mask"
     const val STAGE_SEMANTIC_MASKS = "semantic-masks"
     const val STAGE_LOCAL_TONE = "local-tone"
@@ -428,19 +432,25 @@ object FinishingPipeline {
                 balanced
             }
         }
+        // Shared luma plane of the denoised state (issue #113), extracted ONCE and read by
+        // every consumer of that exact state -- the skin/sky/overcast/foliage priors and the
+        // local tone mapper -- replacing their per-stage RGB -> Y extraction with the same
+        // doubles. Null when fewer than two passes would consume it (each stage then derives
+        // its own luma, exactly as before).
+        val sharedLuma = timedStage(timingHook, STAGE_SHARED_LUMA) { sharedLumaPlane(denoised, params) }
         // Skin-protection modulation, computed ONCE on the cleaned (post-denoise) chroma and
         // shared by the three operators it bounds. Null when protection is off, so those
         // stages take their original path unchanged.
-        val skinModulation = timedStage(timingHook, STAGE_SKIN_MASK) { skinModulation(denoised, params) }
+        val skinModulation = timedStage(timingHook, STAGE_SKIN_MASK) { skinModulation(denoised, params, sharedLuma) }
         // Semantic sky/foliage masks, also computed ONCE on the denoised chroma and applied at
         // the tail. Null when the stage is off. The whole-frame path spans the whole image, so
         // the sky position prior uses rowOffset 0 over the full height.
         val semanticMasks = timedStage(timingHook, STAGE_SEMANTIC_MASKS) {
-            semanticMasks(denoised, params, rowOffset = 0, imageHeight = denoised.height)
+            semanticMasks(denoised, params, rowOffset = 0, imageHeight = denoised.height, luma = sharedLuma)
         }
         val locallyMapped = timedStage(timingHook, STAGE_LOCAL_TONE) {
             if (params.localContrast > 0.0) {
-                LocalToneMapper.apply(denoised, localToneParams(params.localContrast), skinModulation)
+                LocalToneMapper.apply(denoised, localToneParams(params.localContrast), skinModulation, sharedLuma)
             } else {
                 denoised
             }
@@ -489,18 +499,21 @@ object FinishingPipeline {
      * [rowOffset] and [imageHeight] locate the frame within the full image for the [SkyMask]
      * and [OvercastSkyMask] position priors: the whole-frame path passes (0, full height); a
      * [TiledFinishing] tile passes its top row and the full-image height so its sky position
-     * priors match.
+     * priors match. [luma], when non-null, is the shared luma plane of [denoisedFrame]
+     * ([sharedLumaPlane], issue #113) each mask reads instead of re-extracting its own --
+     * bit-identical either way.
      */
     internal fun semanticMasks(
         denoisedFrame: Frame,
         params: FinishingParams,
         rowOffset: Int,
         imageHeight: Int,
+        luma: DoubleArray? = null,
     ): SemanticMasks? {
         if (params.semanticRendering <= 0.0) return null
-        val sky = SkyMask.compute(denoisedFrame, rowOffset = rowOffset, imageHeight = imageHeight)
-        val overcast = OvercastSkyMask.compute(denoisedFrame, rowOffset = rowOffset, imageHeight = imageHeight)
-        val foliage = FoliageMask.compute(denoisedFrame)
+        val sky = SkyMask.compute(denoisedFrame, rowOffset = rowOffset, imageHeight = imageHeight, luma = luma)
+        val overcast = OvercastSkyMask.compute(denoisedFrame, rowOffset = rowOffset, imageHeight = imageHeight, luma = luma)
+        val foliage = FoliageMask.compute(denoisedFrame, luma = luma)
         return SemanticMasks(sky, overcast, foliage)
     }
 
@@ -551,14 +564,61 @@ object FinishingPipeline {
      * 1 (full operator effect) off skin and drops to `1 - skinProtection` (bounded effect)
      * where the [SkinMask] fires. The mask is computed on the DENOISED frame -- cleaner
      * chroma -- exactly as [FinishingPipeline.apply] and [TiledFinishing.finishRegion] both
-     * do, so the whole-frame and tiled paths build the same plane.
+     * do, so the whole-frame and tiled paths build the same plane. [luma], when non-null, is
+     * the shared luma plane of [denoisedFrame] ([sharedLumaPlane], issue #113) the mask
+     * reads instead of re-extracting its own -- bit-identical either way.
      */
-    internal fun skinModulation(denoisedFrame: Frame, params: FinishingParams): FloatArray? {
+    internal fun skinModulation(denoisedFrame: Frame, params: FinishingParams, luma: DoubleArray? = null): FloatArray? {
         if (params.skinProtection <= 0.0) return null
-        val mask = SkinMask.compute(denoisedFrame)
+        val mask = SkinMask.compute(denoisedFrame, luma = luma)
         val strength = params.skinProtection
         return FloatArray(mask.size) { (1.0 - strength * mask[it]).toFloat() }
     }
+
+    /**
+     * The shared full-resolution Rec. 601 luma plane of [denoisedFrame] (issue #113), or
+     * null when fewer than two RGB -> Y extraction passes would consume it (each consumer
+     * then derives its own luma internally, exactly as before, so nothing is computed for
+     * nothing). Six extraction passes read the IDENTICAL denoised state with the IDENTICAL
+     * double-precision Rec. 601 convention (0.299 / 0.587 / 0.114, same expression order):
+     * the [SkinMask] prior (1), the [SkyMask] prior (1), the [OvercastSkyMask] prior (2 --
+     * its [OvercastSkyMask.detailEnergy] plane and its per-pixel bright/neutrality
+     * derivations), the [FoliageMask] prior (1) and the [LocalToneMapper] base/detail split
+     * (1, its input IS the denoised frame in both finishing paths). Extracting the plane
+     * once replaces all of them with the same doubles, so sharing is a pure refactoring --
+     * bit-identical outputs, proven by SharedLumaPlaneTest and the untouched goldens.
+     *
+     * The OTHER extraction passes in the chain deliberately do NOT share it: they read
+     * DIFFERENT frame states ([BacklitDetector] the pre-rescue frame, [ChromaDenoiser] the
+     * balanced frame, [DetailEnhancer] the local-tone output, [ChromaRollOff] the
+     * post-[Contrast] frame, [SemanticRendering] the post-roll-off frame) or a different
+     * convention ([Saturation]'s integer `(299r + 587g + 114b + 500) / 1000`), and a luma
+     * plane is only shareable between consumers of the SAME state under the SAME convention.
+     */
+    internal fun sharedLumaPlane(denoisedFrame: Frame, params: FinishingParams): DoubleArray? {
+        val passes = (if (params.skinProtection > 0.0) 1 else 0) +
+            (if (params.localContrast > 0.0) 1 else 0) +
+            (if (params.semanticRendering > 0.0) 4 else 0)
+        if (passes < 2) return null
+        val src = denoisedFrame.argb
+        val luma = DoubleArray(src.size)
+        // Element-wise (row-parallel), matching the extraction loops it replaces.
+        PipelineParallel.parallelRows(src.size) { start, end ->
+            for (i in start until end) {
+                val pixel = src[i]
+                luma[i] = LUMA_R_WEIGHT * ((pixel shr 16) and 0xFF) +
+                    LUMA_G_WEIGHT * ((pixel shr 8) and 0xFF) +
+                    LUMA_B_WEIGHT * (pixel and 0xFF)
+            }
+        }
+        return luma
+    }
+
+    // Rec. 601 luma weights, matching every consumer of [sharedLumaPlane] ([SkinMask] /
+    // [SkyMask] / [OvercastSkyMask] / [FoliageMask] / [LocalToneMapper]) bit-for-bit.
+    private const val LUMA_R_WEIGHT = 0.299
+    private const val LUMA_G_WEIGHT = 0.587
+    private const val LUMA_B_WEIGHT = 0.114
 
     /**
      * Maps a [strength] in [0, 1] to [LocalToneParams], interpolating base

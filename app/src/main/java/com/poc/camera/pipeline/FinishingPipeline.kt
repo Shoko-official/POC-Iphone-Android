@@ -28,7 +28,19 @@ package com.poc.camera.pipeline
  * saturation, local contrast and sharpening inside skin so the generic rendition operators
  * cannot over-cook skin. It only ever REDUCES those operators; it never lightens, darkens
  * or shifts skin hue. On a grayscale frame the mask is all-zero, so any [skinProtection]
- * value is an exact no-op there.
+ * value is an exact no-op there. Note it does NOT bound [backlitRescue]: lifting a backlit
+ * face is the whole point of the rescue, and skin protection bounds STYLISTIC operators,
+ * not exposure recovery (see [backlitRescue]).
+ *
+ * [backlitRescue] is the MASTER strength of the adaptive [BacklitRescue] exposure lift in
+ * [0, 1] (0 = off). It is gated twice: this master strength is multiplied by the
+ * [BacklitDetector] scene strength, so the lift only engages on a scene whose luma
+ * histogram reads as backlit (dark subject under a bright background). DEFAULT keeps it OFF
+ * (0.0): the clean-truth fidelity floors compare against a clean truth where any lift reads
+ * as error, so the fidelity axis must not run it. [RENDITION] ships it at 1.0 with the
+ * detector gating engagement, so a genuinely backlit capture is rescued while every
+ * non-backlit scene is left bit-exactly untouched. Unlike the other stylistic strengths it
+ * is deliberately NOT reduced by [skinProtection].
  */
 data class FinishingParams(
     val shadowsLift: Double,
@@ -40,6 +52,7 @@ data class FinishingParams(
     val detailEnhance: Double = 0.0,
     val whiteBalance: Double = 0.0,
     val skinProtection: Double = 0.0,
+    val backlitRescue: Double = 0.0,
 ) {
     companion object {
         /**
@@ -121,11 +134,18 @@ data class FinishingParams(
          * (`RenditionTargets`), not against the clean truth, so the stronger rendition is
          * measured as tracking the intended look rather than as fidelity error. The
          * existing clean-truth golden suites keep running [DEFAULT] and stay untouched.
-         * No camera/UI stage selects this profile yet; wiring it into a preset is issue #46.
+         *
+         * It additionally ships the adaptive [BacklitRescue] on at full master strength
+         * ([backlitRescue] = 1.0). The [BacklitDetector] gates engagement, so a genuinely
+         * backlit capture is rescued while every non-backlit scene (including every existing
+         * rendition/fidelity golden scene) reads a detector strength of 0 and is left
+         * bit-exactly untouched -- which is why enabling it here does not move any existing
+         * floor. See BacklitRescueGoldenTest for the lift, halo and detector-quiet proofs.
          */
         val RENDITION = DEFAULT.copy(
             localContrast = REF_LOCAL_CONTRAST,
             detailEnhance = REF_DETAIL_ENHANCE,
+            backlitRescue = 1.0,
         )
 
         /**
@@ -163,8 +183,19 @@ data class FinishingParams(
  * curve, then luma-preserving saturation, then pivot contrast. Returns a new [Frame]
  * with the source dimensions and timestamp and alpha forced opaque.
  *
- * Ordering rationale: [WhiteBalance] runs FIRST of all, on the raw merged data, so the
- * colour cast is neutralised before any later stage computes statistics from the colour.
+ * Ordering rationale: [BacklitRescue] runs FIRST of all, before even [WhiteBalance], and
+ * on the whole frame ahead of the tiled/whole-frame split. It deliberately RESHAPES the
+ * luma distribution (lifting a dark subject toward the midtones), and every downstream
+ * stage that derives a global statistic from the frame -- the [WhiteBalance] gray-world /
+ * highlight cues, the [DetailEnhancer] coring knee -- must see the post-lift distribution,
+ * not the pre-lift one, or those stats would be estimated from an image the user never
+ * sees. Running it before the split also means the tiled path finishes the already-rescued
+ * frame, so its per-tile stats stay consistent with the whole-frame path. It is gated by
+ * the [BacklitDetector], so on a non-backlit scene it is a bit-exact passthrough and the
+ * rest of the chain is byte-for-byte unchanged.
+ *
+ * Then [WhiteBalance] runs, on the (rescued) merged data, so the colour cast is neutralised
+ * before any later stage computes statistics from the colour.
  * In particular it precedes [ChromaDenoiser]: chroma denoise reasons in an opponent
  * (luma/chroma) space, and a cast biases the chroma planes, so correcting the cast first
  * lets the denoiser see the true, cast-free chroma. [ChromaDenoiser] then runs, on the
@@ -199,13 +230,18 @@ object FinishingPipeline {
     const val TILED_THRESHOLD_PIXELS: Long = 9_000_000L
 
     fun apply(frame: Frame, params: FinishingParams = FinishingParams.DEFAULT): Frame {
-        if (frame.width.toLong() * frame.height.toLong() >= TILED_THRESHOLD_PIXELS) {
-            return TiledFinishing.apply(frame, params)
+        // Backlit rescue runs FIRST, on the whole frame, ahead of the tiled/whole-frame
+        // split so both paths finish the already-rescued frame with consistent global stats
+        // (see the class-level ordering rationale). On a non-backlit scene this is a bit-exact
+        // passthrough (rescued === frame), so the untouched-scene contract holds.
+        val rescued = applyBacklitRescue(frame, params)
+        if (rescued.width.toLong() * rescued.height.toLong() >= TILED_THRESHOLD_PIXELS) {
+            return TiledFinishing.apply(rescued, params)
         }
         val balanced = if (params.whiteBalance > 0.0) {
-            WhiteBalance.apply(frame, params.whiteBalance)
+            WhiteBalance.apply(rescued, params.whiteBalance)
         } else {
-            frame
+            rescued
         }
         val denoised = if (params.chromaDenoise > 0.0) {
             ChromaDenoiser.apply(balanced, params.chromaDenoise)
@@ -230,6 +266,31 @@ object FinishingPipeline {
         val saturated = Saturation.apply(toned, params.saturation, skinModulation)
         val contrasted = Contrast.apply(saturated, params.contrast)
         return forceOpaque(contrasted)
+    }
+
+    /**
+     * Applies the adaptive [BacklitRescue] to [frame] when [FinishingParams.backlitRescue] is
+     * on, gating engagement with the [BacklitDetector] scene strength. Returns [frame]
+     * UNCHANGED (same reference, bit-exact) when the master strength is 0 or the detector
+     * reports the scene is not backlit, so a non-backlit capture is left completely
+     * untouched. The effective engagement is `backlitRescue * detector.strength`, so the
+     * lift is dialled by both the master strength and how strongly the scene reads as
+     * backlit.
+     *
+     * NOTE ON LARGE FRAMES: the rescue runs whole-frame (the detector is a global histogram
+     * and the guided base is a global edge-preserving smooth), so on a native-resolution
+     * capture that the detector DOES engage it allocates the guided filter's luma-plane
+     * intermediates over the full pixel count -- outside the bounded-memory tiling that
+     * finishes the rest of the chain. This only happens on a genuinely backlit capture under
+     * a rescue-enabled profile (DEFAULT keeps it off), so it is not on the common path;
+     * tiling the rescue's guided base for very large backlit captures is left as future work.
+     */
+    internal fun applyBacklitRescue(frame: Frame, params: FinishingParams): Frame {
+        if (params.backlitRescue <= 0.0) return frame
+        val strength = BacklitDetector.detect(frame).strength
+        val engagement = params.backlitRescue * strength
+        if (engagement <= 0.0) return frame
+        return BacklitRescue.apply(frame, BacklitRescueParams.DEFAULT, engagement)
     }
 
     /**

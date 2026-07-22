@@ -144,13 +144,33 @@ class RenditionGoldenRegressionTest {
         // and the target is a clear departure from clean (tgtMAE > 2). The PSNR-vs-clean
         // drop is the deliberate look; the sanity floor sits ~2% under the RENDITION value
         // (well below DEFAULT), guarding against the look degenerating.
+        //
+        // RE-BASELINED (colorchart only) after the [ChromaRollOff] shoulder was added to
+        // FinishingParams.RENDITION (chromaRollOff = 1.0), issue #97, seed 0xC0FFEE. The
+        // roll-off is a WHOLE-FRAME chroma-magnitude shoulder (knee 30, soft 18): it is a
+        // no-op wherever chroma magnitude sits at or under the knee, so the five grayscale /
+        // low-chroma scenes are byte-unchanged and their floors are LEFT UNTOUCHED. Only
+        // "colorchart" -- 36 patches of intentionally EXTREME chroma (magnitude up to ~116,
+        // far past the knee) -- is moved. RenditionTargets derives its target from these same
+        // RENDITION params, so the target compresses the SAME chroma the output does; the
+        // axis stays self-consistent and colorchart TRACKING actually improves:
+        //   colorchart renMAE->tgt : 2.792 -> 2.410  (roll-off reduces chroma variance;
+        //                                              ceiling tightened to actual*1.02)
+        //   colorchart tgtMAE->clean: 4.591 -> 10.668 (target departs further from clean;
+        //                                              non-vacuous gate strengthens)
+        //   colorchart renPSNR->clean: 31.069 -> 23.804 (the deliberate look's fidelity cost)
+        // The renPSNR-vs-clean drop is exactly the "fidelity cost of the deliberate look" this
+        // sanity floor is documented to move with (a whole-frame shoulder desaturates the
+        // pathologically all-saturated synthetic chart; a real photo is not uniformly extreme-
+        // chroma). Tracking and non-vacuous-target both improve, confirming it is the intended
+        // look and not a degeneration. Floor lowered to actual*0.98; every other scene flat.
         val FLOORS = listOf(
             Floor("edges", maxMaeVsTarget = 1.74, minPsnrVsClean = 34.3),
             Floor("texture", maxMaeVsTarget = 1.71, minPsnrVsClean = 36.0),
             Floor("gradients", maxMaeVsTarget = 1.50, minPsnrVsClean = 36.2),
             Floor("lowlight", maxMaeVsTarget = 1.29, minPsnrVsClean = 34.1),
             Floor("highcontrast", maxMaeVsTarget = 2.50, minPsnrVsClean = 33.5),
-            Floor("colorchart", maxMaeVsTarget = 2.87, minPsnrVsClean = 29.8),
+            Floor("colorchart", maxMaeVsTarget = 2.46, minPsnrVsClean = 23.3),
         )
     }
 }

@@ -43,6 +43,11 @@ object BurstMergePipeline {
      */
     fun merge(frames: List<Frame>, nightParams: NightMergeParams? = null): MergeResult {
         require(frames.isNotEmpty()) { "frames must not be empty" }
+        val width = frames.first().width
+        val height = frames.first().height
+        require(frames.all { it.width == width && it.height == height }) {
+            "all frames must share dimensions"
+        }
         if (frames.size == 1) {
             return MergeResult(
                 merged = frames.first(),

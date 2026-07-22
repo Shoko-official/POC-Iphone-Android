@@ -47,12 +47,22 @@ class TileAligner(
         val dy: DoubleArray,
     ) {
         /** Bilinearly interpolated x offset for reference pixel (px, py). */
-        fun offsetXAt(px: Int, py: Int): Double = interpolate(dx, px, py)
+        fun offsetXAt(px: Int, py: Int): Double = interpolate(dx, px.toDouble(), py.toDouble())
 
         /** Bilinearly interpolated y offset for reference pixel (px, py). */
-        fun offsetYAt(px: Int, py: Int): Double = interpolate(dy, px, py)
+        fun offsetYAt(px: Int, py: Int): Double = interpolate(dy, px.toDouble(), py.toDouble())
 
-        private fun interpolate(grid: DoubleArray, px: Int, py: Int): Double {
+        /**
+         * [offsetXAt] at a FRACTIONAL reference position, for scatter-side consumers
+         * ([SuperResolution]) that must evaluate the field at a computed, non-integer
+         * reference coordinate.
+         */
+        fun offsetXAt(px: Double, py: Double): Double = interpolate(dx, px, py)
+
+        /** [offsetYAt] at a fractional reference position (see [offsetXAt]). */
+        fun offsetYAt(px: Double, py: Double): Double = interpolate(dy, px, py)
+
+        private fun interpolate(grid: DoubleArray, px: Double, py: Double): Double {
             // Tile c is centred at c*tileSize + tileSize/2, so this maps a pixel to
             // fractional tile-centre coordinates; corners are clamped for a smooth,
             // seam-free field that extends flat past the border tiles.

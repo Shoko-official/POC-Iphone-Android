@@ -11,7 +11,8 @@ package com.poc.camera.pipeline
  * frame, so partial-overlap offsets are compared fairly.
  *
  * Offset convention: an offset (dx, dy) means reference pixel (x, y) corresponds
- * to frame pixel (x + dx, y + dy); [FrameMerger] uses the same convention.
+ * to frame pixel (x + dx, y + dy); [TileAligner] and [RobustFrameMerger] use the
+ * same convention.
  *
  * Cost per frame is bounded by
  *   (2*coarseRadius+1)^2 * Nc + (levels-1) * (2*refineRadius+1)^2 * N

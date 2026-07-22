@@ -297,7 +297,11 @@ object BacklitRescue {
         // Bilinear sample coordinates: down sample ox is the mean of source columns
         // [ox*factor, ox*factor + factor), whose center is ox*factor + (factor-1)/2, so a
         // full-resolution x maps to (x - (factor-1)/2) / factor in down space -- block
-        // centers land exactly on integer down coordinates -- clamped at the borders.
+        // centers land exactly on integer down coordinates -- clamped at the borders. A
+        // PARTIAL last block (non-dividing dimension) truly centers up to (factor-1)/2
+        // source px inside the assumed uniform center; the mapping keeps the uniform grid
+        // because the gain field is smooth and the mismatch is confined to the last
+        // row/column (measured harmless by the bounded-base remainder-dimensions test).
         // Column indices/fractions are shared by every row, so they are precomputed once.
         val halfBlock = (factor - 1) * 0.5
         val x0Idx = IntArray(width)

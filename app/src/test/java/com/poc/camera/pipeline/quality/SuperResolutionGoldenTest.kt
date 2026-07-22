@@ -15,14 +15,15 @@ import kotlin.math.abs
  * [SyntheticScenes]; the measurements in [SuperResolutionQualityReport].
  *
  * The numbers below are MEASURED baselines of the current implementation (captured
- * 2026-07-20) with generous tolerance -- a regression tripwire, not a tight SLA. Do not
- * loosen them without an explicit, justified reason.
+ * 2026-07-23, after the issue #125 reference-coordinate splat lookup fix nudged the
+ * zero-global-shift actuals by a few hundredths) with generous tolerance -- a regression
+ * tripwire, not a tight SLA. Do not loosen them without an explicit, justified reason.
  *
  * Measured at SEED:
- *   above-Nyquist bar amplitude   SR 21.98  vs bilinear reference 4.64  -> factor 4.73x
- *   near-Nyquist control amplitude SR 22.18 vs bilinear reference 19.97 (both resolve it)
- *   full-scene MAE vs 2x truth     SR 4.87  vs bilinear-of-merged 10.03
- *   ghost moved-region mean        SR 94.96 vs reference upsample 94.75 (block 235 excluded)
+ *   above-Nyquist bar amplitude   SR 22.18  vs bilinear reference 4.64  -> factor 4.78x
+ *   near-Nyquist control amplitude SR 22.21 vs bilinear reference 19.97 (both resolve it)
+ *   full-scene MAE vs 2x truth     SR 4.81  vs bilinear-of-merged 10.03
+ *   ghost moved-region mean        SR 95.10 vs reference upsample 94.91 (block 235 excluded)
  */
 class SuperResolutionGoldenTest {
 

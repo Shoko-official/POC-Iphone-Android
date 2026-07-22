@@ -33,6 +33,10 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
         hdrVideoEnabled = prefs.getBoolean(KEY_HDR_VIDEO_ENABLED, CameraSettingsData.DEFAULT.hdrVideoEnabled),
         videoQualityName = prefs.getString(KEY_VIDEO_QUALITY, null),
         verboseTimings = prefs.getBoolean(KEY_VERBOSE_TIMINGS, CameraSettingsData.DEFAULT.verboseTimings),
+        unprocessedCapture = prefs.getBoolean(
+            KEY_UNPROCESSED_CAPTURE,
+            CameraSettingsData.DEFAULT.unprocessedCapture,
+        ),
     )
 
     override fun save(data: CameraSettingsData) {
@@ -48,6 +52,7 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
             putBoolean(KEY_HDR_VIDEO_ENABLED, data.hdrVideoEnabled)
             putString(KEY_VIDEO_QUALITY, data.videoQuality.name)
             putBoolean(KEY_VERBOSE_TIMINGS, data.verboseTimings)
+            putBoolean(KEY_UNPROCESSED_CAPTURE, data.unprocessedCapture)
         }
     }
 
@@ -64,5 +69,6 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
         private const val KEY_HDR_VIDEO_ENABLED = "hdr_video_enabled"
         private const val KEY_VIDEO_QUALITY = "video_quality"
         private const val KEY_VERBOSE_TIMINGS = "verbose_timings"
+        private const val KEY_UNPROCESSED_CAPTURE = "unprocessed_capture"
     }
 }

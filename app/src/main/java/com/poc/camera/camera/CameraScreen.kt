@@ -338,7 +338,7 @@ private fun CameraCaptureScreen(
     var burstController by remember { mutableStateOf<BurstController?>(null) }
     var exposureController by remember { mutableStateOf<ExposureController?>(null) }
     // Capture/processing queue (issue #86): isCapturing mirrors BurstController.isArmed - the
-    // camera hardware is busy, so the shutter/burst button/volume key MUST stay disabled (see
+    // camera hardware is busy, so the shutter/volume key MUST stay disabled (see
     // ProcessingQueuePolicy.canCapture). processingCount is decoupled from that: it counts
     // merge/segment/finish/save jobs running on Dispatchers.Default, so once a burst's frames
     // are collected (BurstController's completion callback), a new capture can be armed
@@ -412,7 +412,6 @@ private fun CameraCaptureScreen(
     val videoModeLabel = stringResource(R.string.mode_video)
     val cinematicModeLabel = stringResource(R.string.mode_cinematic)
     val portraitModeLabel = stringResource(R.string.mode_portrait)
-    val burstButtonLabel = stringResource(R.string.burst_button)
     val burstMergeSuccessMessage = stringResource(R.string.burst_merge_success)
     val hdrBurstMergeSuccessMessage = stringResource(R.string.burst_hdr_merge_success)
     val superResolutionSuccessMessage = stringResource(R.string.burst_super_resolution_success)
@@ -568,18 +567,19 @@ private fun CameraCaptureScreen(
     // Portrait capture (issue #80): a single shutter tap always runs burst -> merge ->
     // segment -> bokeh -> finish -> save; there is no separate "quick shot" affordance in
     // this mode (a single un-merged frame would defeat the point of a clean subject/
-    // background split - see the empty SecondaryControlSlotWidth box for Portrait below,
-    // unlike Photo's optional Burst button). HDR burst, night mode and super-resolution are
-    // all ignored here - Portrait always merges a plain single-EV BurstController.arm()
-    // burst with BurstMergePipeline regardless of what those toggles are set to (SIMPLIFY
-    // decision, issue #80). BokehRenderer runs BEFORE FinishingPipeline: the defocus reads
-    // the merged, still scene-referred-ish data, consistent with FinishingPipeline's own
-    // stage-ordering rationale of running rendition (tone/saturation/contrast) last, over
-    // effects already baked in - so the bokeh itself isn't re-tonemapped by the look/preset
-    // the user picked. Mirrors mergeAndSave's structure below (Photo's HDR/night/SR burst
-    // dispatch) but is kept as its own function rather than folded into it, since the
-    // post-merge step (segment + conditional bokeh) and the distinct no-subject snackbar
-    // have no equivalent there.
+    // background split - see the empty SecondaryControlSlotWidth box for Portrait below).
+    // Photo's shutter now runs the equivalent burst -> merge -> finish -> save flow too
+    // (issue #101, see startPhotoCapture below), but HDR burst, night mode and
+    // super-resolution are all ignored here - Portrait always merges a plain single-EV
+    // BurstController.arm() burst with BurstMergePipeline regardless of what those toggles
+    // are set to (SIMPLIFY decision, issue #80). BokehRenderer runs BEFORE FinishingPipeline:
+    // the defocus reads the merged, still scene-referred-ish data, consistent with
+    // FinishingPipeline's own stage-ordering rationale of running rendition (tone/saturation/
+    // contrast) last, over effects already baked in - so the bokeh itself isn't re-tonemapped
+    // by the look/preset the user picked. Mirrors startPhotoCapture's mergeAndSave structure
+    // (Photo's HDR/night/SR burst dispatch) but is kept as its own function rather than
+    // folded into it, since the post-merge step (segment + conditional bokeh) and the
+    // distinct no-subject snackbar have no equivalent there.
     fun startPortraitCapture() {
         val controller = burstController ?: return
         val capture = imageCapture ?: return
@@ -735,6 +735,258 @@ private fun CameraCaptureScreen(
         }
     }
 
+    // Photo capture (issue #101): the shutter is now the processed path. A single tap runs
+    // the same burst -> merge (by settings toggles) -> finish -> save flow the old, now-removed
+    // Burst button used - this used to be an opt-in secondary control; it is the ONLY photo
+    // path unless the "Unprocessed single-shot capture" developer setting reverts the shutter
+    // to the raw PhotoCapture.capture path below (see onShutterPressed). Saved with the
+    // standard "IMG_" prefix (PhotoMediaStoreValuesFactory.DEFAULT_PREFIX) rather than the
+    // burst-only "MRG_" of before: every photo capture goes through this path now, so there is
+    // no longer a distinct "merged vs. plain" subset of captures to prefix differently - see
+    // MergedPhotoSaver's own doc, which retires MRG_ entirely.
+    fun startPhotoCapture() {
+        val controller = burstController ?: return
+        val capture = imageCapture ?: return
+        // Defense in depth (issue #86, carried over from the old Burst button): the
+        // ShutterButton's own `enabled` already keeps an on-screen tap from reaching here
+        // while the queue is full, but the hardware volume-key path calls this function
+        // directly and bypasses that Compose-level gate entirely - see
+        // startPortraitCapture's matching comment.
+        if (!ProcessingQueuePolicy.canCapture(isCapturing, processingCount)) return
+        haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+        isCapturing = true
+        currentProcessingStage = ProcessingStage.Capturing
+        // Selfie mirroring (issue #88): snapshot the facing being captured right now, not
+        // whatever lensFacing reads once this burst's merge finishes - see
+        // startPortraitCapture's matching captureLensFacing comment for why that matters.
+        val captureLensFacing = lensFacing
+        val frameCapture = BurstController.FrameCapture { onResult ->
+            BurstImageCapture.acquire(capture, burstCaptureExecutor) { acquireResult ->
+                onResult(
+                    acquireResult.map { jpeg ->
+                        { BurstImageCapture.decode(jpeg, maxBurstPixels) }
+                    },
+                )
+            }
+        }
+        val exposure = exposureController
+
+        // Merge (single-EV or HDR) off the main thread, then finish, persist and report;
+        // shared by every dispatch branch below. spans carries the capture/decode sums
+        // BurstController already measured; this closure fills in merge/finish/save around
+        // its own stage transitions and logs+optionally shows the full breakdown.
+        // captureLensFacing is threaded in explicitly rather than read late here - see
+        // startPortraitCapture's matching comment on why: the flip-camera chip stays enabled
+        // during background processing.
+        val mergeAndSave: (
+            spans: CaptureSpans,
+            captureLensFacing: LensFacing,
+            produce: suspend () -> Pair<Frame, String>,
+        ) -> Unit =
+            { spans, mergeLensFacing, produce ->
+                // Snapshot once at merge start: if the user dismisses the guided banner
+                // mid-burst, this capture finishes as a normal one.
+                val guidedCaptureActive = guidedStep == GuidedCompareStep.AwaitingCapture
+                scope.launch(Dispatchers.Default) {
+                    // Frames are collected: the camera is free again, so a new capture can
+                    // be armed immediately while this one merges - the processing queue
+                    // (issue #86) takes over from here via processingCount instead of
+                    // isCapturing.
+                    withContext(Dispatchers.Main) {
+                        isCapturing = false
+                        processingCount++
+                        currentProcessingStage = ProcessingStage.Merging
+                    }
+                    try {
+                        val mergeStart = System.currentTimeMillis()
+                        val (rawMerged, baseMessage) = produce()
+                        // Selfie mirroring (issue #88): mirrored ONCE here, on the final
+                        // merged geometry (after SR's 2x output too), before finishing - so
+                        // the RAW_ comparison save below (which reuses this same `merged`)
+                        // and the IMG_ save stay consistent. See Frame.mirrorHorizontal's
+                        // KDoc and startPortraitCapture's matching comment for the rationale
+                        // and where Portrait applies the same rule.
+                        val merged = if (mergeLensFacing == LensFacing.Front) {
+                            rawMerged.mirrorHorizontal()
+                        } else {
+                            rawMerged
+                        }
+                        val mergeMillis = System.currentTimeMillis() - mergeStart
+                        // Finishing (tone/saturation/contrast) is optional and only ever
+                        // applies to the merged burst frame. Night captures use the night
+                        // finishing profile, regardless of preset; every other merge
+                        // (standard or HDR) uses the user's chosen rendition preset.
+                        val finishingParams = if (settings.nightModeEnabled) {
+                            NightPipeline.FINISHING_PARAMS
+                        } else {
+                            settings.finishingPreset.params
+                        }
+                        withContext(Dispatchers.Main) {
+                            currentProcessingStage = ProcessingStage.Finishing
+                        }
+                        val finishStart = System.currentTimeMillis()
+                        val output = if (settings.applyFinishingToMergedPhotos) {
+                            FinishingPipeline.apply(merged, finishingParams)
+                        } else {
+                            merged
+                        }
+                        val finishMillis = System.currentTimeMillis() - finishStart
+                        withContext(Dispatchers.Main) {
+                            currentProcessingStage = ProcessingStage.Saving
+                        }
+                        val saveStart = System.currentTimeMillis()
+                        val processedUri = MergedPhotoSaver.save(
+                            context,
+                            output,
+                            prefix = PhotoMediaStoreValuesFactory.DEFAULT_PREFIX,
+                            exif = ExifMetadata(
+                                captureTimestampMillis = output.timestampMillis,
+                                widthPx = output.width,
+                                heightPx = output.height,
+                            ),
+                        )
+                        val saveMillis = System.currentTimeMillis() - saveStart
+                        val finalSpans = spans.copy(
+                            mergeMillis = mergeMillis,
+                            finishMillis = finishMillis,
+                            saveMillis = saveMillis,
+                        )
+                        Log.d(TAG, "Capture breakdown: ${finalSpans.formatBreakdown()}")
+                        val message = if (settings.verboseTimings) {
+                            "$baseMessage (${finalSpans.formatBreakdown()})"
+                        } else {
+                            baseMessage
+                        }
+                        // A guided-comparison capture always fills slot A with the
+                        // processed result and leaves slot B unset until the user picks the
+                        // reference photo on the Compare screen. Otherwise, persist the
+                        // unprocessed merge input, as-is, for on-device A/B comparison when
+                        // the user opted in via settings.
+                        val capturedPair = if (guidedCaptureActive) {
+                            ComparePair(processedUri = processedUri, referenceUri = null)
+                        } else if (settings.saveComparisonPair) {
+                            val referenceUri = MergedPhotoSaver.save(
+                                context,
+                                merged,
+                                prefix = MergedPhotoSaver.RAW_PREFIX,
+                                exif = ExifMetadata(
+                                    captureTimestampMillis = merged.timestampMillis,
+                                    widthPx = merged.width,
+                                    heightPx = merged.height,
+                                ),
+                            )
+                            ComparePair(processedUri = processedUri, referenceUri = referenceUri)
+                        } else {
+                            null
+                        }
+                        withContext(Dispatchers.Main) {
+                            processingCount = (processingCount - 1).coerceAtLeast(0)
+                            if (processingCount == 0) currentProcessingStage = null
+                            lastCapture = LastCapture(processedUri, CaptureMediaType.Photo)
+                            if (guidedCaptureActive && capturedPair != null) {
+                                onComparePairCaptured(capturedPair)
+                                onGuidedCaptureCompleted()
+                            } else if (capturedPair != null) {
+                                onComparePairCaptured(capturedPair)
+                                val result = snackbarHostState.showSnackbar(
+                                    message = message,
+                                    actionLabel = compareActionLabel,
+                                )
+                                if (result == SnackbarResult.ActionPerformed) {
+                                    onOpenCompare()
+                                }
+                            } else {
+                                snackbarHostState.showSnackbar(message)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            processingCount = (processingCount - 1).coerceAtLeast(0)
+                            if (processingCount == 0) currentProcessingStage = null
+                            snackbarHostState.showSnackbar(burstMergeFailureMessage)
+                        }
+                    }
+                }
+            }
+
+        if (settings.nightModeEnabled) {
+            // Night mode takes priority over HDR: a single-EV long burst merged with the
+            // night profile. When both switches are on, HDR is skipped for this capture and
+            // the standard merge snackbar reflects that night ran.
+            controller.arm(frameCapture, burstDecodeExecutor) { burst ->
+                Log.d(
+                    TAG,
+                    "Night burst captured ${burst.frames.size} frames " +
+                        "in ${burst.captureSpanMillis} ms",
+                )
+                mergeAndSave(burst.spans, captureLensFacing) {
+                    val result = NightPipeline.merge(burst.frames)
+                    result.merged to String.format(
+                        burstMergeSuccessMessage,
+                        result.usedFrameCount,
+                        result.merged.width,
+                        result.merged.height,
+                    )
+                }
+            }
+        } else if (settings.hdrBurstEnabled && exposure != null) {
+            controller.armBracketed(
+                steps = exposure.steps,
+                framesPerEv = exposure.framesPerEv,
+                setExposureIndex = exposure.setIndexAndAwait,
+                captureFrame = frameCapture,
+                decodeExecutor = burstDecodeExecutor,
+            ) { burst ->
+                Log.d(
+                    TAG,
+                    "HDR burst captured ${burst.frames.size} frames " +
+                        "in ${burst.captureSpanMillis} ms",
+                )
+                mergeAndSave(burst.spans, captureLensFacing) {
+                    val result = HdrMergePipeline.merge(burst.frames, burst.evs)
+                    result.fused to String.format(
+                        hdrBurstMergeSuccessMessage,
+                        result.usedFrameCount,
+                        result.fused.width,
+                        result.fused.height,
+                    )
+                }
+            }
+        } else if (settings.superResolutionEnabled) {
+            // Standard single-EV burst super-resolved onto a doubled grid. Night and HDR
+            // are handled above and take priority; SR runs only on the plain still path.
+            controller.arm(frameCapture, burstDecodeExecutor) { burst ->
+                Log.d(
+                    TAG,
+                    "SR burst captured ${burst.frames.size} frames " +
+                        "in ${burst.captureSpanMillis} ms",
+                )
+                mergeAndSave(burst.spans, captureLensFacing) {
+                    val result = SuperResolution.superResolve(burst.frames)
+                    result.superResolved to String.format(
+                        superResolutionSuccessMessage,
+                        result.usedFrameCount,
+                        result.superResolved.width,
+                        result.superResolved.height,
+                    )
+                }
+            }
+        } else {
+            controller.arm(frameCapture, burstDecodeExecutor) { burst ->
+                Log.d(TAG, "Burst captured ${burst.frames.size} frames in ${burst.captureSpanMillis} ms")
+                mergeAndSave(burst.spans, captureLensFacing) {
+                    val result = BurstMergePipeline.merge(burst.frames)
+                    result.merged to String.format(
+                        burstMergeSuccessMessage,
+                        result.usedFrameCount,
+                        result.merged.width,
+                        result.merged.height,
+                    )
+                }
+            }
+        }
+    }
+
     // The shutter's primary action, shared by the on-screen ShutterButton and the hardware
     // volume-key path below (issue #73) - a plain local lambda (recreated every recomposition,
     // like the inline onClick it replaces) rather than a remembered reference, since it closes
@@ -780,20 +1032,19 @@ private fun CameraCaptureScreen(
             }
         } else if (mode == CameraMode.Portrait) {
             startPortraitCapture()
-        } else {
-            // Selfie mirroring (issue #88) does NOT apply here. This is Photo's plain single
-            // tap: CameraX's ImageCapture.takePicture writes the JPEG straight to disk itself
+        } else if (settings.unprocessedCapture) {
+            // Developer escape hatch (issue #101): reverts the shutter to the old raw
+            // CameraX path for A/B comparison and debugging against the normal processed
+            // flow below. Selfie mirroring (issue #88) does NOT apply here: CameraX's
+            // ImageCapture.takePicture writes the JPEG straight to disk itself
             // (PhotoCapture never sees decoded pixels to mirror), unlike every other photo
-            // path (burst/HDR/night/SR merges and Portrait), which all pass their merged Frame
-            // through Frame.mirrorHorizontal before saving. CameraX 1.5's
-            // ImageCapture.Builder.setMirrorMode exists, but its effect on the JPEG output was
-            // left undocumented in this project's own findings (issue #71) - shipping an
-            // untested, per-device-unknown mirror on the one path we don't control the pixels
-            // for would trade a known, honest inconsistency for an unverified one. So: a
-            // front-camera single tap keeps CameraX's un-mirrored platform default; a
-            // front-camera burst/HDR/night/SR/Portrait capture is mirrored to match the
-            // preview. Documented, not hidden - users who want mirrored selfies should use a
-            // burst-based mode.
+            // path (burst/HDR/night/SR merges and Portrait), which all pass their merged
+            // Frame through Frame.mirrorHorizontal before saving. CameraX 1.5's
+            // ImageCapture.Builder.setMirrorMode exists, but its effect on the JPEG output
+            // was left undocumented in this project's own findings (issue #71) - shipping
+            // an untested, per-device-unknown mirror on the one path we don't control the
+            // pixels for would trade a known, honest inconsistency for an unverified one.
+            // Documented, not hidden.
             val capture = imageCapture ?: return@shutterAction
             haptics.performHapticFeedback(HapticFeedbackType.Confirm)
             PhotoCapture.capture(
@@ -813,6 +1064,11 @@ private fun CameraCaptureScreen(
                     }
                 },
             )
+        } else {
+            // Photo mode's normal path (issue #101): the shutter IS the processed path -
+            // burst -> merge (by settings toggles) -> finish -> save, same as Portrait's
+            // shutter and the old, now-removed Burst button. See startPhotoCapture above.
+            startPhotoCapture()
         }
     }
 
@@ -1323,263 +1579,14 @@ private fun CameraCaptureScreen(
                         modifier = Modifier.width(SecondaryControlSlotWidth),
                         contentAlignment = Alignment.Center,
                     ) {
-                        if (mode == CameraMode.Photo) {
-                            // Merge (single-EV or HDR) off the main thread, then finish,
-                            // persist and report; shared by both burst paths. spans carries
-                            // the capture/decode sums BurstController already measured; this
-                            // closure fills in merge/finish/save around its own stage
-                            // transitions and logs+optionally shows the full breakdown.
-                            // captureLensFacing is threaded in by every call site below (each
-                            // snapshots lensFacing at the moment its burst is armed, not read
-                            // late here - see startPortraitCapture's matching comment on why:
-                            // the flip-camera chip stays enabled during background processing).
-                            val mergeAndSave: (
-                                spans: CaptureSpans,
-                                captureLensFacing: LensFacing,
-                                produce: suspend () -> Pair<Frame, String>,
-                            ) -> Unit =
-                                { spans, captureLensFacing, produce ->
-                                    // Snapshot once at merge start: if the user dismisses the
-                                    // guided banner mid-burst, this capture finishes as a normal one.
-                                    val guidedCaptureActive = guidedStep == GuidedCompareStep.AwaitingCapture
-                                    scope.launch(Dispatchers.Default) {
-                                        // Frames are collected: the camera is free again, so a new
-                                        // capture can be armed immediately while this one merges -
-                                        // the processing queue (issue #86) takes over from here via
-                                        // processingCount instead of isCapturing.
-                                        withContext(Dispatchers.Main) {
-                                            isCapturing = false
-                                            processingCount++
-                                            currentProcessingStage = ProcessingStage.Merging
-                                        }
-                                        try {
-                                            val mergeStart = System.currentTimeMillis()
-                                            val (rawMerged, baseMessage) = produce()
-                                            // Selfie mirroring (issue #88): mirrored ONCE here, on
-                                            // the final merged geometry (after SR's 2x output too),
-                                            // before finishing - so the RAW_ comparison save below
-                                            // (which reuses this same `merged`) and the MRG_ save
-                                            // stay consistent. See Frame.mirrorHorizontal's KDoc and
-                                            // startPortraitCapture's matching comment for the
-                                            // rationale and where Portrait applies the same rule.
-                                            val merged = if (captureLensFacing == LensFacing.Front) {
-                                                rawMerged.mirrorHorizontal()
-                                            } else {
-                                                rawMerged
-                                            }
-                                            val mergeMillis = System.currentTimeMillis() - mergeStart
-                                            // Finishing (tone/saturation/contrast) is optional and
-                                            // only ever applies to the merged burst frame.
-                                            // Night captures use the night finishing profile,
-                                            // regardless of preset; every other merge (standard or
-                                            // HDR) uses the user's chosen rendition preset.
-                                            val finishingParams = if (settings.nightModeEnabled) {
-                                                NightPipeline.FINISHING_PARAMS
-                                            } else {
-                                                settings.finishingPreset.params
-                                            }
-                                            withContext(Dispatchers.Main) {
-                                                currentProcessingStage = ProcessingStage.Finishing
-                                            }
-                                            val finishStart = System.currentTimeMillis()
-                                            val output = if (settings.applyFinishingToMergedPhotos) {
-                                                FinishingPipeline.apply(merged, finishingParams)
-                                            } else {
-                                                merged
-                                            }
-                                            val finishMillis = System.currentTimeMillis() - finishStart
-                                            withContext(Dispatchers.Main) {
-                                                currentProcessingStage = ProcessingStage.Saving
-                                            }
-                                            val saveStart = System.currentTimeMillis()
-                                            val processedUri = MergedPhotoSaver.save(
-                                                context,
-                                                output,
-                                                exif = ExifMetadata(
-                                                    captureTimestampMillis = output.timestampMillis,
-                                                    widthPx = output.width,
-                                                    heightPx = output.height,
-                                                ),
-                                            )
-                                            val saveMillis = System.currentTimeMillis() - saveStart
-                                            val finalSpans = spans.copy(
-                                                mergeMillis = mergeMillis,
-                                                finishMillis = finishMillis,
-                                                saveMillis = saveMillis,
-                                            )
-                                            Log.d(TAG, "Capture breakdown: ${finalSpans.formatBreakdown()}")
-                                            val message = if (settings.verboseTimings) {
-                                                "$baseMessage (${finalSpans.formatBreakdown()})"
-                                            } else {
-                                                baseMessage
-                                            }
-                                            // A guided-comparison capture always fills slot A with the
-                                            // processed result and leaves slot B unset until the user
-                                            // picks the reference photo on the Compare screen. Otherwise,
-                                            // persist the unprocessed merge input, as-is, for on-device
-                                            // A/B comparison when the user opted in via settings.
-                                            val capturedPair = if (guidedCaptureActive) {
-                                                ComparePair(processedUri = processedUri, referenceUri = null)
-                                            } else if (settings.saveComparisonPair) {
-                                                val referenceUri = MergedPhotoSaver.save(
-                                                    context,
-                                                    merged,
-                                                    prefix = MergedPhotoSaver.RAW_PREFIX,
-                                                    exif = ExifMetadata(
-                                                        captureTimestampMillis = merged.timestampMillis,
-                                                        widthPx = merged.width,
-                                                        heightPx = merged.height,
-                                                    ),
-                                                )
-                                                ComparePair(processedUri = processedUri, referenceUri = referenceUri)
-                                            } else {
-                                                null
-                                            }
-                                            withContext(Dispatchers.Main) {
-                                                processingCount = (processingCount - 1).coerceAtLeast(0)
-                                                if (processingCount == 0) currentProcessingStage = null
-                                                lastCapture = LastCapture(processedUri, CaptureMediaType.Photo)
-                                                if (guidedCaptureActive && capturedPair != null) {
-                                                    onComparePairCaptured(capturedPair)
-                                                    onGuidedCaptureCompleted()
-                                                } else if (capturedPair != null) {
-                                                    onComparePairCaptured(capturedPair)
-                                                    val result = snackbarHostState.showSnackbar(
-                                                        message = message,
-                                                        actionLabel = compareActionLabel,
-                                                    )
-                                                    if (result == SnackbarResult.ActionPerformed) {
-                                                        onOpenCompare()
-                                                    }
-                                                } else {
-                                                    snackbarHostState.showSnackbar(message)
-                                                }
-                                            }
-                                        } catch (e: Exception) {
-                                            withContext(Dispatchers.Main) {
-                                                processingCount = (processingCount - 1).coerceAtLeast(0)
-                                                if (processingCount == 0) currentProcessingStage = null
-                                                snackbarHostState.showSnackbar(burstMergeFailureMessage)
-                                            }
-                                        }
-                                    }
-                                }
-                            val controllerReady = burstController != null
-                            ActionIconButton(
-                                icon = CameraGlyphs.Burst,
-                                contentDescription = burstButtonLabel,
-                                enabled = controllerReady && ProcessingQueuePolicy.canCapture(isCapturing, processingCount),
-                                onClick = {
-                                    val controller = burstController ?: return@ActionIconButton
-                                    val capture = imageCapture ?: return@ActionIconButton
-                                    // Defense in depth (issue #86): `enabled` above already
-                                    // keeps a disallowed tap from reaching here, but this keeps
-                                    // the click handler correct on its own terms too - see the
-                                    // matching check/comment in startPortraitCapture.
-                                    if (!ProcessingQueuePolicy.canCapture(isCapturing, processingCount)) return@ActionIconButton
-                                    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-                                    isCapturing = true
-                                    currentProcessingStage = ProcessingStage.Capturing
-                                    // Selfie mirroring (issue #88): snapshot the facing being
-                                    // captured right now, not whatever lensFacing reads once
-                                    // this burst's merge finishes - see startPortraitCapture's
-                                    // matching captureLensFacing comment for why that matters.
-                                    val captureLensFacing = lensFacing
-                                    val frameCapture = BurstController.FrameCapture { onResult ->
-                                        BurstImageCapture.acquire(capture, burstCaptureExecutor) { acquireResult ->
-                                            onResult(
-                                                acquireResult.map { jpeg ->
-                                                    { BurstImageCapture.decode(jpeg, maxBurstPixels) }
-                                                },
-                                            )
-                                        }
-                                    }
-                                    val exposure = exposureController
-                                    if (settings.nightModeEnabled) {
-                                        // Night mode takes priority over HDR: a single-EV
-                                        // long burst merged with the night profile. When both
-                                        // switches are on, HDR is skipped for this capture and
-                                        // the standard merge snackbar reflects that night ran.
-                                        controller.arm(frameCapture, burstDecodeExecutor) { burst ->
-                                            Log.d(
-                                                TAG,
-                                                "Night burst captured ${burst.frames.size} frames " +
-                                                    "in ${burst.captureSpanMillis} ms",
-                                            )
-                                            mergeAndSave(burst.spans, captureLensFacing) {
-                                                val result = NightPipeline.merge(burst.frames)
-                                                result.merged to String.format(
-                                                    burstMergeSuccessMessage,
-                                                    result.usedFrameCount,
-                                                    result.merged.width,
-                                                    result.merged.height,
-                                                )
-                                            }
-                                        }
-                                    } else if (settings.hdrBurstEnabled && exposure != null) {
-                                        controller.armBracketed(
-                                            steps = exposure.steps,
-                                            framesPerEv = exposure.framesPerEv,
-                                            setExposureIndex = exposure.setIndexAndAwait,
-                                            captureFrame = frameCapture,
-                                            decodeExecutor = burstDecodeExecutor,
-                                        ) { burst ->
-                                            Log.d(
-                                                TAG,
-                                                "HDR burst captured ${burst.frames.size} frames " +
-                                                    "in ${burst.captureSpanMillis} ms",
-                                            )
-                                            mergeAndSave(burst.spans, captureLensFacing) {
-                                                val result = HdrMergePipeline.merge(burst.frames, burst.evs)
-                                                result.fused to String.format(
-                                                    hdrBurstMergeSuccessMessage,
-                                                    result.usedFrameCount,
-                                                    result.fused.width,
-                                                    result.fused.height,
-                                                )
-                                            }
-                                        }
-                                    } else if (settings.superResolutionEnabled) {
-                                        // Standard single-EV burst super-resolved onto a
-                                        // doubled grid. Night and HDR are handled above and
-                                        // take priority; SR runs only on the plain still path.
-                                        controller.arm(frameCapture, burstDecodeExecutor) { burst ->
-                                            Log.d(
-                                                TAG,
-                                                "SR burst captured ${burst.frames.size} frames " +
-                                                    "in ${burst.captureSpanMillis} ms",
-                                            )
-                                            mergeAndSave(burst.spans, captureLensFacing) {
-                                                val result = SuperResolution.superResolve(burst.frames)
-                                                result.superResolved to String.format(
-                                                    superResolutionSuccessMessage,
-                                                    result.usedFrameCount,
-                                                    result.superResolved.width,
-                                                    result.superResolved.height,
-                                                )
-                                            }
-                                        }
-                                    } else {
-                                        controller.arm(frameCapture, burstDecodeExecutor) { burst ->
-                                            Log.d(
-                                                TAG,
-                                                "Burst captured ${burst.frames.size} frames " +
-                                                    "in ${burst.captureSpanMillis} ms",
-                                            )
-                                            mergeAndSave(burst.spans, captureLensFacing) {
-                                                val result = BurstMergePipeline.merge(burst.frames)
-                                                result.merged to String.format(
-                                                    burstMergeSuccessMessage,
-                                                    result.usedFrameCount,
-                                                    result.merged.width,
-                                                    result.merged.height,
-                                                )
-                                            }
-                                        }
-                                    }
-                                },
-                            )
-                        } else if (mode == CameraMode.Cinematic) {
+                        // Left secondary slot (issue #101): Photo no longer has an
+                        // independent Burst button here - the shutter itself now runs that
+                        // flow (see startPhotoCapture), so this slot renders nothing for
+                        // Photo, exactly like it already did for Portrait (whose shutter was
+                        // always the sole capture trigger). Only Cinematic still has a
+                        // control here (the Look toggle, unrelated to burst/merge and not a
+                        // sensible fit for this slot in any other mode).
+                        if (mode == CameraMode.Cinematic) {
                             // Look toggle (issue #82): the two-option segmented selector is
                             // now a single droplet icon button that cycles the look, with the
                             // active look name shown small beneath - the one secondary control
@@ -1613,13 +1620,20 @@ private fun CameraCaptureScreen(
                     ShutterButton(
                         mode = mode,
                         isRecording = isRecording,
-                        // Portrait's shutter IS the burst trigger (see startPortraitCapture),
-                        // so it respects the same processing-queue gate (issue #86) as the
-                        // Photo-mode burst button. Video/Cinematic have their own start/stop
-                        // mechanic and Photo's plain tap is an un-merged single shot, so
-                        // neither is part of this queue - both stay always enabled here.
-                        enabled = mode != CameraMode.Portrait ||
-                            ProcessingQueuePolicy.canCapture(isCapturing, processingCount),
+                        // Portrait's and (issue #101) Photo's shutter are both the burst
+                        // trigger now (see startPortraitCapture/startPhotoCapture), so both
+                        // respect the same processing-queue gate (issue #86). Video/Cinematic
+                        // have their own start/stop mechanic, so neither is part of this
+                        // queue - always enabled here. The "Unprocessed single-shot capture"
+                        // developer setting reverts Photo to the old raw, un-merged
+                        // PhotoCapture.capture path, which never touches isCapturing/
+                        // processingCount at all - so it stays always enabled here too,
+                        // exactly like it did before this issue.
+                        enabled = when {
+                            mode.isVideoLike -> true
+                            mode == CameraMode.Photo && settings.unprocessedCapture -> true
+                            else -> ProcessingQueuePolicy.canCapture(isCapturing, processingCount)
+                        },
                         contentDescription = when {
                             mode.isVideoLike && isRecording -> stopContentDescription
                             mode.isVideoLike -> recordContentDescription

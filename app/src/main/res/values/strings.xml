@@ -23,7 +23,6 @@
     <string name="stop_button_content_description">Stop recording</string>
     <string name="video_capture_success">Video saved: %1$s</string>
     <string name="video_capture_failure">Failed to save video. Please try again.</string>
-    <string name="burst_button">Burst</string>
     <string name="burst_merge_success">Merged %1$d frames at %2$d×%3$d</string>
     <string name="burst_hdr_merge_success">HDR merged %1$d frames at %2$d×%3$d</string>
     <string name="burst_super_resolution_success">Super-resolved %1$d frames to %2$d×%3$d</string>
@@ -86,6 +85,8 @@
     <string name="settings_section_developer">Developer</string>
     <string name="settings_verbose_timings_label">Verbose capture timings</string>
     <string name="settings_verbose_timings_description">Appends the per-phase capture latency breakdown (capture/decode/merge/finish/save) to the success message. Always logged separately regardless of this switch.</string>
+    <string name="settings_unprocessed_capture_label">Unprocessed single-shot capture</string>
+    <string name="settings_unprocessed_capture_description">Reverts the Photo shutter to a raw, unmerged single frame with no finishing applied - for A/B comparison against the normal processed shutter and debugging. Off by default.</string>
     <string name="settings_section_comparison">Comparison</string>
     <string name="settings_save_comparison_pair_label">Save comparison pair</string>
     <string name="settings_save_comparison_pair_description">Also saves the unprocessed merge input alongside the processed photo (RAW_ prefix) so it can be opened in the Compare viewer.</string>

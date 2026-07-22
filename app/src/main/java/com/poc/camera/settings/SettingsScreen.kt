@@ -294,6 +294,26 @@ fun SettingsScreen(
                         onCheckedChange = { onSettingsChanged(settings.copy(verboseTimings = it)) },
                     )
                 }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_unprocessed_capture_label),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            text = stringResource(R.string.settings_unprocessed_capture_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = settings.unprocessedCapture,
+                        onCheckedChange = { onSettingsChanged(settings.copy(unprocessedCapture = it)) },
+                    )
+                }
             }
         }
     }

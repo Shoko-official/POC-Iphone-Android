@@ -170,7 +170,7 @@ fun CameraPreview(
                         // ImageCapture is all it ever needs, since its capture path always
                         // goes through the same full-resolution burst (see CameraScreen's
                         // Portrait capture flow, which ignores the HDR/night/SR toggles
-                        // Photo's burst button honours).
+                        // Photo's shutter honours - see startPhotoCapture).
                         CameraMode.Photo, CameraMode.Portrait -> {
                             // Burst now captures sequential full-resolution ImageCapture
                             // frames (driven from CameraScreen), so no ImageAnalysis use

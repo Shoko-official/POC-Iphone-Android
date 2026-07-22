@@ -24,6 +24,12 @@ data class CameraSettingsData(
     // regardless of this switch - this only controls whether it also reaches the UI, since
     // most users never need a per-phase latency breakdown on every capture.
     val verboseTimings: Boolean = DEFAULT_VERBOSE_TIMINGS,
+    // Developer escape hatch (issue #101): the Photo shutter normally runs the full
+    // burst -> merge -> finish -> save pipeline (see CameraScreen's startPhotoCapture).
+    // When on, it reverts to the old raw CameraX ImageCapture.takePicture path instead, for
+    // A/B comparison and debugging against the normal processed flow. Off by default - the
+    // processed path is the reference-class behaviour this issue exists to ship.
+    val unprocessedCapture: Boolean = DEFAULT_UNPROCESSED_CAPTURE,
 ) {
     companion object {
         const val DEFAULT_BURST_FRAME_COUNT = 6
@@ -33,6 +39,7 @@ data class CameraSettingsData(
         const val DEFAULT_SUPER_RESOLUTION_ENABLED = false
         const val DEFAULT_HDR_VIDEO_ENABLED = false
         const val DEFAULT_VERBOSE_TIMINGS = false
+        const val DEFAULT_UNPROCESSED_CAPTURE = false
         val DEFAULT_FINISHING_PRESET = FinishingPreset.Natural
         val DEFAULT_VIDEO_QUALITY = VideoQualityChoice.FHD
         val ALLOWED_BURST_FRAME_COUNTS = listOf(3, 6, 9)
@@ -58,6 +65,7 @@ data class CameraSettingsData(
             hdrVideoEnabled: Boolean = DEFAULT_HDR_VIDEO_ENABLED,
             videoQualityName: String? = null,
             verboseTimings: Boolean = DEFAULT_VERBOSE_TIMINGS,
+            unprocessedCapture: Boolean = DEFAULT_UNPROCESSED_CAPTURE,
         ): CameraSettingsData = CameraSettingsData(
             burstFrameCount = sanitizeBurstFrameCount(burstFrameCount),
             applyFinishingToMergedPhotos = applyFinishingToMergedPhotos,
@@ -73,6 +81,7 @@ data class CameraSettingsData(
             videoQuality = VideoQualityChoice.entries.firstOrNull { it.name == videoQualityName }
                 ?: DEFAULT.videoQuality,
             verboseTimings = verboseTimings,
+            unprocessedCapture = unprocessedCapture,
         )
     }
 }

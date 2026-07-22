@@ -83,11 +83,13 @@ class PipelineBenchmarkTest {
         // deliberately generous to absorb cache effects and CI noise on a single run. Note
         // the two sides take DIFFERENT paths: 3 MP finishes whole-frame while 12 MP routes
         // through TiledFinishing (>= TILED_THRESHOLD_PIXELS), whose halo overlap re-finishes
-        // ~1.9x the pixel count -- the ratio absorbs that amplification and stays honest as
-        // the production 12 MP route. Re-measured 2026-07-22 with the bounded white-balance
-        // estimation on BOTH sides (issue #117; previously the 3 MP side alone carried a
-        // full-resolution estimation, dragging the ratio down to ~1.7): ratio ~2.7 actual,
-        // still comfortably under the 8x bound despite the halo amplification.
+        // ~2.4x the pixel count (up from ~1.7x when the halo was 88: issue #114 sized the
+        // overlap to 160 for the roll-off radius ceiling) -- the ratio absorbs that
+        // amplification and stays honest as the production 12 MP route. Re-measured
+        // 2026-07-22 with the bounded white-balance estimation on BOTH sides (issue #117;
+        // previously the 3 MP side alone carried a full-resolution estimation, dragging the
+        // ratio down to ~1.7): ratio ~2.7 actual with the 88 halo, expected ~3.5-4 with the
+        // 160 halo, still comfortably under the 8x bound.
         assertTrue(
             "finishing 12MP (${finish12mp.millis} ms) exceeded 8x 3MP (${finish3mp.millis} ms): ratio $scaling",
             finish12mp.millis < 8.0 * finish3mp.millis,
@@ -129,7 +131,8 @@ class PipelineBenchmarkTest {
         // passes on either path. The remaining passes each read a DIFFERENT frame state
         // (or Saturation's integer convention), so no further plane can be shared -- see
         // FinishingPipeline.sharedLumaPlane. One measured pass sizes the remaining cost
-        // in ms; the tiled path additionally re-extracts over the ~1.9x halo area.
+        // in ms; the tiled path additionally re-extracts over the ~2.4x halo area
+        // (overlap 160 since issue #114).
         val luma12mp = PipelineBenchmark.lumaExtraction(native.w, native.h)
         println(luma12mp)
         println(

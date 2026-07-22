@@ -13,10 +13,20 @@ import kotlin.math.max
  *
  * The comparison uses EXACT stats ([FinishingStats.compute] on the full frame), so the
  * only admissible difference is the incremental-[BoxBlur] running-sum drift documented on
- * [TiledFinishing]. Each case forces a small tile ([TILE] core, [TiledFinishing.OVERLAP]
+ * [TiledFinishing]. Each case forces a small tile ([TILE] core, [SUB_REFERENCE_OVERLAP]
  * halo) so a 256 px frame is cut into many tiles including partial edge tiles, exercising
  * the stitching. Odd dimensions and frames smaller than one tile (single-tile path) are
  * covered too.
+ *
+ * The halo is 88, not the production [TiledFinishing.OVERLAP] (160): the production
+ * constant is sized for the roll-off gate's radius CEILING at very wide images (issue
+ * #114), but on these sub-reference-width fixtures the radius min-clamps to 24
+ * ([com.poc.camera.pipeline.ChromaRollOffParams.forImageWidth]), so the actual chain
+ * support is `8 + 32 + 6 + 24 + 16 = 86` and an 88 px halo is seam-sufficient. Using 160
+ * here would make every padded tile swallow the whole 256 px frame and reduce the
+ * stitching to a vacuous single-tile comparison. Tiled-vs-whole-frame consistency at a
+ * genuinely SCALED radius under the production halo is proven by
+ * ChromaRollOffScalingTest.
  *
  * Empirically this drift never crosses the final round-to-8-bit on these fixtures, so the
  * tiled cores are BYTE-IDENTICAL; the test asserts exact equality and additionally reports
@@ -25,7 +35,7 @@ import kotlin.math.max
 class TiledFinishingBitIdentityTest {
 
     private val tileSize = TILE
-    private val overlap = TiledFinishing.OVERLAP
+    private val overlap = SUB_REFERENCE_OVERLAP
 
     @Test
     fun tiledMatchesWholeFrameOnEdges() = assertByteIdentical("edges", edges(256, 256))
@@ -244,6 +254,11 @@ class TiledFinishingBitIdentityTest {
     private companion object {
         /** Small core tile so a 256 px frame is cut into many tiles (incl. partial edges). */
         const val TILE = 64
+
+        /** Halo covering the ACTUAL chain support at these sub-reference widths (86, the
+         *  roll-off radius min-clamping to 24) plus the same 2 px margin the production
+         *  constant carries -- see the class doc for why the production 160 is not used. */
+        const val SUB_REFERENCE_OVERLAP = 88
 
         // MEASURED 2026-07-20: the tiled-vs-whole-frame deviation the SkinMask smoothstep can
         // amplify from the documented BoxBlur running-sum drift, under strong operators. Bounds

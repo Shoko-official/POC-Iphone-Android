@@ -84,8 +84,9 @@ data class FinishingStats(
  *  - PURE per-pixel: [WhiteBalance] (with fixed [FinishingStats.wbGains]), [ToneCurve],
  *    [Saturation], [Contrast], [ChromaRollOff] -- output at a pixel depends only on that
  *    pixel.
- *  - WINDOWED-local: [ChromaDenoiser], [LocalToneMapper], and [DetailEnhancer]'s spatial
- *    part -- output at a pixel depends only on input within a bounded radius.
+ *  - WINDOWED-local: [ChromaDenoiser], [LocalToneMapper], [DetailEnhancer]'s spatial part,
+ *    and [SemanticRendering]'s sky chroma smoothing -- output at a pixel depends only on
+ *    input within a bounded radius.
  *  - GLOBAL-statistic: [WhiteBalance] gain estimation and [DetailEnhancer]'s coring knee
  *    -- fixed once in [FinishingStats] and passed in, so no tile re-estimates them.
  *
@@ -93,15 +94,21 @@ data class FinishingStats(
  * value at a pixel depends only on merged input within a finite radius -- the SUM of the
  * per-stage supports. Each [GuidedFilter] pass is two [BoxBlur] passes, so its support is
  * `2 * radius`, giving per-stage supports of chroma `2*4 = 8`, local-tone `2*16 = 32`,
- * detail `2*3 = 6` (its 3x3 morphology adds 1, subsumed). The pure stages add 0. The
- * chain support is therefore `8 + 32 + 6 = 46` px ([SUPPORT_RADIUS]). The [SkinMask]
- * modulation is also windowed-local but does NOT extend this: it is computed on the
- * denoised frame (support 8) blurred by radius 8 (support 16), so its dependency reaches
- * only 16 px from a core pixel -- inside the 46 px chain support -- and it feeds the
- * modulated stages as a per-pixel coefficient rather than widening their read radius. Give
- * every tile a halo of at least that many pixels of real neighbouring content and its CORE
- * (the halo cropped off) sees exactly the neighbourhood the whole-frame pass saw, so tile cores
- * agree in their interior with no feathering. [OVERLAP] is 48 (>= 46, a 2 px margin).
+ * detail `2*3 = 6` (its 3x3 morphology adds 1, subsumed), plus [SemanticRendering]'s sky
+ * chroma smoothing `2*8 = 16` at the tail. The pure stages add 0. The chain support is
+ * therefore `8 + 32 + 6 + 16 = 62` px ([SUPPORT_RADIUS]). Two windowed-local pieces do NOT
+ * extend this, because they feed a stage as per-pixel coefficients rather than widening its
+ * read radius and their own reach is inside the chain support: the [SkinMask] modulation
+ * (denoised support 8, blur radius 8 -> reach 16) and the [SemanticRendering] sky/foliage
+ * masks (denoised support 8, blur radius 12 -> reach 32), both under 62. The sky chroma
+ * smoothing is the one tail stage that DOES read a neighbourhood of the post-roll-off frame
+ * (the roll-off is per-pixel, so this equals the post-[Contrast] reach), so it adds its
+ * `2*8 = 16` on top. Give every tile a halo of at least that many
+ * pixels of real neighbouring content and its CORE (the halo cropped off) sees exactly the
+ * neighbourhood the whole-frame pass saw, so tile cores agree in their interior with no
+ * feathering. [OVERLAP] is 64 (>= 62, a 2 px margin). The sky position prior is geometric,
+ * not content-derived, so each tile reproduces it exactly from its absolute row offset (see
+ * [finishRegion]) -- it adds no spatial support.
  *
  * ## The one caveat: box-blur running sums are accumulation-order sensitive
  *
@@ -119,11 +126,12 @@ data class FinishingStats(
  */
 object TiledFinishing {
 
-    /** Chain spatial support in pixels (chroma 8 + local-tone 32 + detail 6); see class doc. */
-    const val SUPPORT_RADIUS: Int = 46
+    /** Chain spatial support in pixels (chroma 8 + local-tone 32 + detail 6 + sky-smooth 16);
+     *  see class doc. */
+    const val SUPPORT_RADIUS: Int = 62
 
     /** Tile halo in pixels: >= [SUPPORT_RADIUS], with a small margin. */
-    const val OVERLAP: Int = 48
+    const val OVERLAP: Int = 64
 
     /** Default core tile side; the padded tile is `tileSize + 2 * OVERLAP` per axis. */
     const val DEFAULT_TILE_SIZE: Int = 512
@@ -140,12 +148,14 @@ object TiledFinishing {
 
     /**
      * Conservative upper bound on the number of full-tile-size `DoubleArray` planes the
-     * finishing chain holds live at once. The heaviest stage is [LocalToneMapper]'s
-     * [GuidedFilter.selfGuided]: it holds the luma plane plus meanI, meanII, squares, a, b,
-     * meanA, meanB and the output (~9), and a [BoxBlur] call adds two scratch planes, so
-     * ~11 are live at peak; 12 adds margin. Used only by [peakBytesEstimate].
+     * finishing chain holds live at once. Two stages contend for the peak: [LocalToneMapper]'s
+     * [GuidedFilter.selfGuided] holds the luma plane plus meanI, meanII, squares, a, b, meanA,
+     * meanB and the output (~9), and a [BoxBlur] call adds two scratch planes (~11); and
+     * [SemanticRendering]'s sky chroma smoothing holds luma, cb, cr (3) while a [GuidedFilter.guided]
+     * pass over one chroma plane holds its ~9 estimator planes plus two [BoxBlur] scratch (~14).
+     * 14 covers both with a small margin. Used only by [peakBytesEstimate].
      */
-    const val FLOAT_PLANES_PEAK: Int = 12
+    const val FLOAT_PLANES_PEAK: Int = 14
 
     /** Full-tile-size `IntArray` buffers live at once (a stage's src + out). */
     const val INT_PLANES_PEAK: Int = 2
@@ -228,7 +238,9 @@ object TiledFinishing {
         }
         val tile = Frame(tileW, tileH, tileArgb, frame.timestampMillis)
 
-        val finished = finishRegion(tile, params, stats).argb
+        // The tile's first row within the full image, so SemanticRendering's sky POSITION
+        // prior matches the whole-frame weight at each absolute row.
+        val finished = finishRegion(tile, params, stats, py0, height).argb
         for (y in cy0 until cy1) {
             val tileRow = (y - py0) * tileW + (cx0 - px0)
             val outRow = y * width + cx0
@@ -243,8 +255,19 @@ object TiledFinishing {
      * parameter mapping mirror [FinishingPipeline.apply] exactly, so a tile core computes
      * the same values the whole-frame path does (subject to the box-blur caveat in the
      * class doc).
+     *
+     * [rowOffset] is the tile's first row within the full image and [imageHeight] the
+     * full-image height; both are threaded ONLY into [SemanticRendering]'s [SkyMask] position
+     * prior so a tile reproduces the whole-frame vertical weight at each absolute row (the
+     * chroma/luma priors and the sky chroma smoothing are local to the tile).
      */
-    internal fun finishRegion(tile: Frame, params: FinishingParams, stats: FinishingStats): Frame {
+    internal fun finishRegion(
+        tile: Frame,
+        params: FinishingParams,
+        stats: FinishingStats,
+        rowOffset: Int = 0,
+        imageHeight: Int = tile.height,
+    ): Frame {
         val balanced = if (params.whiteBalance > 0.0) {
             WhiteBalance.applyGains(tile, stats.wbGains, params.whiteBalance)
         } else {
@@ -256,10 +279,14 @@ object TiledFinishing {
             balanced
         }
         // Skin-protection modulation is WINDOWED-local (SkinMask blur radius 8 -> support
-        // 16 px, well under OVERLAP 48), so a tile core computes the same plane the
-        // whole-frame path does and the finish stays seam-free. Computed identically to
-        // FinishingPipeline via the shared helper.
+        // 16 px, well under OVERLAP), so a tile core computes the same plane the whole-frame
+        // path does and the finish stays seam-free. Computed identically to FinishingPipeline
+        // via the shared helper.
         val skinModulation = FinishingPipeline.skinModulation(denoised, params)
+        // Semantic sky/foliage masks, computed on the denoised tile exactly as the whole-frame
+        // path does. Their blur reach (32 px) is inside OVERLAP and the sky position prior uses
+        // the absolute row offset, so the boost is seam-consistent tile-vs-whole-frame.
+        val semanticMasks = FinishingPipeline.semanticMasks(denoised, params, rowOffset, imageHeight)
         val locallyMapped = if (params.localContrast > 0.0) {
             LocalToneMapper.apply(denoised, FinishingPipeline.localToneParams(params.localContrast), skinModulation)
         } else {
@@ -278,7 +305,12 @@ object TiledFinishing {
         // nothing from FinishingStats and adds no seam. Applied identically to
         // FinishingPipeline via the shared helper.
         val rolledOff = FinishingPipeline.applyChromaRollOff(contrasted, params)
-        return FinishingPipeline.forceOpaque(rolledOff)
+        // Semantic rendering runs AFTER the roll-off (see FinishingPipeline.apply): its sky
+        // chroma smoothing is WINDOWED-local (radius 8 -> support 16, inside OVERLAP) and its
+        // per-pixel boosts are element-wise, so a tile core matches the whole-frame path
+        // (subject to the same box-blur caveat as the other windowed stages).
+        val semanticRendered = FinishingPipeline.applySemanticRendering(rolledOff, semanticMasks, params)
+        return FinishingPipeline.forceOpaque(semanticRendered)
     }
 
     /**

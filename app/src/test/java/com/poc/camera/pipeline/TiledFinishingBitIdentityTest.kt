@@ -100,10 +100,11 @@ class TiledFinishingBitIdentityTest {
         )
         assertWithinTolerance("mixed-strong-skin", frame, strongSkin, MAX_SKIN_TILE_DIFF, MAX_SKIN_TILE_MISMATCHES)
         // Realistic ship look, for reference: RENDITION at 256 px under the small test tile. This
-        // case ALSO exercises SemanticRendering's sky/foliage masks (their smoothstep priors and
-        // the sky guided chroma smooth are the same class of nonlinear-mask-amplified BoxBlur
-        // running-sum drift as SkinMask), so its drift is a touch higher than skin alone; it stays
-        // well inside the same tolerance (measured mismatches ~140, maxChannelDiff 3).
+        // case ALSO exercises SemanticRendering's sky/overcast/foliage masks (their smoothstep
+        // priors and the sky guided chroma smooth are the same class of nonlinear-mask-amplified
+        // BoxBlur running-sum drift as SkinMask), so its drift is a touch higher than skin alone;
+        // it stays well inside the same tolerance (measured mismatches ~172, maxChannelDiff 3
+        // with the OvercastSkyMask texture prior included).
         assertWithinTolerance("mixed-rendition", frame, FinishingParams.RENDITION, MAX_SKIN_TILE_DIFF, MAX_SKIN_TILE_MISMATCHES)
     }
 

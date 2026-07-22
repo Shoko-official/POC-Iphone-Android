@@ -105,14 +105,22 @@ object SkyMask {
      * image rows: [rowOffset] is the frame's first row within the full image and [imageHeight]
      * the full-image height, so a tiled finish reproduces the whole-frame weight at each row
      * (defaults cover the whole-frame case). A grayscale frame yields an all-zero result.
+     *
+     * [luma] may supply the frame's precomputed Rec. 601 luma plane (issue #113: the
+     * finishing paths extract it once from the denoised state and share it across every
+     * mask), sparing this pass its own RGB -> Y derivation; null derives luma internally.
+     * Same weights and expression order either way, so the result is bit-identical (see
+     * SharedLumaPlaneTest).
      */
     fun compute(
         frame: Frame,
         blurRadius: Int = DEFAULT_BLUR_RADIUS,
         rowOffset: Int = 0,
         imageHeight: Int = frame.height,
+        luma: DoubleArray? = null,
     ): DoubleArray {
         val src = frame.argb
+        require(luma == null || luma.size == src.size) { "luma must have one value per pixel" }
         val width = frame.width
         val raw = DoubleArray(src.size)
         // Per-pixel prior is element-wise (row-parallel); the box blur below is parallel
@@ -128,7 +136,8 @@ object SkyMask {
                     val r = ((pixel shr 16) and 0xFF).toDouble()
                     val g = ((pixel shr 8) and 0xFF).toDouble()
                     val b = (pixel and 0xFF).toDouble()
-                    raw[i] = chromaLikelihood(r, g, b) * lumaPrior(r, g, b) * position
+                    val yLuma = luma?.get(i) ?: (R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b)
+                    raw[i] = chromaForLuma(r, b, yLuma) * lumaPriorForLuma(yLuma) * position
                 }
             }
         }
@@ -146,6 +155,11 @@ object SkyMask {
      */
     fun chromaLikelihood(r: Double, g: Double, b: Double): Double {
         val y = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
+        return chromaForLuma(r, b, y)
+    }
+
+    /** [chromaLikelihood] with the pixel's luma [y] already extracted (shared plane, issue #113). */
+    private fun chromaForLuma(r: Double, b: Double, y: Double): Double {
         val cb = b - y
         val cr = r - y
         val blue = smoothstep(CB_LO, CB_HI, cb)
@@ -156,8 +170,12 @@ object SkyMask {
     /** The luma prior in [[LUMA_FLOOR], 1]: bright skies read full, dusk skies keep the floor. */
     fun lumaPrior(r: Double, g: Double, b: Double): Double {
         val y = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
-        return LUMA_FLOOR + (1.0 - LUMA_FLOOR) * smoothstep(LUMA_LO, LUMA_HI, y)
+        return lumaPriorForLuma(y)
     }
+
+    /** [lumaPrior] with the pixel's luma [y] already extracted (shared plane, issue #113). */
+    private fun lumaPriorForLuma(y: Double): Double =
+        LUMA_FLOOR + (1.0 - LUMA_FLOOR) * smoothstep(LUMA_LO, LUMA_HI, y)
 
     /**
      * The vertical position prior for a normalised image-row fraction [f] in [0, 1): 1.0 at

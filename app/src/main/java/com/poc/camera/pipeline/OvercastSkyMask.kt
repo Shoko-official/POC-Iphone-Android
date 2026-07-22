@@ -103,15 +103,24 @@ object OvercastSkyMask {
      * ABSOLUTE image rows exactly as [SkyMask.compute] does: [rowOffset] is the frame's first
      * row within the full image and [imageHeight] the full-image height (defaults cover the
      * whole-frame case). Dark, textured, or coloured content yields exactly 0.
+     *
+     * [luma] may supply the frame's precomputed Rec. 601 luma plane (issue #113: the
+     * finishing paths extract it once from the denoised state and share it across every
+     * mask), sparing BOTH of this prior's RGB -> Y passes -- the [detailEnergy] plane and
+     * the per-pixel bright/neutrality derivations; null derives luma internally. Same
+     * weights and expression order either way, so the result is bit-identical (see
+     * SharedLumaPlaneTest).
      */
     fun compute(
         frame: Frame,
         blurRadius: Int = DEFAULT_BLUR_RADIUS,
         rowOffset: Int = 0,
         imageHeight: Int = frame.height,
+        luma: DoubleArray? = null,
     ): DoubleArray {
-        val energy = detailEnergy(frame, TEXTURE_RADIUS)
         val src = frame.argb
+        require(luma == null || luma.size == src.size) { "luma must have one value per pixel" }
+        val energy = detailEnergy(frame, TEXTURE_RADIUS, luma)
         val width = frame.width
         val raw = DoubleArray(src.size)
         // Per-pixel priors are element-wise (row-parallel); the box blurs are parallel
@@ -127,8 +136,9 @@ object OvercastSkyMask {
                     val r = ((pixel shr 16) and 0xFF).toDouble()
                     val g = ((pixel shr 8) and 0xFF).toDouble()
                     val b = (pixel and 0xFF).toDouble()
-                    raw[i] = texturePrior(energy[i]) * brightPrior(r, g, b) *
-                        neutralityPrior(r, g, b) * position
+                    val yLuma = luma?.get(i) ?: (R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b)
+                    raw[i] = texturePrior(energy[i]) * brightPriorForLuma(yLuma) *
+                        neutralityPriorForLuma(r, b, yLuma) * position
                 }
             }
         }
@@ -144,23 +154,27 @@ object OvercastSkyMask {
      * (code^2): the box mean of the squared deviation of luma from its own box mean. Exactly
      * 0 on flat content and ~0 in the interior of any linear ramp (the box mean of a plane
      * is the plane), high on textured surfaces. Exposed for direct testing of the measure.
+     * [luma] may supply the frame's precomputed Rec. 601 luma plane (issue #113, read-only
+     * here); null derives it internally, bit-identically.
      */
-    fun detailEnergy(frame: Frame, radius: Int = TEXTURE_RADIUS): DoubleArray {
+    fun detailEnergy(frame: Frame, radius: Int = TEXTURE_RADIUS, luma: DoubleArray? = null): DoubleArray {
         val src = frame.argb
-        val luma = DoubleArray(src.size)
-        PipelineParallel.parallelRows(src.size) { start, end ->
-            for (i in start until end) {
-                val pixel = src[i]
-                val r = ((pixel shr 16) and 0xFF).toDouble()
-                val g = ((pixel shr 8) and 0xFF).toDouble()
-                val b = (pixel and 0xFF).toDouble()
-                luma[i] = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
+        require(luma == null || luma.size == src.size) { "luma must have one value per pixel" }
+        val lumaPlane = luma ?: DoubleArray(src.size).also { extracted ->
+            PipelineParallel.parallelRows(src.size) { start, end ->
+                for (i in start until end) {
+                    val pixel = src[i]
+                    val r = ((pixel shr 16) and 0xFF).toDouble()
+                    val g = ((pixel shr 8) and 0xFF).toDouble()
+                    val b = (pixel and 0xFF).toDouble()
+                    extracted[i] = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
+                }
             }
         }
-        val mean = BoxBlur.blur(luma, frame.width, frame.height, radius)
+        val mean = BoxBlur.blur(lumaPlane, frame.width, frame.height, radius)
         val squared = DoubleArray(src.size)
         for (i in squared.indices) {
-            val d = luma[i] - mean[i]
+            val d = lumaPlane[i] - mean[i]
             squared[i] = d * d
         }
         return BoxBlur.blur(squared, frame.width, frame.height, radius)
@@ -174,13 +188,21 @@ object OvercastSkyMask {
      *  floor -- a dark gray region carries no evidence of being sky. */
     fun brightPrior(r: Double, g: Double, b: Double): Double {
         val y = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
-        return smoothstep(LUMA_LO, LUMA_HI, y)
+        return brightPriorForLuma(y)
     }
+
+    /** [brightPrior] with the pixel's luma [y] already extracted (shared plane, issue #113). */
+    private fun brightPriorForLuma(y: Double): Double = smoothstep(LUMA_LO, LUMA_HI, y)
 
     /** The neutrality prior in [0, 1]: 1 for near-zero opponent chroma magnitude, 0 at/above
      *  [CHROMA_HI] -- rejecting blue sky (handled by [SkyMask]), coloured walls and skin. */
     fun neutralityPrior(r: Double, g: Double, b: Double): Double {
         val y = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
+        return neutralityPriorForLuma(r, b, y)
+    }
+
+    /** [neutralityPrior] with the pixel's luma [y] already extracted (shared plane, issue #113). */
+    private fun neutralityPriorForLuma(r: Double, b: Double, y: Double): Double {
         val cr = r - y
         val cb = b - y
         return 1.0 - smoothstep(CHROMA_LO, CHROMA_HI, sqrt(cr * cr + cb * cb))

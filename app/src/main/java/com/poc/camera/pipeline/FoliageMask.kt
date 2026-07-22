@@ -82,9 +82,16 @@ object FoliageMask {
      * Foliage-likelihood prior of [frame] in [0, 1], one value per pixel (row-major),
      * spatially smoothed with a box blur of [blurRadius]. A grayscale frame yields an
      * all-zero result.
+     *
+     * [luma] may supply the frame's precomputed Rec. 601 luma plane (issue #113: the
+     * finishing paths extract it once from the denoised state and share it across every
+     * mask), sparing this pass its own RGB -> Y derivation; null derives luma internally.
+     * Same weights and expression order either way, so the result is bit-identical (see
+     * SharedLumaPlaneTest).
      */
-    fun compute(frame: Frame, blurRadius: Int = DEFAULT_BLUR_RADIUS): DoubleArray {
+    fun compute(frame: Frame, blurRadius: Int = DEFAULT_BLUR_RADIUS, luma: DoubleArray? = null): DoubleArray {
         val src = frame.argb
+        require(luma == null || luma.size == src.size) { "luma must have one value per pixel" }
         val raw = DoubleArray(src.size)
         // Per-pixel prior is element-wise (row-parallel); the box blur is parallel internally
         // and bit-identical to the serial path.
@@ -94,7 +101,8 @@ object FoliageMask {
                 val r = ((pixel shr 16) and 0xFF).toDouble()
                 val g = ((pixel shr 8) and 0xFF).toDouble()
                 val b = (pixel and 0xFF).toDouble()
-                raw[i] = chromaLikelihood(r, g, b) * lumaBand(r, g, b)
+                val y = luma?.get(i) ?: (R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b)
+                raw[i] = chromaForLuma(r, g, b, y) * lumaBandForLuma(y)
             }
         }
         val smoothed = BoxBlur.blur(raw, frame.width, frame.height, blurRadius)
@@ -109,6 +117,11 @@ object FoliageMask {
      */
     fun chromaLikelihood(r: Double, g: Double, b: Double): Double {
         val y = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
+        return chromaForLuma(r, g, b, y)
+    }
+
+    /** [chromaLikelihood] with the pixel's luma [y] already extracted (shared plane, issue #113). */
+    private fun chromaForLuma(r: Double, g: Double, b: Double, y: Double): Double {
         val cg = g - y
         val cr = r - y
         val cb = b - y
@@ -121,6 +134,11 @@ object FoliageMask {
     /** The mid-luma band prior in [0, 1]: rising out of near-black, falling into near-white. */
     fun lumaBand(r: Double, g: Double, b: Double): Double {
         val y = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
+        return lumaBandForLuma(y)
+    }
+
+    /** [lumaBand] with the pixel's luma [y] already extracted (shared plane, issue #113). */
+    private fun lumaBandForLuma(y: Double): Double {
         val rise = smoothstep(LUMA_LO_KNEE0, LUMA_LO_KNEE1, y)
         val fall = 1.0 - smoothstep(LUMA_HI_KNEE0, LUMA_HI_KNEE1, y)
         return rise * fall

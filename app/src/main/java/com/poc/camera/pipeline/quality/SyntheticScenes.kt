@@ -368,6 +368,88 @@ object SyntheticScenes {
         LAMP_CY + LAMP_HALF,
     )
 
+    // --- Night motion (walking-subject) scene ----------------------------------
+    //
+    // The other night fixtures model only GLOBAL motion: [nightBurst] drifts whole
+    // frames (hand shake, aligned out) and [nightMotionOutlier] jumps a whole frame
+    // beyond the alignment range (rejected outright by the global aligner). Neither
+    // exercises LOCAL subject motion -- the case the per-pixel
+    // [com.poc.camera.pipeline.GhostRejector] exists for. This burst adds it, kept
+    // out of the other fixtures so their baselines are untouched: the same
+    // [nightScene] base plus a textured walking-subject-scale object
+    // ([NIGHT_MOTION_OBJECT_W] x [NIGHT_MOTION_OBJECT_H], mean luma ~70 on the ~22
+    // background -- clearly distinct, nowhere near clipped) translating
+    // [NIGHT_MOTION_STEP_PX] px per frame, traversing roughly half the frame width
+    // over a full 12-frame burst. Frame 0 (the merge reference) fixes the expected
+    // output position; the traverse stays clear of the lamp square.
+
+    /** Walking-subject object width, px. */
+    const val NIGHT_MOTION_OBJECT_W = 24
+
+    /** Walking-subject object height, px. */
+    const val NIGHT_MOTION_OBJECT_H = 40
+
+    /** Horizontal object translation per frame, px (walking pace at fixture scale). */
+    const val NIGHT_MOTION_STEP_PX = 5
+
+    private const val NIGHT_MOTION_X0 = 8
+    private const val NIGHT_MOTION_Y0 = 44
+
+    // Object texture range: mean ~70, clearly above the [8, 28] background, far below clip.
+    private const val NIGHT_MOTION_LUMA_LO = 55
+    private const val NIGHT_MOTION_LUMA_HI = 85
+
+    /** The clean night-motion ground truth: [nightClean] plus the object at its
+     *  reference-frame (frame 0) position. */
+    fun nightMotionClean(): Frame = nightMotionScene(0)
+
+    /**
+     * Object bounds (x0, y0, x1, y1), half-open, in REFERENCE coordinates, for frame
+     * [frameIndex] of a night-motion burst. The global drift is aligned out by the
+     * merge, so scene coordinates are reference coordinates.
+     */
+    fun nightMotionObjectBounds(frameIndex: Int): IntArray {
+        require(frameIndex >= 0) { "frameIndex must be >= 0" }
+        val x0 = NIGHT_MOTION_X0 + frameIndex * NIGHT_MOTION_STEP_PX
+        require(x0 + NIGHT_MOTION_OBJECT_W <= SIZE) { "object leaves the frame at index $frameIndex" }
+        return intArrayOf(x0, NIGHT_MOTION_Y0, x0 + NIGHT_MOTION_OBJECT_W, NIGHT_MOTION_Y0 + NIGHT_MOTION_OBJECT_H)
+    }
+
+    /**
+     * A [count]-frame night burst of the walking-subject scene: the usual night noise
+     * model and cumulative global drift (as [nightBurst]), with the object one
+     * [NIGHT_MOTION_STEP_PX] step further along in every frame. Frame 0 is the
+     * undrifted reference with the object at [nightMotionObjectBounds] index 0.
+     * Per-frame seeds derive from [baseSeed], so the burst is reproducible.
+     */
+    fun nightMotionBurst(
+        baseSeed: Long,
+        count: Int = NIGHT_BURST_COUNT,
+        maxDriftPx: Int = NIGHT_DRIFT_PX,
+    ): List<Frame> {
+        require(count >= 1) { "count must be >= 1" }
+        return (0 until count).map { i ->
+            val (dx, dy) = driftAt(i, count, maxDriftPx)
+            noisyShifted(nightMotionScene(i), baseSeed + i * SEED_STRIDE, dx, dy, NIGHT_READ_NOISE, NIGHT_SHOT_GAIN)
+        }
+    }
+
+    /** [nightScene] with the textured object drawn at its frame-[frameIndex] position.
+     *  The texture is indexed in OBJECT-LOCAL coordinates, so the same object translates
+     *  across the burst rather than a window sliding over static texture. */
+    private fun nightMotionScene(frameIndex: Int): Frame {
+        val bounds = nightMotionObjectBounds(frameIndex)
+        val tex = texturedCanvas(seed = 0xA117L, cell = 6, low = NIGHT_MOTION_LUMA_LO, high = NIGHT_MOTION_LUMA_HI)
+        val base = nightScene()
+        val out = base.argb.copyOf()
+        for (y in bounds[1] until bounds[3]) {
+            for (x in bounds[0] until bounds[2]) {
+                out[y * SIZE + x] = gray(tex[(y - bounds[1]) * SIZE + (x - bounds[0])])
+            }
+        }
+        return Frame(SIZE, SIZE, out, base.timestampMillis)
+    }
+
     // --- Super-resolution resolution chart ------------------------------------
     //
     // A synthetic resolution chart for the multi-frame super-resolution gate, kept OUT of

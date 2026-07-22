@@ -164,6 +164,20 @@ class RenditionGoldenRegressionTest {
         // pathologically all-saturated synthetic chart; a real photo is not uniformly extreme-
         // chroma). Tracking and non-vacuous-target both improve, confirming it is the intended
         // look and not a degeneration. Floor lowered to actual*0.98; every other scene flat.
+        //
+        // UNCHANGED after [SemanticRendering] was added to FinishingParams.RENDITION
+        // (semanticRendering = 1.0), issue #98, seed 0xC0FFEE. The [SkyMask]/[FoliageMask] priors
+        // are EXACTLY 0 on grayscale content, so all five grayscale scenes are byte-identical
+        // (renMAE/tgtMAE/renPSNR unmoved). Only "colorchart" moves (its blue/green patches fire
+        // the priors), and RenditionTargets derives from the same RENDITION params so the target
+        // renders the identical sky/foliage boost -- tracking stays self-consistent and the moves
+        // are within the committed floors, so no floor is re-baselined:
+        //   colorchart renMAE->tgt : 2.410 -> 2.415 (ceiling 2.46, +0.2%, held)
+        //   colorchart tgtMAE->clean: 10.668 -> 10.360 (non-vacuous gate still >> 2.0)
+        //   colorchart renPSNR->clean: 23.804 -> 23.971 (floor 23.3, a hair better: sky/foliage
+        //                                                 chroma smoothing trims noise)
+        // See SemanticRenderingGoldenTest for the sky/foliage proofs and the mask false-positive
+        // matrix (whole-image mask mean 0.089 sky / 0.096 foliage on colorchart).
         val FLOORS = listOf(
             Floor("edges", maxMaeVsTarget = 1.74, minPsnrVsClean = 34.3),
             Floor("texture", maxMaeVsTarget = 1.71, minPsnrVsClean = 36.0),

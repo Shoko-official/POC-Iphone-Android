@@ -786,6 +786,125 @@ object SyntheticScenes {
         }
     }
 
+    // --- Landscape scene (semantic sky/foliage rendering gate) -----------------
+    //
+    // A dedicated COLOUR scene for the semantic-region rendering gate
+    // (SemanticRenderingGoldenTest), kept OUT of [names] so the existing golden report is
+    // unaffected. It is laid out as a real landscape composition so the sky POSITION prior is
+    // exercised honestly:
+    //  - an upper SKY band: a vertical blue gradient (paler high, richer toward the horizon),
+    //    bright and blue so [SkyMask]'s chroma + luma + position priors all fire.
+    //  - a mid FOLIAGE band: textured greens (mid-luma), so [FoliageMask] fires but [SkyMask]
+    //    does not (blue vs green chroma are mutually exclusive).
+    //  - a lower NEUTRAL ground band: textured gray, near-zero chroma, so NEITHER mask fires --
+    //    the false-positive / non-interference control.
+    //  - a SKIN patch inside the ground band: a reddish skin tone, so [SkinMask] (skin
+    //    protection) fires while the sky/foliage masks stay ~0 -- proving semantic rendering
+    //    does not disturb skin and does not fight skin protection.
+
+    private const val LANDSCAPE_SKY_Y1 = 44
+    private const val LANDSCAPE_FOLIAGE_Y1 = 84
+
+    // Skin patch (x0, y0, x1, y1), half-open, inside the neutral ground band.
+    private const val LANDSCAPE_SKIN_X0 = 88
+    private const val LANDSCAPE_SKIN_Y0 = 92
+    private const val LANDSCAPE_SKIN_X1 = 120
+    private const val LANDSCAPE_SKIN_Y1 = 120
+
+    /** Reddish skin tone (R > G > B): the non-interference control patch. */
+    private val LANDSCAPE_SKIN_RGB = rgb(206, 150, 120)
+
+    /** Extra read-noise sigma injected into the SKY band of a landscape burst: skies show the
+     *  most chroma noise, so [landscapeBurst] makes the sky noisier than the rest. */
+    private const val LANDSCAPE_SKY_NOISE = 22.0
+
+    /** The clean, noise-free landscape ground truth. */
+    fun landscapeClean(): Frame {
+        val out = IntArray(SIZE * SIZE)
+        val foliageTex = texturedCanvas(seed = 0x1EAFL, cell = 5, low = 0, high = 255)
+        val groundTex = texturedCanvas(seed = 0x6D17L, cell = 10, low = 0, high = 255)
+        for (y in 0 until SIZE) {
+            for (x in 0 until SIZE) {
+                val i = y * SIZE + x
+                out[i] = when {
+                    y < LANDSCAPE_SKY_Y1 -> {
+                        // Vertical blue gradient: paler blue at the top -> richer blue at the horizon.
+                        val t = y.toDouble() / (LANDSCAPE_SKY_Y1 - 1)
+                        val r = lerp(140.0, 92.0, t).roundToInt()
+                        val g = lerp(178.0, 140.0, t).roundToInt()
+                        val b = lerp(224.0, 208.0, t).roundToInt()
+                        (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                    }
+                    y < LANDSCAPE_FOLIAGE_Y1 -> {
+                        // Textured greens: a green base modulated by fine luma detail (hue-preserving).
+                        val f = 1.0 + 0.22 * (foliageTex[i] / 255.0 - 0.5) * 2.0
+                        val r = (58 * f).roundToInt().coerceIn(0, 255)
+                        val g = (108 * f).roundToInt().coerceIn(0, 255)
+                        val b = (52 * f).roundToInt().coerceIn(0, 255)
+                        (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                    }
+                    else -> {
+                        // Neutral textured ground (near-zero chroma).
+                        val v = (118 + (groundTex[i] * 28 / 255) - 14).coerceIn(0, 255)
+                        gray(v)
+                    }
+                }
+            }
+        }
+        // Skin patch inside the ground band: the non-interference control.
+        fillRect(out, LANDSCAPE_SKIN_X0, LANDSCAPE_SKIN_Y0, LANDSCAPE_SKIN_X1, LANDSCAPE_SKIN_Y1, LANDSCAPE_SKIN_RGB)
+        return frame(out)
+    }
+
+    /** Sky-band bounds (x0, y0, x1, y1), half-open. */
+    fun landscapeSkyBounds(): IntArray = intArrayOf(0, 0, SIZE, LANDSCAPE_SKY_Y1)
+
+    /** Foliage-band bounds (x0, y0, x1, y1), half-open. */
+    fun landscapeFoliageBounds(): IntArray = intArrayOf(0, LANDSCAPE_SKY_Y1, SIZE, LANDSCAPE_FOLIAGE_Y1)
+
+    /** Neutral ground-band bounds (x0, y0, x1, y1), half-open, EXCLUDING the skin patch column. */
+    fun landscapeGroundBounds(): IntArray = intArrayOf(0, LANDSCAPE_FOLIAGE_Y1, LANDSCAPE_SKIN_X0, SIZE)
+
+    /** Skin-patch bounds (x0, y0, x1, y1), half-open. */
+    fun landscapeSkinBounds(): IntArray =
+        intArrayOf(LANDSCAPE_SKIN_X0, LANDSCAPE_SKIN_Y0, LANDSCAPE_SKIN_X1, LANDSCAPE_SKIN_Y1)
+
+    /**
+     * A [count]-frame noisy landscape burst with EXTRA chroma noise in the sky band (skies
+     * show the most chroma noise), so the sky-chroma-noise-reduction proof has real speckle to
+     * remove. Per-frame seeds derive from [baseSeed], so the burst is reproducible.
+     */
+    fun landscapeBurst(baseSeed: Long, count: Int): List<Frame> {
+        require(count >= 1) { "count must be >= 1" }
+        val clean = landscapeClean()
+        return (0 until count).map { i -> landscapeNoisy(clean, baseSeed + i * SEED_STRIDE) }
+    }
+
+    /** A single landscape capture: the shared sensor model, with the sky band carrying an
+     *  additional [LANDSCAPE_SKY_NOISE] read-noise sigma. */
+    private fun landscapeNoisy(clean: Frame, seed: Long): Frame {
+        val rng = Lcg(seed)
+        val src = clean.argb
+        val out = IntArray(src.size)
+        for (i in src.indices) {
+            val y = i / SIZE
+            val pixel = src[i]
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            val luma = 0.299 * r + 0.587 * g + 0.114 * b
+            val extra = if (y < LANDSCAPE_SKY_Y1) LANDSCAPE_SKY_NOISE else 0.0
+            val sigma = sqrt(READ_NOISE * READ_NOISE + extra * extra + SHOT_GAIN * luma)
+            val nr = (r + sigma * rng.nextGaussian()).roundToInt().coerceIn(0, 255)
+            val ng = (g + sigma * rng.nextGaussian()).roundToInt().coerceIn(0, 255)
+            val nb = (b + sigma * rng.nextGaussian()).roundToInt().coerceIn(0, 255)
+            out[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+        }
+        return Frame(clean.width, clean.height, out, clean.timestampMillis)
+    }
+
+    private fun lerp(a: Double, b: Double, t: Double): Double = a + (b - a) * t
+
     private fun edges(): Frame {
         val out = IntArray(SIZE * SIZE)
         val half = SIZE / 2

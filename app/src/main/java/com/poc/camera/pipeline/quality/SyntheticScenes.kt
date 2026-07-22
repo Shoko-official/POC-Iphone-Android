@@ -644,6 +644,80 @@ object SyntheticScenes {
         return frame(out)
     }
 
+    // --- Backlit portrait scene (backlit-rescue gate) -------------------------
+    //
+    // A dedicated scene for the backlit-rescue gate (BacklitRescueGoldenTest), kept OUT of
+    // [names] so the existing golden report is unaffected. A dark, textured SUBJECT
+    // rectangle (luma ~30-45, carrying a solid skin-toned patch) sits against a bright,
+    // textured BACKGROUND (~185-215) separated by a HARD boundary. That is the canonical
+    // backlit histogram -- a populated shadow mode (the subject), a populated highlight mode
+    // (the background) and an empty midtone valley -- which the [com.poc.camera.pipeline.BacklitDetector]
+    // must fire on and [com.poc.camera.pipeline.BacklitRescue] must lift. The subject stays
+    // in the recoverable-shadow band (>= the detector's shadow floor), i.e. dark but not
+    // crushed, exactly as a real backlit subject a couple of stops down.
+
+    /** Subject rectangle (x0, y0, x1, y1), half-open, in frame coords. */
+    private const val BACKLIT_SUBJECT_X0 = 28
+    private const val BACKLIT_SUBJECT_Y0 = 24
+    private const val BACKLIT_SUBJECT_X1 = 100
+    private const val BACKLIT_SUBJECT_Y1 = 112
+
+    /** Skin-toned patch (x0, y0, x1, y1), half-open, inside the subject. */
+    private const val BACKLIT_SKIN_X0 = 46
+    private const val BACKLIT_SKIN_Y0 = 40
+    private const val BACKLIT_SKIN_X1 = 82
+    private const val BACKLIT_SKIN_Y1 = 84
+
+    private const val BACKLIT_SUBJECT_LUMA = 37
+    private const val BACKLIT_BACKGROUND_LUMA = 200
+    private const val BACKLIT_SUBJECT_TEX = 8
+    private const val BACKLIT_BACKGROUND_TEX = 15
+
+    /** Darkened skin tone (R > G > B, luma ~40): a backlit face patch, recoverable-shadow dark. */
+    private val BACKLIT_SKIN_RGB = rgb(54, 36, 26)
+
+    /** The clean, noise-free backlit portrait ground truth. */
+    fun backlitPortraitClean(): Frame {
+        val out = IntArray(SIZE * SIZE)
+        val bgTex = texturedCanvas(seed = 0xB4C1L, cell = 10, low = 0, high = 255)
+        val subTex = texturedCanvas(seed = 0x5B17L, cell = 6, low = 0, high = 255)
+        for (y in 0 until SIZE) {
+            for (x in 0 until SIZE) {
+                val i = y * SIZE + x
+                val inSubject = x in BACKLIT_SUBJECT_X0 until BACKLIT_SUBJECT_X1 &&
+                    y in BACKLIT_SUBJECT_Y0 until BACKLIT_SUBJECT_Y1
+                out[i] = if (inSubject) {
+                    val inSkin = x in BACKLIT_SKIN_X0 until BACKLIT_SKIN_X1 &&
+                        y in BACKLIT_SKIN_Y0 until BACKLIT_SKIN_Y1
+                    if (inSkin) {
+                        (0xFF shl 24) or BACKLIT_SKIN_RGB
+                    } else {
+                        val t = (subTex[i] / 255.0 - 0.5) * 2.0
+                        gray((BACKLIT_SUBJECT_LUMA + BACKLIT_SUBJECT_TEX * t).roundToInt().coerceIn(0, 255))
+                    }
+                } else {
+                    val t = (bgTex[i] / 255.0 - 0.5) * 2.0
+                    gray((BACKLIT_BACKGROUND_LUMA + BACKLIT_BACKGROUND_TEX * t).roundToInt().coerceIn(0, 255))
+                }
+            }
+        }
+        return frame(out)
+    }
+
+    /** A [count]-frame noisy burst of [backlitPortraitClean], seeds derived from [baseSeed]. */
+    fun backlitPortraitBurst(baseSeed: Long, count: Int): List<Frame> {
+        require(count >= 1) { "count must be >= 1" }
+        return burstOf(backlitPortraitClean(), baseSeed, count)
+    }
+
+    /** Subject-rectangle bounds (x0, y0, x1, y1), half-open, for the lift/halo proofs. */
+    fun backlitSubjectBounds(): IntArray =
+        intArrayOf(BACKLIT_SUBJECT_X0, BACKLIT_SUBJECT_Y0, BACKLIT_SUBJECT_X1, BACKLIT_SUBJECT_Y1)
+
+    /** Skin-patch bounds (x0, y0, x1, y1), half-open, inside the subject. */
+    fun backlitSkinBounds(): IntArray =
+        intArrayOf(BACKLIT_SKIN_X0, BACKLIT_SKIN_Y0, BACKLIT_SKIN_X1, BACKLIT_SKIN_Y1)
+
     private fun edges(): Frame {
         val out = IntArray(SIZE * SIZE)
         val half = SIZE / 2

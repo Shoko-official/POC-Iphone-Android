@@ -94,25 +94,34 @@ data class FinishingStats(
  * per-stage supports. Each [GuidedFilter] pass is two [BoxBlur] passes, so its support is
  * `2 * radius`, giving per-stage supports of chroma `2*4 = 8`, local-tone `2*16 = 32`,
  * detail `2*3 = 6` (its 3x3 morphology adds 1, subsumed); [ChromaRollOff]'s isolation gate
- * is a SINGLE [BoxBlur] of the chroma-magnitude plane, so its support is its
- * neighbourhood radius `24`; and [SemanticRendering]'s sky chroma smoothing adds `2*8 = 16`
- * at the tail. The pure stages add 0. The chain support is therefore
- * `8 + 32 + 6 + 24 + 16 = 86` px ([SUPPORT_RADIUS]). The windowed-local mask pieces do NOT
+ * is a SINGLE [BoxBlur] of the chroma-magnitude plane, so its support is its neighbourhood
+ * radius -- resolution-adaptive since issue #114 ([ChromaRollOffParams.forImageWidth]) and
+ * bounded by [ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS] `= 96`, which is what the
+ * compile-time chain must be sized for; and [SemanticRendering]'s sky chroma smoothing adds
+ * `2*8 = 16` at the tail. The pure stages add 0. The worst-case chain support is therefore
+ * `8 + 32 + 6 + 96 + 16 = 158` px ([SUPPORT_RADIUS]). The windowed-local mask pieces do NOT
  * extend this, because they feed a stage as per-pixel coefficients rather than widening its
  * read radius and their own reach is inside the chain support: the [SkinMask] modulation
  * (denoised support 8, blur radius 8 -> reach 16), the [SemanticRendering] sky/foliage
  * masks (denoised support 8, single-pass blur radius 12 -> reach 20) and the [OvercastSkyMask] (denoised
  * support 8, texture detail energy two sequential box means 2*12 = 24, mask blur 12 ->
- * reach 44), all under 86. The two tail
+ * reach 44), all under 158. The two tail
  * stages DO widen the read radius in sequence: the roll-off's local reference reads a
- * radius-24 neighbourhood of the post-[Contrast] frame (reach 8+32+6 = 46 from the input,
- * so 70 total), and the sky chroma smoothing reads a `2*8 = 16` neighbourhood of the
- * post-roll-off frame, closing the chain at 86. Give every tile a halo of at least that
+ * radius-<=96 neighbourhood of the post-[Contrast] frame (reach 8+32+6 = 46 from the input,
+ * so <=142 total), and the sky chroma smoothing reads a `2*8 = 16` neighbourhood of the
+ * post-roll-off frame, closing the chain at 158. Give every tile a halo of at least that
  * many pixels of real neighbouring content and its CORE (the halo cropped off) sees exactly
  * the neighbourhood the whole-frame pass saw, so tile cores agree in their interior with no
- * feathering. [OVERLAP] is 88 (>= 86, a 2 px margin). The sky position prior is geometric,
- * not content-derived, so each tile reproduces it exactly from its absolute row offset (see
- * [finishRegion]) -- it adds no spatial support.
+ * feathering. [OVERLAP] is 160 (>= 158, a 2 px margin). Sizing the constants for the radius
+ * CEILING costs halo area on every tiled finish (padded tile `512 + 2*160 = 832` px vs 688
+ * before, ~1.46x the per-tile pixels, ~106 MB of float working set per tile -- still under
+ * the ~120 MB analysis-pass transient that dominates [peakBytesEstimate], so the documented
+ * 12.5 MP peak is unchanged); the actual radius at 12 MP is ~63, so part of that halo is
+ * margin, the price of keeping [OVERLAP] a compile-time constant. The sky position prior is
+ * geometric, not content-derived, so each tile reproduces it exactly from its absolute row
+ * offset (see [finishRegion]) -- it adds no spatial support. The roll-off radius is derived
+ * from the FULL image width, threaded into [finishRegion], never from the padded tile
+ * width, so every tile gates with the whole-frame radius.
  *
  * ## The one caveat: box-blur running sums are accumulation-order sensitive
  *
@@ -130,12 +139,13 @@ data class FinishingStats(
  */
 object TiledFinishing {
 
-    /** Chain spatial support in pixels (chroma 8 + local-tone 32 + detail 6 + roll-off
-     *  gate 24 + sky-smooth 16); see class doc. */
-    const val SUPPORT_RADIUS: Int = 86
+    /** Worst-case chain spatial support in pixels (chroma 8 + local-tone 32 + detail 6 +
+     *  roll-off gate ceiling [ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS] 96 + sky-smooth
+     *  16); see class doc. */
+    const val SUPPORT_RADIUS: Int = 158
 
     /** Tile halo in pixels: >= [SUPPORT_RADIUS], with a small margin. */
-    const val OVERLAP: Int = 88
+    const val OVERLAP: Int = 160
 
     /** Default core tile side; the padded tile is `tileSize + 2 * OVERLAP` per axis. */
     const val DEFAULT_TILE_SIZE: Int = 512
@@ -265,8 +275,9 @@ object TiledFinishing {
         val tile = Frame(tileW, tileH, tileArgb, frame.timestampMillis)
 
         // The tile's first row within the full image, so SemanticRendering's sky POSITION
-        // prior matches the whole-frame weight at each absolute row.
-        val finished = finishRegion(tile, params, stats, py0, height, timingHook).argb
+        // prior matches the whole-frame weight at each absolute row; the full-image width,
+        // so ChromaRollOff's resolution-adaptive gate radius matches the whole-frame one.
+        val finished = finishRegion(tile, params, stats, py0, height, width, timingHook).argb
         for (y in cy0 until cy1) {
             val tileRow = (y - py0) * tileW + (cx0 - px0)
             val outRow = y * width + cx0
@@ -286,8 +297,12 @@ object TiledFinishing {
      * full-image height; both are threaded ONLY into [SemanticRendering]'s [SkyMask] and
      * [OvercastSkyMask] position priors so a tile reproduces the whole-frame vertical weight
      * at each absolute row (the chroma/luma/texture priors and the sky chroma smoothing are
-     * local to the tile). [timingHook] reports each stage's wall-clock nanos for THIS tile
-     * (issue #115, see [FinishingPipeline.apply]); null takes the bare untimed path.
+     * local to the tile). [imageWidth] is the full-image width, threaded ONLY into
+     * [ChromaRollOff]'s resolution-adaptive gate radius
+     * ([FinishingPipeline.applyChromaRollOff], issue #114) so a tile gates with the
+     * whole-frame radius rather than one derived from its own padded width. [timingHook]
+     * reports each stage's wall-clock nanos for THIS tile (issue #115, see
+     * [FinishingPipeline.apply]); null takes the bare untimed path.
      */
     internal fun finishRegion(
         tile: Frame,
@@ -295,6 +310,7 @@ object TiledFinishing {
         stats: FinishingStats,
         rowOffset: Int = 0,
         imageHeight: Int = tile.height,
+        imageWidth: Int = tile.width,
         timingHook: ((stage: String, nanos: Long) -> Unit)? = null,
     ): Frame {
         val balanced = timedStage(timingHook, FinishingPipeline.STAGE_WHITE_BALANCE) {
@@ -353,13 +369,14 @@ object TiledFinishing {
             Contrast.apply(saturated, params.contrast)
         }
         // Chroma roll-off is WINDOWED-local (its isolation gate box-means the chroma-
-        // magnitude plane over radius 24, accounted for in SUPPORT_RADIUS) with no global
-        // statistic, so a tile core computes the same values the whole-frame path does --
-        // it needs nothing from FinishingStats. Applied identically to FinishingPipeline
-        // via the shared helper (subject to the same box-blur caveat as the other windowed
-        // stages).
+        // magnitude plane over the width-scaled radius, whose ceiling SUPPORT_RADIUS is
+        // sized for) with no global statistic, so a tile core computes the same values the
+        // whole-frame path does -- it needs nothing from FinishingStats. The radius derives
+        // from the FULL image width (issue #114), so every tile gates exactly as the
+        // whole-frame path. Applied identically to FinishingPipeline via the shared helper
+        // (subject to the same box-blur caveat as the other windowed stages).
         val rolledOff = timedStage(timingHook, FinishingPipeline.STAGE_CHROMA_ROLL_OFF) {
-            FinishingPipeline.applyChromaRollOff(contrasted, params)
+            FinishingPipeline.applyChromaRollOff(contrasted, params, imageWidth)
         }
         // Semantic rendering runs AFTER the roll-off (see FinishingPipeline.apply): its sky
         // chroma smoothing is WINDOWED-local (radius 8 -> support 16, inside OVERLAP) and its

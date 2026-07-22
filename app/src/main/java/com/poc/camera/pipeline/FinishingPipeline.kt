@@ -51,7 +51,10 @@ package com.poc.camera.pipeline
  * saturated content -- the colorchart patches, a rich scene -- passes through nearly
  * untouched instead of being desaturated broadly as the original whole-frame shoulder did
  * (that shoulder cost colorchart 31.07 -> 23.80 dB of rendition PSNR-vs-clean; the gate
- * recovers it). Like [backlitRescue] it ships OFF in DEFAULT (0.0) and ON at 1.0 in
+ * recovers it). The gate's neighbourhood radius is resolution-adaptive at the pipeline
+ * call site ([ChromaRollOffParams.forImageWidth], issue #114), so "isolated" means the
+ * same physical fraction of the frame from the 128 px fixtures up to a native 12 MP
+ * capture. Like [backlitRescue] it ships OFF in DEFAULT (0.0) and ON at 1.0 in
  * [RENDITION]: with the gate the operator no longer threatens the colorchart fidelity
  * floor, but the clean-truth axis still has no matching target for the residual
  * isolated-spot compression, so DEFAULT stays conservative. The rendition axis is
@@ -481,10 +484,21 @@ object FinishingPipeline {
      * statistic; its isolation gate has a bounded spatial support (the box-mean
      * neighbourhood radius), accounted for in [TiledFinishing.SUPPORT_RADIUS], so it needs
      * nothing from [FinishingStats] and tiles seam-free with the standard halo.
+     *
+     * The gate radius is resolution-adaptive (issue #114): this call site sizes it with
+     * [ChromaRollOffParams.forImageWidth] so an isolated runaway region is judged over the
+     * same physical fraction of the frame at any resolution -- at native 12 MP the
+     * validated fixed radius 24 would let a lips-sized region fill its own neighbourhood
+     * and escape. [imageWidth] must be the FULL image width: a [TiledFinishing] tile
+     * passes the full-frame width (not the padded tile width) so every tile applies the
+     * whole-frame radius and the finish stays seam-consistent.
      */
-    internal fun applyChromaRollOff(frame: Frame, params: FinishingParams): Frame {
+    internal fun applyChromaRollOff(frame: Frame, params: FinishingParams, imageWidth: Int = frame.width): Frame {
         if (params.chromaRollOff <= 0.0) return frame
-        return ChromaRollOff.apply(frame, ChromaRollOffParams.DEFAULT.copy(strength = params.chromaRollOff))
+        return ChromaRollOff.apply(
+            frame,
+            ChromaRollOffParams.forImageWidth(imageWidth).copy(strength = params.chromaRollOff),
+        )
     }
 
     /** The precomputed sky/overcast/foliage masks feeding [SemanticRendering], shared by the

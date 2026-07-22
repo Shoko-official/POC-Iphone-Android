@@ -95,33 +95,44 @@ data class FinishingStats(
  * `2 * radius`, giving per-stage supports of chroma `2*4 = 8`, local-tone `2*16 = 32`,
  * detail `2*3 = 6` (its 3x3 morphology adds 1, subsumed); [ChromaRollOff]'s isolation gate
  * is a SINGLE [BoxBlur] of the chroma-magnitude plane, so its support is its neighbourhood
- * radius -- resolution-adaptive since issue #114 ([ChromaRollOffParams.forImageWidth]) and
- * bounded by [ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS] `= 96`, which is what the
- * compile-time chain must be sized for; and [SemanticRendering]'s sky chroma smoothing adds
- * `2*8 = 16` at the tail. The pure stages add 0. The worst-case chain support is therefore
- * `8 + 32 + 6 + 96 + 16 = 158` px ([SUPPORT_RADIUS]). The windowed-local mask pieces do NOT
+ * radius -- resolution-adaptive since issue #114 ([ChromaRollOffParams.forImageWidth]), the
+ * chain's ONLY width-dependent support, bounded by
+ * [ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS] `= 96`; and [SemanticRendering]'s sky
+ * chroma smoothing adds `2*8 = 16` at the tail. The pure stages add 0. The fixed stages
+ * therefore contribute `8 + 32 + 6 + 16 = 62` px ([FIXED_STAGES_SUPPORT]), the ACTUAL chain
+ * support at a given image width is that plus the width-scaled gate radius
+ * ([supportRadiusFor]), and the worst case at the radius ceiling is `62 + 96 = 158` px
+ * ([SUPPORT_RADIUS]). The windowed-local mask pieces do NOT
  * extend this, because they feed a stage as per-pixel coefficients rather than widening its
  * read radius and their own reach is inside the chain support: the [SkinMask] modulation
  * (denoised support 8, blur radius 8 -> reach 16), the [SemanticRendering] sky/foliage
  * masks (denoised support 8, single-pass blur radius 12 -> reach 20) and the [OvercastSkyMask] (denoised
  * support 8, texture detail energy two sequential box means 2*12 = 24, mask blur 12 ->
- * reach 44), all under 158. The two tail
+ * reach 44), all under the 86 px minimum of [supportRadiusFor]. The two tail
  * stages DO widen the read radius in sequence: the roll-off's local reference reads a
- * radius-<=96 neighbourhood of the post-[Contrast] frame (reach 8+32+6 = 46 from the input,
- * so <=142 total), and the sky chroma smoothing reads a `2*8 = 16` neighbourhood of the
- * post-roll-off frame, closing the chain at 158. Give every tile a halo of at least that
- * many pixels of real neighbouring content and its CORE (the halo cropped off) sees exactly
- * the neighbourhood the whole-frame pass saw, so tile cores agree in their interior with no
- * feathering. [OVERLAP] is 160 (>= 158, a 2 px margin). Sizing the constants for the radius
- * CEILING costs halo area on every tiled finish (padded tile `512 + 2*160 = 832` px vs 688
- * before, ~1.46x the per-tile pixels, ~106 MB of float working set per tile -- still under
- * the ~120 MB analysis-pass transient that dominates [peakBytesEstimate], so the documented
- * 12.5 MP peak is unchanged); the actual radius at 12 MP is ~63, so part of that halo is
- * margin, the price of keeping [OVERLAP] a compile-time constant. The sky position prior is
- * geometric, not content-derived, so each tile reproduces it exactly from its absolute row
- * offset (see [finishRegion]) -- it adds no spatial support. The roll-off radius is derived
- * from the FULL image width, threaded into [finishRegion], never from the padded tile
- * width, so every tile gates with the whole-frame radius.
+ * radius-<=96 neighbourhood of the post-[Contrast] frame (reach 8+32+6 = 46 from the
+ * input), and the sky chroma smoothing reads a `2*8 = 16` neighbourhood of the
+ * post-roll-off frame, closing the chain at [supportRadiusFor]. Give every tile a halo of
+ * at least that many pixels of real neighbouring content and its CORE (the halo cropped
+ * off) sees exactly the neighbourhood the whole-frame pass saw, so tile cores agree in
+ * their interior with no feathering -- and since ANY halo >= the true support yields the
+ * same cores, the halo size never affects output correctness, only how much padded area
+ * each tile re-finishes. The halo is therefore sized per finish from the ACTUAL support
+ * (issue #121): [overlapFor] `= supportRadiusFor + OVERLAP_MARGIN` is the width-adaptive
+ * default of [apply]. At 12 MP (4032 px wide, radius 63) it pads each 512 px core to
+ * `512 + 2*127 = 766` px instead of the ceiling-sized `512 + 2*160 = 832` -- ~15% fewer
+ * padded pixels per interior tile (~2.0x the frame re-finished across the grid vs ~2.4x
+ * when the halo was pinned at the ceiling), with ~90 MB of per-tile float working set vs
+ * ~106 MB, both under the ~120 MB analysis-pass transient that dominates
+ * [peakBytesEstimate]. [SUPPORT_RADIUS] / [OVERLAP] `= 160` remain the documented CEILING:
+ * [overlapFor] never exceeds [OVERLAP] (equality at the radius cap; asserted in
+ * ChromaRollOffScalingTest), so ceiling-based worst-case sizing stays valid. The sky
+ * position prior is geometric, not content-derived, so each tile reproduces it exactly
+ * from its absolute row offset (see [finishRegion]) -- it adds no spatial support. The
+ * roll-off radius is derived from the FULL image width, threaded into [finishRegion],
+ * never from the padded tile width, so every tile gates with the whole-frame radius -- the
+ * SAME width [overlapFor] sizes the halo from, so the halo always covers the radius
+ * actually applied.
  *
  * ## The one caveat: box-blur running sums are accumulation-order sensitive
  *
@@ -139,15 +150,31 @@ data class FinishingStats(
  */
 object TiledFinishing {
 
-    /** Worst-case chain spatial support in pixels (chroma 8 + local-tone 32 + detail 6 +
-     *  roll-off gate ceiling [ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS] 96 + sky-smooth
-     *  16); see class doc. */
-    const val SUPPORT_RADIUS: Int = 158
+    /** Chain spatial support (px) of the width-INDEPENDENT stages: each [GuidedFilter]
+     *  stage reads `2 * radius` (chroma denoise 8, local tone 32, detail 6, sky chroma
+     *  smoothing 16 -- see the class-doc derivation), summing to 62. The roll-off gate's
+     *  width-scaled radius is added on top: actual by [supportRadiusFor], ceiling by
+     *  [SUPPORT_RADIUS]. */
+    const val FIXED_STAGES_SUPPORT: Int =
+        2 * ChromaDenoiser.DEFAULT_RADIUS +
+            2 * LocalToneParams.DEFAULT_RADIUS +
+            2 * DetailParams.DEFAULT_RADIUS +
+            2 * SemanticRenderingParams.DEFAULT_SKY_SMOOTH_RADIUS
 
-    /** Tile halo in pixels: >= [SUPPORT_RADIUS], with a small margin. */
-    const val OVERLAP: Int = 160
+    /** Worst-case chain spatial support in pixels: [FIXED_STAGES_SUPPORT] plus the
+     *  roll-off gate radius ceiling [ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS] (96) --
+     *  the upper bound of [supportRadiusFor]; see class doc. */
+    const val SUPPORT_RADIUS: Int = FIXED_STAGES_SUPPORT + ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS
 
-    /** Default core tile side; the padded tile is `tileSize + 2 * OVERLAP` per axis. */
+    /** House margin (px) [overlapFor] keeps above the exact chain support. */
+    const val OVERLAP_MARGIN: Int = 2
+
+    /** Ceiling tile halo in pixels ([SUPPORT_RADIUS] + [OVERLAP_MARGIN]): the upper bound
+     *  of the width-adaptive [overlapFor] (which reaches it at the radius cap), kept for
+     *  conservative worst-case sizing. */
+    const val OVERLAP: Int = SUPPORT_RADIUS + OVERLAP_MARGIN
+
+    /** Default core tile side; the padded tile is `tileSize + 2 * overlap` per axis. */
     const val DEFAULT_TILE_SIZE: Int = 512
 
     /**
@@ -192,6 +219,25 @@ object TiledFinishing {
     private const val BYTES_PER_INT = 4L
 
     /**
+     * The ACTUAL chain spatial support (px) for a frame [imageWidth] px wide (issue #121):
+     * [FIXED_STAGES_SUPPORT] plus the width-scaled roll-off gate radius
+     * ([ChromaRollOffParams.forImageWidth]), the chain's only width-dependent stage.
+     * Ranges from 86 (sub-reference widths, where the radius floors at 24) up to
+     * [SUPPORT_RADIUS] at the radius cap.
+     */
+    fun supportRadiusFor(imageWidth: Int): Int =
+        FIXED_STAGES_SUPPORT + ChromaRollOffParams.forImageWidth(imageWidth).neighborhoodRadius
+
+    /**
+     * The width-adaptive tile halo (issue #121): [supportRadiusFor] plus [OVERLAP_MARGIN],
+     * the default halo of [apply] and [peakBytesEstimate]. Any halo >= the true support
+     * yields identical tile cores (see the class doc), so sizing it from the actual radius
+     * instead of the [OVERLAP] ceiling only trims wasted halo area: at 12 MP the padded
+     * tile drops from 832 to 766 px per side. Never exceeds [OVERLAP].
+     */
+    fun overlapFor(imageWidth: Int): Int = supportRadiusFor(imageWidth) + OVERLAP_MARGIN
+
+    /**
      * Finishes [frame] in tiles. [stats] may be supplied (the bit-identity reference path
      * passes stats computed on the whole frame); when null they are estimated from a
      * block-averaged analysis frame of at most [ANALYSIS_TARGET_PIXELS] pixels -- the
@@ -199,7 +245,10 @@ object TiledFinishing {
      * whole-frame statistics rather than exact.
      *
      * @param tileSize core tile side (padded by [overlap] on every side that has room).
-     * @param overlap halo width; must be >= [SUPPORT_RADIUS] for seam-free cores.
+     * @param overlap halo width; must be >= [supportRadiusFor] of the frame width for
+     *   seam-free cores. Defaults to the width-adaptive [overlapFor] (issue #121); the
+     *   `max(1, ...)` guard only serves the empty-frame short-circuit below, which never
+     *   reads the halo.
      * @param timingHook optional per-stage wall-clock reporter (issue #115), invoked on the
      *   calling thread with [STAGE_STATS_ANALYSIS] once and each [FinishingPipeline] STAGE_*
      *   label once per tile; see [FinishingPipeline.apply]. Null (the default) takes the
@@ -209,7 +258,7 @@ object TiledFinishing {
         frame: Frame,
         params: FinishingParams = FinishingParams.DEFAULT,
         tileSize: Int = DEFAULT_TILE_SIZE,
-        overlap: Int = OVERLAP,
+        overlap: Int = overlapFor(max(1, frame.width)),
         stats: FinishingStats? = null,
         timingHook: ((stage: String, nanos: Long) -> Unit)? = null,
     ): Frame {
@@ -336,7 +385,7 @@ object TiledFinishing {
             FinishingPipeline.sharedLumaPlane(denoised, params)
         }
         // Skin-protection modulation is WINDOWED-local (SkinMask blur radius 8 -> support
-        // 16 px, well under OVERLAP), so a tile core computes the same plane the whole-frame
+        // 16 px, well under every halo -- overlapFor floors at 88), so a tile core computes the same plane the whole-frame
         // path does and the finish stays seam-free. Computed identically to FinishingPipeline
         // via the shared helper.
         val skinModulation = timedStage(timingHook, FinishingPipeline.STAGE_SKIN_MASK) {
@@ -344,7 +393,7 @@ object TiledFinishing {
         }
         // Semantic sky/overcast/foliage masks, computed on the denoised tile exactly as the
         // whole-frame path does. Their reach (32 px for sky/foliage, 44 px for the overcast
-        // texture prior -- see the class doc) is inside OVERLAP and both sky position priors
+        // texture prior -- see the class doc) is inside every halo and both sky position priors
         // use the absolute row offset, so the boost is seam-consistent tile-vs-whole-frame.
         val semanticMasks = timedStage(timingHook, FinishingPipeline.STAGE_SEMANTIC_MASKS) {
             FinishingPipeline.semanticMasks(denoised, params, rowOffset, imageHeight, sharedLuma)
@@ -369,8 +418,8 @@ object TiledFinishing {
             Contrast.apply(saturated, params.contrast)
         }
         // Chroma roll-off is WINDOWED-local (its isolation gate box-means the chroma-
-        // magnitude plane over the width-scaled radius, whose ceiling SUPPORT_RADIUS is
-        // sized for) with no global statistic, so a tile core computes the same values the
+        // magnitude plane over the width-scaled radius the halo is sized from --
+        // supportRadiusFor) with no global statistic, so a tile core computes the same values the
         // whole-frame path does -- it needs nothing from FinishingStats. The radius derives
         // from the FULL image width (issue #114), so every tile gates exactly as the
         // whole-frame path. Applied identically to FinishingPipeline via the shared helper
@@ -379,7 +428,7 @@ object TiledFinishing {
             FinishingPipeline.applyChromaRollOff(contrasted, params, imageWidth)
         }
         // Semantic rendering runs AFTER the roll-off (see FinishingPipeline.apply): its sky
-        // chroma smoothing is WINDOWED-local (radius 8 -> support 16, inside OVERLAP) and its
+        // chroma smoothing is WINDOWED-local (radius 8 -> support 16, inside every halo) and its
         // per-pixel boosts are element-wise, so a tile core matches the whole-frame path
         // (subject to the same box-blur caveat as the other windowed stages).
         val semanticRendered = timedStage(timingHook, FinishingPipeline.STAGE_SEMANTIC_RENDER) {
@@ -463,12 +512,17 @@ object TiledFinishing {
      * Each transient is `FLOAT_PLANES_PEAK` doubles + `INT_PLANES_PEAK` ints per pixel over
      * its pixel count. Pure arithmetic, so the memory-ceiling test is deterministic rather
      * than a flaky live-heap probe.
+     *
+     * The [overlap] default mirrors [apply]'s width-adaptive halo (issue #121) so the
+     * estimate models the actual run. At 12.5 MP the reported peak is unchanged either
+     * way: the analysis-pass transient (~120 MB) dominates both the dynamic-halo tile
+     * working set (~90 MB at 768 px padded) and the ceiling one (~106 MB at 832 px).
      */
     fun peakBytesEstimate(
         width: Int,
         height: Int,
         tileSize: Int = DEFAULT_TILE_SIZE,
-        overlap: Int = OVERLAP,
+        overlap: Int = overlapFor(max(1, width)),
     ): Long {
         val pixels = width.toLong() * height.toLong()
         val residentInt = 2L * pixels * BYTES_PER_INT

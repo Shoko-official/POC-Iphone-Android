@@ -83,13 +83,12 @@ class PipelineBenchmarkTest {
         // deliberately generous to absorb cache effects and CI noise on a single run. Note
         // the two sides take DIFFERENT paths: 3 MP finishes whole-frame while 12 MP routes
         // through TiledFinishing (>= TILED_THRESHOLD_PIXELS), whose halo overlap re-finishes
-        // ~2.4x the pixel count (up from ~1.7x when the halo was 88: issue #114 sized the
-        // overlap to 160 for the roll-off radius ceiling) -- the ratio absorbs that
-        // amplification and stays honest as the production 12 MP route. Re-measured
-        // 2026-07-22 with the bounded white-balance estimation on BOTH sides (issue #117;
-        // previously the 3 MP side alone carried a full-resolution estimation, dragging the
-        // ratio down to ~1.7): ratio ~2.7 actual with the 88 halo, expected ~3.5-4 with the
-        // 160 halo, still comfortably under the 8x bound.
+        // ~2.0x the pixel count (the width-adaptive halo is 127 at 4032 px since issue
+        // #121; the fixed 160 ceiling issue #114 pinned re-finished ~2.4x) -- the ratio
+        // absorbs that amplification and stays honest as the production 12 MP route.
+        // Re-measured 2026-07-23 with the width-adaptive halo: ratio ~3.4 actual (down
+        // from ~3.9 measured the same day at the 160 ceiling), still comfortably under
+        // the 8x bound.
         assertTrue(
             "finishing 12MP (${finish12mp.millis} ms) exceeded 8x 3MP (${finish3mp.millis} ms): ratio $scaling",
             finish12mp.millis < 8.0 * finish3mp.millis,
@@ -131,8 +130,8 @@ class PipelineBenchmarkTest {
         // passes on either path. The remaining passes each read a DIFFERENT frame state
         // (or Saturation's integer convention), so no further plane can be shared -- see
         // FinishingPipeline.sharedLumaPlane. One measured pass sizes the remaining cost
-        // in ms; the tiled path additionally re-extracts over the ~2.4x halo area
-        // (overlap 160 since issue #114).
+        // in ms; the tiled path additionally re-extracts over the ~2.0x halo area
+        // (width-adaptive overlap, 127 at 4032 px since issue #121).
         val luma12mp = PipelineBenchmark.lumaExtraction(native.w, native.h)
         println(luma12mp)
         println(
@@ -141,19 +140,21 @@ class PipelineBenchmarkTest {
             ),
         )
 
-        // Measured 2026-07-22 after the shared denoised-state luma plane (issue #113;
-        // 24-thread dev machine), for the record -- report-only, never gated: 3 MP
-        // whole-frame DEFAULT ~0.78 s / RENDITION ~0.95 s (1.22x); 12 MP tiled DEFAULT
-        // ~2.2 s / RENDITION ~3.4 s (1.54x) -- within single-iteration run-to-run noise
-        // of the issue #117 numbers (previously 3 MP ~0.72 / ~0.94 s, 12 MP ~2.0 /
-        // ~3.2 s). The one shared extraction reports as its own near-free stage
-        // (shared-luma ~2-5 ms at 3 MP, ~16 ms summed across the 12 MP tiles) and the
-        // mask-side stages now run extraction-free: skin-mask ~16 ms at 3 MP / ~100 ms
-        // tiled 12 MP, semantic-masks ~76 ms at 3 MP / ~338 ms tiled 12 MP (RENDITION).
-        // Dominant stages are unchanged: the 3 MP whole-frame path is led by
-        // detail-enhance (~54-69%) and chroma-denoise (~12-17%), the tiled 12 MP path by
-        // detail-enhance (~22-34%), chroma-denoise (~22-33%) and, in RENDITION,
-        // semantic-render (~22%). The off stages read 0.0 ms in DEFAULT.
+        // Measured 2026-07-23 after the width-adaptive tile halo (issue #121; 24-thread
+        // dev machine), for the record -- report-only, never gated: 3 MP whole-frame
+        // DEFAULT ~0.75 s / RENDITION ~0.95 s (1.27x; no halo on this path, within noise
+        // of the issue #113 numbers); 12 MP tiled DEFAULT ~2.4 s / RENDITION ~3.6 s
+        // (1.48x), down from ~3.0 s / ~5.0 s measured the same day at the fixed 160
+        // ceiling -- the halo drop to 127 cuts the tiled pixel amplification from ~2.4x
+        // to ~2.0x; the remainder of the delta is single-iteration run-to-run noise. The
+        // one shared extraction reports as its own near-free stage (shared-luma ~3 ms at
+        // 3 MP, ~20 ms summed across the 12 MP tiles) and the mask-side stages run
+        // extraction-free: skin-mask ~14 ms at 3 MP / ~106 ms tiled 12 MP, semantic-masks
+        // ~62 ms at 3 MP / ~356 ms tiled 12 MP (RENDITION). Dominant stages are
+        // unchanged: the 3 MP whole-frame path is led by detail-enhance (~54-68%) and
+        // chroma-denoise (~12-18%), the tiled 12 MP path by detail-enhance (~24-37%),
+        // chroma-denoise (~22-34%) and, in RENDITION, semantic-render (~22%). The off
+        // stages read 0.0 ms in DEFAULT.
 
         // Structural sanity only -- absolute stage times are machine-dependent and stay
         // report-only. The paths and stage sets are deterministic.

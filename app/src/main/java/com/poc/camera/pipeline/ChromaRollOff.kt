@@ -43,7 +43,8 @@ import kotlin.math.sqrt
  *    reference and escapes compression. [forImageWidth] is the call-site sizing policy
  *    that rescales the radius; the [DEFAULT] stays at the validated 24 so direct callers
  *    (and the operator-level goldens) keep the reference-scale contract. This radius is
- *    the operator's spatial support; [TiledFinishing.SUPPORT_RADIUS] is sized for its
+ *    the operator's spatial support; [TiledFinishing.supportRadiusFor] sizes the tile halo
+ *    from the actual scaled value (issue #121), [TiledFinishing.SUPPORT_RADIUS] from its
  *    [MAX_NEIGHBORHOOD_RADIUS] ceiling.
  *
  * The winning shoulder params on the real pair were [knee] 30 and [soft] 18 at full
@@ -165,9 +166,9 @@ data class ChromaRollOffParams(
  * row-parallel contract and is BYTE-identical across chunk counts. It derives no global
  * statistic, but the box mean gives it a spatial support of
  * [ChromaRollOffParams.neighborhoodRadius] pixels, which [TiledFinishing] accounts for in
- * its halo ([TiledFinishing.SUPPORT_RADIUS], sized for the
- * [ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS] ceiling of the resolution-adaptive
- * radius). At [ChromaRollOffParams.strength] <= 0 the
+ * its width-adaptive halo ([TiledFinishing.supportRadiusFor], issue #121; ceiling
+ * [TiledFinishing.SUPPORT_RADIUS] at the [ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS]
+ * cap of the resolution-adaptive radius). At [ChromaRollOffParams.strength] <= 0 the
  * input frame is returned unchanged (same reference, bit-exact passthrough). A pixel with
  * chroma magnitude at or under its effective knee reconstructs to its exact input (the
  * scale is exactly 1 and `Y + (channel - Y)` rounds back to the channel), so below-knee and

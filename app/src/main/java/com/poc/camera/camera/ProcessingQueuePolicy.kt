@@ -17,8 +17,8 @@ package com.poc.camera.camera
 enum class ProcessingStage { Capturing, Merging, Finishing, Saving }
 
 /**
- * Pure decision logic for issue #86's capture/processing queue: whether the shutter/burst
- * button/volume key may start a new capture, and how the processing [ProcessingStage]
+ * Pure decision logic for issue #86's capture/processing queue: whether the shutter/volume
+ * key may start a new capture, and how the processing [ProcessingStage]
  * should be presented on the StatusChip near the last-capture thumbnail. Kept free of
  * Compose/Android classes, like [ZoomLogic]/[CinematicOverlayText], so the counter bounds
  * and label composition are unit tested without Robolectric; callers resolve every label via
@@ -28,8 +28,8 @@ enum class ProcessingStage { Capturing, Merging, Finishing, Saving }
  * ## The isCapturing / processingCount split
  *
  * Before issue #86 a single `isBurstInProgress` flag stayed true from the first frame of a
- * burst all the way through merge, finish and save, so the shutter/burst button stayed
- * disabled for the whole span even though [BurstController] itself only needs exclusivity
+ * burst all the way through merge, finish and save, so the shutter stayed disabled for the
+ * whole span even though [BurstController] itself only needs exclusivity
  * while frames are being physically acquired (`armed`, one worker thread, see
  * [BurstController]'s own doc). This split makes that distinction real:
  *
@@ -56,7 +56,7 @@ object ProcessingQueuePolicy {
     const val DEFAULT_MAX_CONCURRENT_PROCESSING = 2
 
     /**
-     * Whether the shutter/burst button/volume key may start a new capture right now.
+     * Whether the shutter/volume key may start a new capture right now.
      * Refused while frames are still being acquired ([isCapturing]) or while
      * [maxConcurrentProcessing] merge/finish jobs are already in flight ([processingCount]).
      */

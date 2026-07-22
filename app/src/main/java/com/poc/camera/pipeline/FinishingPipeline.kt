@@ -369,7 +369,8 @@ object FinishingPipeline {
      * reports the same labels once per tile (the caller accumulates them) plus
      * [TiledFinishing.STAGE_STATS_ANALYSIS] for its one-off analysis pass; its
      * [STAGE_WHITE_BALANCE] covers only the per-tile gain application, the estimation being
-     * part of the analysis pass.
+     * part of the analysis pass. The whole-frame path's [STAGE_WHITE_BALANCE] covers its
+     * bounded analysis downsample + estimation + full-resolution application (issue #117).
      */
     const val STAGE_BACKLIT = "backlit"
     const val STAGE_WHITE_BALANCE = "white-balance"
@@ -407,7 +408,15 @@ object FinishingPipeline {
         }
         val balanced = timedStage(timingHook, STAGE_WHITE_BALANCE) {
             if (params.whiteBalance > 0.0) {
-                WhiteBalance.apply(rescued, params.whiteBalance)
+                // Bounded estimation (issue #117): the gains are estimated ONCE on the same
+                // block-averaged analysis frame the tiled path uses (<= ~1 MP; the frame
+                // itself when already within that budget, so a small frame estimates at
+                // full resolution and the output is bit-identical to the unbounded path),
+                // then applied at full resolution. The gain delta of the downsampled
+                // estimate is < 0.5% on the cast scenes -- see
+                // FinishingPipelineBoundedWbTest / TiledFinishingStatsApproximationTest.
+                val gains = WhiteBalance.estimateGains(TiledFinishing.analysisFrame(rescued))
+                WhiteBalance.applyGains(rescued, gains, params.whiteBalance)
             } else {
                 rescued
             }

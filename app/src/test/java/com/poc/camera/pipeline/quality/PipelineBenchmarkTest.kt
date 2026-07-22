@@ -71,9 +71,9 @@ class PipelineBenchmarkTest {
 
         // Tripwire: 3 MP full pipeline must complete far inside 30 s on any plausible
         // CI machine. A catastrophic regression (e.g. O(n^2)) would take minutes.
-        // Re-measured 2026-07-22 with the current chain (backlit rescue, chroma roll-off,
-        // semantic rendering and skin protection all landed since the last record): ~2.9 s
-        // actual on a 24-thread dev machine, so the 30 s bound keeps ~10x CI headroom.
+        // Re-measured 2026-07-22 after the bounded white-balance estimation (issue #117):
+        // ~2.4 s actual on a 24-thread dev machine (down from ~2.9 s with the full-res
+        // estimation), so the 30 s bound keeps >12x CI headroom.
         assertTrue(
             "3MP full pipeline ${fullBurst.millis} ms exceeded the 30s regression tripwire",
             fullBurst.millis < 30_000.0,
@@ -84,10 +84,10 @@ class PipelineBenchmarkTest {
         // the two sides take DIFFERENT paths: 3 MP finishes whole-frame while 12 MP routes
         // through TiledFinishing (>= TILED_THRESHOLD_PIXELS), whose halo overlap re-finishes
         // ~1.9x the pixel count -- the ratio absorbs that amplification and stays honest as
-        // the production 12 MP route. Re-measured 2026-07-22 with the current DEFAULT chain:
-        // ratio ~1.7 actual -- sub-4x because the 3 MP side carries the full-resolution
-        // WhiteBalance estimation while the tiled 12 MP side estimates on its ~1 MP
-        // analysis frame (see the stage breakdown test).
+        // the production 12 MP route. Re-measured 2026-07-22 with the bounded white-balance
+        // estimation on BOTH sides (issue #117; previously the 3 MP side alone carried a
+        // full-resolution estimation, dragging the ratio down to ~1.7): ratio ~2.7 actual,
+        // still comfortably under the 8x bound despite the halo amplification.
         assertTrue(
             "finishing 12MP (${finish12mp.millis} ms) exceeded 8x 3MP (${finish3mp.millis} ms): ratio $scaling",
             finish12mp.millis < 8.0 * finish3mp.millis,
@@ -119,26 +119,32 @@ class PipelineBenchmarkTest {
         )
 
         // Shared-luma sizing (issue #113): counted from the stage sources, the RENDITION
-        // chain runs 15 separate full-res RGB->Y passes per finished frame (detector,
-        // 2x WB cues, chroma denoise, skin mask, sky mask, 2x overcast mask, foliage mask,
-        // local tone, detail enhance, saturation, 2x chroma roll-off, semantic render;
-        // 16 with the backlit lift engaged) vs 7 in DEFAULT. One measured pass sizes the
-        // redundancy in ms; the tiled path additionally re-extracts over the ~1.9x halo area.
+        // chain runs 13 separate full-res RGB->Y passes per finished frame (detector,
+        // chroma denoise, skin mask, sky mask, 2x overcast mask, foliage mask, local tone,
+        // detail enhance, saturation, 2x chroma roll-off, semantic render; 14 with the
+        // backlit lift engaged) vs 5 in DEFAULT. The two WB cue passes run at the bounded
+        // <= 1 MP analysis resolution since issue #117, so they no longer count as full-res
+        // passes on either path. One measured pass sizes the redundancy in ms; the tiled
+        // path additionally re-extracts over the ~1.9x halo area.
         val luma12mp = PipelineBenchmark.lumaExtraction(native.w, native.h)
         println(luma12mp)
         println(
-            "shared-luma sizing: 15 RENDITION passes x %.1f ms = ~%.0f ms of RGB->Y at 12 MP (whole-frame equivalent)".format(
-                luma12mp.millis, 15 * luma12mp.millis,
+            "shared-luma sizing: 13 RENDITION passes x %.1f ms = ~%.0f ms of RGB->Y at 12 MP (whole-frame equivalent)".format(
+                luma12mp.millis, 13 * luma12mp.millis,
             ),
         )
 
-        // Measured 2026-07-22 (24-thread dev machine), for the record -- report-only,
-        // never gated: 3 MP whole-frame DEFAULT ~2.4 s / RENDITION ~2.6 s (1.11x); 12 MP
-        // tiled DEFAULT ~2.4 s / RENDITION ~3.6 s (1.49x). Dominant stages: the 3 MP
-        // whole-frame path is led by white-balance ESTIMATION (~37-53% of total -- the
-        // boxed gray-world sample lists plus two whole-frame sorts), the tiled 12 MP path
-        // by chroma-denoise (~21-33%), detail-enhance (~18-27%) and, in RENDITION,
-        // semantic-render (~22%). The off stages read 0.0 ms in DEFAULT.
+        // Measured 2026-07-22 after the bounded white-balance estimation (issue #117;
+        // 24-thread dev machine), for the record -- report-only, never gated: 3 MP
+        // whole-frame DEFAULT ~0.72 s / RENDITION ~0.94 s (1.31x); 12 MP tiled DEFAULT
+        // ~2.0 s / RENDITION ~3.2 s (1.62x). White balance fell from the dominant 3 MP
+        // stage (~37-53% of a ~2.4-2.6 s total -- the boxed gray-world sample lists plus
+        // two whole-frame double-luma sorts) to ~25 ms (~3%): gains are now estimated once
+        // on the <= 1 MP analysis frame with histogram cues and applied at full
+        // resolution. Dominant stages now: the 3 MP whole-frame path is led by
+        // detail-enhance (~54-69%) and chroma-denoise (~14-17%), the tiled 12 MP path by
+        // chroma-denoise (~23-38%), detail-enhance (~18-28%) and, in RENDITION,
+        // semantic-render (~24%). The off stages read 0.0 ms in DEFAULT.
 
         // Structural sanity only -- absolute stage times are machine-dependent and stay
         // report-only. The paths and stage sets are deterministic.

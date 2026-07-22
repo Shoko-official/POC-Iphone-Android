@@ -5,6 +5,7 @@ import com.poc.camera.pipeline.FinishingParams
 import com.poc.camera.pipeline.FinishingPipeline
 import com.poc.camera.pipeline.FoliageMask
 import com.poc.camera.pipeline.Frame
+import com.poc.camera.pipeline.OvercastSkyMask
 import com.poc.camera.pipeline.PipelineParallel
 import com.poc.camera.pipeline.SemanticRendering
 import com.poc.camera.pipeline.SkyMask
@@ -36,9 +37,11 @@ import kotlin.math.sqrt
  *      patches partially fire the chroma prior -- the position prior (sky) and the multiplicative
  *      gates (foliage) keep the whole-image mean low.
  *  (f) DETERMINISM + parallel bit-identity.
- *  (g) grayscale no-op: the masks are exactly 0 on a grayscale scene, so the finish is
- *      byte-identical with semanticRendering on vs off (this is what keeps the grayscale
- *      fidelity/rendition floors unmoved).
+ *  (g) grayscale no-op: the blue-sky/foliage masks are exactly 0 on ANY grayscale scene, and
+ *      on a dark grayscale scene ("lowlight") the overcast mask is exactly 0 too, so the
+ *      finish there is byte-identical with semanticRendering on vs off. Bright smooth
+ *      grayscale content CAN fire the overcast prior (issue #106) but receives only the
+ *      mean-preserving chroma smoothing -- see OvercastSkyGoldenTest for those bounds.
  *
  * Baselines were measured 2026-07-22 and are documented in the companion; bounds carry margin
  * so the test is a regression gate, not a brittle snapshot.
@@ -143,9 +146,10 @@ class SemanticRenderingGoldenTest {
         assertTrue("pipeline finish must be deterministic", again.argb.contentEquals(on.argb))
 
         val skyMask = SkyMask.compute(merged)
+        val overcastMask = OvercastSkyMask.compute(merged)
         val folMask = FoliageMask.compute(merged)
-        val serial = SemanticRendering.apply(merged, skyMask, folMask, com.poc.camera.pipeline.SemanticRenderingParams.DEFAULT, PipelineParallel.SERIAL_CHUNKS)
-        val parallel = SemanticRendering.apply(merged, skyMask, folMask, com.poc.camera.pipeline.SemanticRenderingParams.DEFAULT, PipelineParallel.parallelism)
+        val serial = SemanticRendering.apply(merged, skyMask, overcastMask, folMask, com.poc.camera.pipeline.SemanticRenderingParams.DEFAULT, PipelineParallel.SERIAL_CHUNKS)
+        val parallel = SemanticRendering.apply(merged, skyMask, overcastMask, folMask, com.poc.camera.pipeline.SemanticRenderingParams.DEFAULT, PipelineParallel.parallelism)
         assertTrue("parallel semantic rendering must be bit-identical to serial", serial.argb.contentEquals(parallel.argb))
     }
 
@@ -153,17 +157,29 @@ class SemanticRenderingGoldenTest {
 
     @Test
     fun grayscaleSceneIsBitIdenticalWithAndWithoutSemanticRendering() {
-        val grayClean = SyntheticScenes.clean("gradients")
-        assertTrue("grayscale sky mask must be exactly zero", SkyMask.compute(grayClean).all { it == 0.0 })
-        assertTrue("grayscale foliage mask must be exactly zero", FoliageMask.compute(grayClean).all { it == 0.0 })
+        // The BLUE sky and foliage priors are exactly zero on ANY grayscale content; the
+        // overcast prior (issue #106) deliberately fires on bright smooth neutral upper
+        // regions, so the strict bit-identity proof uses "lowlight" -- too dark for the
+        // overcast bright prior, so ALL three masks are exactly zero and the finish is
+        // byte-identical. The gradients scene, whose bright smooth upper areas DO fire the
+        // overcast prior (receiving only benign chroma smoothing), is measured in
+        // OvercastSkyGoldenTest.
+        val gradientsClean = SyntheticScenes.clean("gradients")
+        assertTrue("grayscale sky mask must be exactly zero", SkyMask.compute(gradientsClean).all { it == 0.0 })
+        assertTrue("grayscale foliage mask must be exactly zero", FoliageMask.compute(gradientsClean).all { it == 0.0 })
+
+        val lowlightClean = SyntheticScenes.clean("lowlight")
+        assertTrue("lowlight sky mask must be exactly zero", SkyMask.compute(lowlightClean).all { it == 0.0 })
+        assertTrue("lowlight foliage mask must be exactly zero", FoliageMask.compute(lowlightClean).all { it == 0.0 })
+        assertTrue("lowlight overcast mask must be exactly zero", OvercastSkyMask.compute(lowlightClean).all { it == 0.0 })
 
         val grayMerged = BurstMergePipeline.merge(
-            SyntheticScenes.burst("gradients", SEED, BURST),
+            SyntheticScenes.burst("lowlight", SEED, BURST),
         ).merged
         val withSemantic = FinishingPipeline.apply(grayMerged, FinishingParams.RENDITION)
         val withoutSemantic = FinishingPipeline.apply(grayMerged, FinishingParams.RENDITION.copy(semanticRendering = 0.0))
         assertTrue(
-            "grayscale finish must be byte-identical with vs without semantic rendering",
+            "lowlight finish must be byte-identical with vs without semantic rendering",
             withSemantic.argb.contentEquals(withoutSemantic.argb),
         )
     }

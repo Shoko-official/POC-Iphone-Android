@@ -4,6 +4,7 @@ import kotlin.math.ceil
 import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
@@ -243,7 +244,7 @@ object BacklitRescue {
                 val r = shoulder(((px shr 16) and 0xFF) * effGain * wr)
                 val g = shoulder(((px shr 8) and 0xFF) * effGain)
                 val bch = shoulder((px and 0xFF) * effGain * wb)
-                out[i] = (0xFF shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or bch.toInt()
+                out[i] = (0xFF shl 24) or (r.roundToInt() shl 16) or (g.roundToInt() shl 8) or bch.roundToInt()
             }
         }
         return Frame(width, height, out, frame.timestampMillis)
@@ -345,7 +346,7 @@ object BacklitRescue {
                     val r = shoulder(((px shr 16) and 0xFF) * effGain * wr)
                     val g = shoulder(((px shr 8) and 0xFF) * effGain)
                     val bch = shoulder((px and 0xFF) * effGain * wb)
-                    out[outRow + x] = (0xFF shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or bch.toInt()
+                    out[outRow + x] = (0xFF shl 24) or (r.roundToInt() shl 16) or (g.roundToInt() shl 8) or bch.roundToInt()
                 }
             }
         }

@@ -101,7 +101,7 @@ data class FinishingStats(
  * extend this, because they feed a stage as per-pixel coefficients rather than widening its
  * read radius and their own reach is inside the chain support: the [SkinMask] modulation
  * (denoised support 8, blur radius 8 -> reach 16), the [SemanticRendering] sky/foliage
- * masks (denoised support 8, blur radius 12 -> reach 32) and the [OvercastSkyMask] (denoised
+ * masks (denoised support 8, single-pass blur radius 12 -> reach 20) and the [OvercastSkyMask] (denoised
  * support 8, texture detail energy two sequential box means 2*12 = 24, mask blur 12 ->
  * reach 44), all under 86. The two tail
  * stages DO widen the read radius in sequence: the roll-off's local reference reads a

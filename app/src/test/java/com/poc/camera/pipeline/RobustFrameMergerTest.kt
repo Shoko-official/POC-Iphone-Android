@@ -18,6 +18,35 @@ class RobustFrameMergerTest {
     private fun Frame.channel(x: Int, y: Int, shift: Int): Int =
         (argb[y * width + x] shr shift) and 0xFF
 
+    /**
+     * Naive per-channel mean (integer, rounded) of the accepted frames at zero offset:
+     * the un-gated averaging reference the robust merge is compared against.
+     */
+    private fun plainMean(frames: List<Frame>, accepted: List<Boolean>): Frame {
+        val reference = frames.first()
+        val out = IntArray(reference.argb.size)
+        for (i in out.indices) {
+            var sumR = 0
+            var sumG = 0
+            var sumB = 0
+            var count = 0
+            for (index in frames.indices) {
+                if (!accepted[index]) continue
+                val pixel = frames[index].argb[i]
+                sumR += (pixel shr 16) and 0xFF
+                sumG += (pixel shr 8) and 0xFF
+                sumB += pixel and 0xFF
+                count++
+            }
+            val half = count / 2
+            out[i] = (0xFF shl 24) or
+                (((sumR + half) / count) shl 16) or
+                (((sumG + half) / count) shl 8) or
+                ((sumB + half) / count)
+        }
+        return Frame(reference.width, reference.height, out, reference.timestampMillis)
+    }
+
     @Test
     fun withUnitWeightsAndIntegerOffsetsReproducesAveraging() {
         val width = 64
@@ -30,10 +59,10 @@ class RobustFrameMergerTest {
         val offsets = frames.indices.map { if (it == 0) null else zeroOffsets(width, height) }
 
         // A permissive rejector keeps every weight at 1, so the robust merge reduces
-        // to the plain per-channel mean computed by FrameMerger.
+        // to the plain per-channel mean.
         val permissive = GhostRejector(loScale = 1e6, hiScale = 1e6 + 1.0)
         val robust = RobustFrameMerger.merge(frames, accepted, offsets, permissive)
-        val plain = FrameMerger.merge(frames, frames.map { 0 to 0 }, accepted)
+        val plain = plainMean(frames, accepted)
 
         for (y in 0 until height) {
             for (x in 0 until width) {
@@ -78,7 +107,7 @@ class RobustFrameMergerTest {
         val offsets = frames.indices.map { if (it == 0) null else zeroOffsets(width, height) }
 
         val robust = RobustFrameMerger.merge(frames, accepted, offsets)
-        val naive = FrameMerger.merge(frames, frames.map { 0 to 0 }, accepted)
+        val naive = plainMean(frames, accepted)
 
         // In the ghost region the robust merge should reject the moved block and hold
         // the reference value; the naive average is pulled toward the bright block.

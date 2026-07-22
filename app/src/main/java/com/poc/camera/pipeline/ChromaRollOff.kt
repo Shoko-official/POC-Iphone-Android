@@ -33,11 +33,18 @@ import kotlin.math.sqrt
  *    original whole-frame shoulder did. Must be >= 1 (below 1 the uniform-region
  *    passthrough guarantee would not hold).
  *  - [neighborhoodRadius] the box-mean window radius (in pixels) the local reference is
- *    measured over. 24 (a 49x49 window) is the validated neighbourhood scale: large
- *    enough that a lips-sized runaway spot cannot dominate its own reference (so it still
- *    reads as isolated), small enough that a genuinely saturated REGION -- a colour-chart
- *    patch, a flower bed -- fills its own window and passes through. This radius is the
- *    operator's spatial support and is accounted for in [TiledFinishing.SUPPORT_RADIUS].
+ *    measured over. 24 (a 49x49 window) is the validated neighbourhood scale AT THE
+ *    [REFERENCE_WIDTH] working resolution: large enough that a lips-sized runaway spot
+ *    cannot dominate its own reference (so it still reads as isolated), small enough that
+ *    a genuinely saturated REGION -- a colour-chart patch, a flower bed -- fills its own
+ *    window and passes through. "Lips-sized" is a PHYSICAL fraction of the frame, so the
+ *    right radius scales with image width (issue #114): at native 12 MP a runaway region
+ *    spans hundreds of pixels, fills a fixed radius-24 window, raises its own local
+ *    reference and escapes compression. [forImageWidth] is the call-site sizing policy
+ *    that rescales the radius; the [DEFAULT] stays at the validated 24 so direct callers
+ *    (and the operator-level goldens) keep the reference-scale contract. This radius is
+ *    the operator's spatial support; [TiledFinishing.SUPPORT_RADIUS] is sized for its
+ *    [MAX_NEIGHBORHOOD_RADIUS] ceiling.
  *
  * The winning shoulder params on the real pair were [knee] 30 and [soft] 18 at full
  * [strength]; the gate defaults ([isolationFactor] 1.5, [neighborhoodRadius] 24) were
@@ -63,6 +70,55 @@ data class ChromaRollOffParams(
     companion object {
         /** The parameters that won the local pair-tuning against the iPhone reference. */
         val DEFAULT = ChromaRollOffParams()
+
+        /**
+         * Reference image width (px) the validated [DEFAULT] radius is anchored to;
+         * [forImageWidth] scales from it. The anchor is the 1542 px-wide real Pixel
+         * development of the pair-tuning (issues #97, #107) -- the ONLY real capture the
+         * radius-24 gate was validated on. The 128 px synthetic golden fixtures were
+         * validated at radius 24 directly, i.e. with a proportionally much larger window
+         * than scale-consistency would give them; that behaviour is pinned by the golden
+         * suites, which is why [forImageWidth] never scales BELOW the validated radius
+         * (see its KDoc).
+         */
+        const val REFERENCE_WIDTH = 1542
+
+        /**
+         * Ceiling of the [forImageWidth]-scaled radius. 96 keeps the scaling exact up to a
+         * 6168 px-wide image -- above every width the capture path can produce (the ~12.5 MP
+         * [com.poc.camera.camera.BurstImageGeometry.MAX_BURST_PIXELS] decode bound gives
+         * ~4082 px at 4:3, ~4714 px at 16:9) -- while bounding the spatial support the
+         * tiled halo must carry ([TiledFinishing.SUPPORT_RADIUS] is sized for this value).
+         * Beyond 6168 px a (hypothetical) wider image accepts partial gating: a runaway
+         * region larger than the clamped window reads as less isolated than scale-exact,
+         * the conservative failure direction (under-compression, never over-compression).
+         */
+        const val MAX_NEIGHBORHOOD_RADIUS = 96
+
+        /**
+         * [DEFAULT] with [neighborhoodRadius] rescaled from [REFERENCE_WIDTH] to [width]
+         * (linear in width, rounded to the nearest pixel), so the isolation gate judges the
+         * same PHYSICAL fraction of the frame at any resolution (issue #114). The
+         * intensity-domain tuning ([knee], [soft], [isolationFactor], [strength]) describes
+         * chroma-code magnitudes, not distances, so resolution does not change it.
+         *
+         * The scaled radius is clamped to [[DEFAULT].neighborhoodRadius,
+         * [MAX_NEIGHBORHOOD_RADIUS]]. The FLOOR is the validated radius itself, not a
+         * proportional minimum: the documented #107 escape exists only ABOVE the reference
+         * width (a fixed window shrinking relative to content), while every sub-reference
+         * width -- including the 128 px golden fixtures -- was validated at radius 24
+         * directly, so scaling below it would change validated behaviour for no benefit.
+         * The floor is also unreachable in production: burst captures decode at >= 8 MP
+         * ([com.poc.camera.camera.BurstImageGeometry]), i.e. widths >= ~3200 px, where the
+         * scaled radius is already >= ~50.
+         */
+        fun forImageWidth(width: Int): ChromaRollOffParams {
+            require(width > 0) { "width must be > 0" }
+            val scaled = Math.round(DEFAULT.neighborhoodRadius * width.toDouble() / REFERENCE_WIDTH).toInt()
+            return DEFAULT.copy(
+                neighborhoodRadius = scaled.coerceIn(DEFAULT.neighborhoodRadius, MAX_NEIGHBORHOOD_RADIUS),
+            )
+        }
     }
 }
 
@@ -109,7 +165,9 @@ data class ChromaRollOffParams(
  * row-parallel contract and is BYTE-identical across chunk counts. It derives no global
  * statistic, but the box mean gives it a spatial support of
  * [ChromaRollOffParams.neighborhoodRadius] pixels, which [TiledFinishing] accounts for in
- * its halo ([TiledFinishing.SUPPORT_RADIUS]). At [ChromaRollOffParams.strength] <= 0 the
+ * its halo ([TiledFinishing.SUPPORT_RADIUS], sized for the
+ * [ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS] ceiling of the resolution-adaptive
+ * radius). At [ChromaRollOffParams.strength] <= 0 the
  * input frame is returned unchanged (same reference, bit-exact passthrough). A pixel with
  * chroma magnitude at or under its effective knee reconstructs to its exact input (the
  * scale is exactly 1 and `Y + (channel - Y)` rounds back to the channel), so below-knee and

@@ -174,8 +174,9 @@ data class ChromaRollOffParams(
  * scale is exactly 1 and `Y + (channel - Y)` rounds back to the channel), so below-knee and
  * uniformly-saturated content is bit-exact even at full strength.
  *
- * Memory: one extra `DoubleArray` plane (the magnitude plane) plus [BoxBlur]'s two
- * transient planes -- bounded, and far under the finishing chain's guided-filter peaks.
+ * Memory: two extra `DoubleArray` planes (the magnitude plane and the luma plane pass 3
+ * reuses, issue #122) plus [BoxBlur]'s two transient planes -- bounded, and far under the
+ * finishing chain's guided-filter peaks.
  *
  * Pure Kotlin, deterministic, no Android dependencies. Mirrors the validated prototype.
  */
@@ -206,8 +207,11 @@ object ChromaRollOff {
         val soft = params.soft
         val strength = params.strength
         val isolationFactor = params.isolationFactor
-        // Pass 1: the chroma-magnitude plane. Element-wise, so chunk-count independent.
+        // Pass 1: the chroma-magnitude plane, plus the luma plane pass 3 reuses (issue
+        // #122: same expression on the same state, so sharing it is bit-exact and drops
+        // one full-res RGB->Y evaluation per pixel from the operator).
         val mag = DoubleArray(src.size)
+        val luma = DoubleArray(src.size)
         PipelineParallel.parallelRows(src.size, chunkCount) { start, end ->
             for (i in start until end) {
                 val px = src[i]
@@ -215,6 +219,7 @@ object ChromaRollOff {
                 val g = ((px shr 8) and 0xFF).toDouble()
                 val b = (px and 0xFF).toDouble()
                 val y = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
+                luma[i] = y
                 val cr = r - y
                 val cb = b - y
                 mag[i] = sqrt(cr * cr + cb * cb)
@@ -232,7 +237,7 @@ object ChromaRollOff {
                 val r = ((px shr 16) and 0xFF).toDouble()
                 val g = ((px shr 8) and 0xFF).toDouble()
                 val b = (px and 0xFF).toDouble()
-                val y = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
+                val y = luma[i]
                 val cr = r - y
                 val cg = g - y
                 val cb = b - y

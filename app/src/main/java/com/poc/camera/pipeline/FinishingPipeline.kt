@@ -363,48 +363,95 @@ object FinishingPipeline {
      */
     const val TILED_THRESHOLD_PIXELS: Long = 9_000_000L
 
-    fun apply(frame: Frame, params: FinishingParams = FinishingParams.DEFAULT): Frame {
+    /**
+     * Coarse stage labels reported through the optional timing hook of [apply] (issue #115).
+     * One label per stage boundary the benchmark breaks finishing time into. The tiled path
+     * reports the same labels once per tile (the caller accumulates them) plus
+     * [TiledFinishing.STAGE_STATS_ANALYSIS] for its one-off analysis pass; its
+     * [STAGE_WHITE_BALANCE] covers only the per-tile gain application, the estimation being
+     * part of the analysis pass.
+     */
+    const val STAGE_BACKLIT = "backlit"
+    const val STAGE_WHITE_BALANCE = "white-balance"
+    const val STAGE_CHROMA_DENOISE = "chroma-denoise"
+    const val STAGE_SKIN_MASK = "skin-mask"
+    const val STAGE_SEMANTIC_MASKS = "semantic-masks"
+    const val STAGE_LOCAL_TONE = "local-tone"
+    const val STAGE_DETAIL_ENHANCE = "detail-enhance"
+    const val STAGE_TONE_SAT_CONTRAST = "tone-sat-contrast"
+    const val STAGE_CHROMA_ROLL_OFF = "chroma-roll-off"
+    const val STAGE_SEMANTIC_RENDER = "semantic-render"
+
+    /**
+     * Finishes [frame] under [params]. [timingHook], when non-null, receives the wall-clock
+     * nanos of each coarse stage (labelled by the STAGE_* constants) as it completes --
+     * pure measurement for [com.poc.camera.pipeline.quality.PipelineBenchmark] (issue #115).
+     * It is invoked on the calling thread at stage boundaries only, never inside the
+     * per-pixel loops, and a disabled stage still reports its (near-zero) guard time so a
+     * breakdown shows which stages a profile skips. A null hook -- the production default --
+     * inlines to the bare stage calls with no timestamps taken; the hook observes wall time
+     * only, so outputs are byte-identical with or without one.
+     */
+    fun apply(
+        frame: Frame,
+        params: FinishingParams = FinishingParams.DEFAULT,
+        timingHook: ((stage: String, nanos: Long) -> Unit)? = null,
+    ): Frame {
         // Backlit rescue runs FIRST, on the whole frame, ahead of the tiled/whole-frame
         // split so both paths finish the already-rescued frame with consistent global stats
         // (see the class-level ordering rationale). On a non-backlit scene this is a bit-exact
         // passthrough (rescued === frame), so the untouched-scene contract holds.
-        val rescued = applyBacklitRescue(frame, params)
+        val rescued = timedStage(timingHook, STAGE_BACKLIT) { applyBacklitRescue(frame, params) }
         if (rescued.width.toLong() * rescued.height.toLong() >= TILED_THRESHOLD_PIXELS) {
-            return TiledFinishing.apply(rescued, params)
+            return TiledFinishing.apply(rescued, params, timingHook = timingHook)
         }
-        val balanced = if (params.whiteBalance > 0.0) {
-            WhiteBalance.apply(rescued, params.whiteBalance)
-        } else {
-            rescued
+        val balanced = timedStage(timingHook, STAGE_WHITE_BALANCE) {
+            if (params.whiteBalance > 0.0) {
+                WhiteBalance.apply(rescued, params.whiteBalance)
+            } else {
+                rescued
+            }
         }
-        val denoised = if (params.chromaDenoise > 0.0) {
-            ChromaDenoiser.apply(balanced, params.chromaDenoise)
-        } else {
-            balanced
+        val denoised = timedStage(timingHook, STAGE_CHROMA_DENOISE) {
+            if (params.chromaDenoise > 0.0) {
+                ChromaDenoiser.apply(balanced, params.chromaDenoise)
+            } else {
+                balanced
+            }
         }
         // Skin-protection modulation, computed ONCE on the cleaned (post-denoise) chroma and
         // shared by the three operators it bounds. Null when protection is off, so those
         // stages take their original path unchanged.
-        val skinModulation = skinModulation(denoised, params)
+        val skinModulation = timedStage(timingHook, STAGE_SKIN_MASK) { skinModulation(denoised, params) }
         // Semantic sky/foliage masks, also computed ONCE on the denoised chroma and applied at
         // the tail. Null when the stage is off. The whole-frame path spans the whole image, so
         // the sky position prior uses rowOffset 0 over the full height.
-        val semanticMasks = semanticMasks(denoised, params, rowOffset = 0, imageHeight = denoised.height)
-        val locallyMapped = if (params.localContrast > 0.0) {
-            LocalToneMapper.apply(denoised, localToneParams(params.localContrast), skinModulation)
-        } else {
-            denoised
+        val semanticMasks = timedStage(timingHook, STAGE_SEMANTIC_MASKS) {
+            semanticMasks(denoised, params, rowOffset = 0, imageHeight = denoised.height)
         }
-        val enhanced = if (params.detailEnhance > 0.0) {
-            DetailEnhancer.apply(locallyMapped, detailParams(params.detailEnhance), skinModulation)
-        } else {
-            locallyMapped
+        val locallyMapped = timedStage(timingHook, STAGE_LOCAL_TONE) {
+            if (params.localContrast > 0.0) {
+                LocalToneMapper.apply(denoised, localToneParams(params.localContrast), skinModulation)
+            } else {
+                denoised
+            }
         }
-        val toned = ToneCurve(params.shadowsLift, params.highlightRolloff).apply(enhanced)
-        val saturated = Saturation.apply(toned, params.saturation, skinModulation)
-        val contrasted = Contrast.apply(saturated, params.contrast)
-        val rolledOff = applyChromaRollOff(contrasted, params)
-        val semanticRendered = applySemanticRendering(rolledOff, semanticMasks, params)
+        val enhanced = timedStage(timingHook, STAGE_DETAIL_ENHANCE) {
+            if (params.detailEnhance > 0.0) {
+                DetailEnhancer.apply(locallyMapped, detailParams(params.detailEnhance), skinModulation)
+            } else {
+                locallyMapped
+            }
+        }
+        val contrasted = timedStage(timingHook, STAGE_TONE_SAT_CONTRAST) {
+            val toned = ToneCurve(params.shadowsLift, params.highlightRolloff).apply(enhanced)
+            val saturated = Saturation.apply(toned, params.saturation, skinModulation)
+            Contrast.apply(saturated, params.contrast)
+        }
+        val rolledOff = timedStage(timingHook, STAGE_CHROMA_ROLL_OFF) { applyChromaRollOff(contrasted, params) }
+        val semanticRendered = timedStage(timingHook, STAGE_SEMANTIC_RENDER) {
+            applySemanticRendering(rolledOff, semanticMasks, params)
+        }
         return forceOpaque(semanticRendered)
     }
 
@@ -532,4 +579,18 @@ object FinishingPipeline {
         val out = IntArray(src.size) { (0xFF shl 24) or (src[it] and 0x00FFFFFF) }
         return Frame(frame.width, frame.height, out, frame.timestampMillis)
     }
+}
+
+/**
+ * Runs [block], reporting its wall-clock nanos to [hook] under [stage] when a hook is
+ * present. Inlined, so the null-hook production path compiles to the bare [block] call --
+ * no timestamps taken, zero overhead. Shared by [FinishingPipeline.apply] and
+ * [TiledFinishing] so both paths report the same stage labels (issue #115).
+ */
+internal inline fun <T> timedStage(noinline hook: ((String, Long) -> Unit)?, stage: String, block: () -> T): T {
+    if (hook == null) return block()
+    val start = System.nanoTime()
+    val result = block()
+    hook(stage, System.nanoTime() - start)
+    return result
 }

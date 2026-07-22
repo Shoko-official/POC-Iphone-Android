@@ -48,6 +48,98 @@ object PipelineBenchmark {
     }
 
     /**
+     * Per-stage wall-clock breakdown of ONE [FinishingPipeline.apply] finish (issue #115),
+     * captured through the pipeline's timing hook so the measured chain is EXACTLY the
+     * production chain, not a re-enumeration of it. [stages] holds (label, millis) in chain
+     * order; under the tiled [path] each label accumulates its per-tile times (plus the
+     * one-off [TiledFinishing.STAGE_STATS_ANALYSIS] pass), so a label's value is that
+     * stage's total across the whole finish either way. [totalMillis] wraps the entire
+     * apply; the remainder over [stageSumMillis] is untimed glue (tile extraction/copyback,
+     * the final opaque pass, hook overhead).
+     */
+    data class FinishingBreakdown(
+        val label: String,
+        val width: Int,
+        val height: Int,
+        val path: String,
+        val totalMillis: Double,
+        val stages: List<Pair<String, Double>>,
+    ) {
+        val megapixels: Double get() = width.toDouble() * height.toDouble() / 1_000_000.0
+
+        val stageSumMillis: Double get() = stages.sumOf { it.second }
+
+        fun report(): String = buildString {
+            append(
+                "--- %s finishing %dx%d (%.1f MP, %s path): %.1f ms total ---".format(
+                    label, width, height, megapixels, path, totalMillis,
+                ),
+            )
+            for ((stage, millis) in stages) {
+                append("\n  %-18s %8.1f ms  %5.1f%%".format(stage, millis, 100.0 * millis / totalMillis))
+            }
+            append("\n  %-18s %8.1f ms  %5.1f%%".format("(untimed glue)", totalMillis - stageSumMillis, 100.0 * (totalMillis - stageSumMillis) / totalMillis))
+        }
+    }
+
+    /**
+     * Runs one [FinishingPipeline.apply] finish of a synthetic noisy capture at
+     * [width]x[height] under [params], accumulating each stage's wall time through the
+     * timing hook (see [FinishingBreakdown]). Frames at or over
+     * [FinishingPipeline.TILED_THRESHOLD_PIXELS] route through [TiledFinishing] exactly as
+     * production does, so a 12 MP breakdown measures the tiled path (labels accumulated
+     * across tiles) while 3 MP measures the whole-frame path. Input generation is excluded
+     * from the timing.
+     */
+    fun finishingBreakdown(
+        width: Int,
+        height: Int,
+        params: FinishingParams,
+        label: String,
+        seed: Long = DEFAULT_SEED,
+    ): FinishingBreakdown {
+        val input = SyntheticScenes.noisy(scene(width, height, seed), seed)
+        // Tiles are finished sequentially on the calling thread (parallelism lives inside
+        // the stages), so plain accumulation is safe.
+        val stageNanos = LinkedHashMap<String, Long>()
+        val start = System.nanoTime()
+        FinishingPipeline.apply(input, params) { stage, nanos -> stageNanos.merge(stage, nanos, Long::plus) }
+        val totalMillis = (System.nanoTime() - start) / 1_000_000.0
+        val tiled = width.toLong() * height.toLong() >= FinishingPipeline.TILED_THRESHOLD_PIXELS
+        return FinishingBreakdown(
+            label = label,
+            width = width,
+            height = height,
+            path = if (tiled) "tiled" else "whole-frame",
+            totalMillis = totalMillis,
+            stages = stageNanos.map { (stage, nanos) -> stage to nanos / 1_000_000.0 },
+        )
+    }
+
+    /**
+     * Times ONE full-resolution Rec. 601 luma-plane extraction at [width]x[height] -- the
+     * RGB -> Y pass most finishing stages repeat internally -- sizing the issue #113
+     * shared-luma opportunity: multiply by the chain's counted extraction passes for the
+     * redundant cost per finished frame.
+     */
+    fun lumaExtraction(width: Int, height: Int, seed: Long = DEFAULT_SEED): Timing {
+        val src = scene(width, height, seed).argb
+        val start = System.nanoTime()
+        val luma = DoubleArray(src.size) { i ->
+            val pixel = src[i]
+            0.299 * ((pixel shr 16) and 0xFF) + 0.587 * ((pixel shr 8) and 0xFF) + 0.114 * (pixel and 0xFF)
+        }
+        val millis = (System.nanoTime() - start) / 1_000_000.0
+        // Fold one sample into a volatile sink so the extraction cannot be dead-code
+        // eliminated out of the measurement.
+        blackhole += luma[luma.size / 2]
+        return Timing("luma-extract", width, height, 1, 1, millis)
+    }
+
+    @Volatile
+    private var blackhole = 0.0
+
+    /**
      * Times the full still pipeline -- [frames]-frame [BurstMergePipeline] merge then a
      * [FinishingPipeline] DEFAULT finish -- at [width]x[height]. Input generation is
      * excluded from the timing; only the merge + finish is measured.

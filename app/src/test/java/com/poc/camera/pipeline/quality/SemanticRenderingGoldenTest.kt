@@ -269,7 +269,13 @@ class SemanticRenderingGoldenTest {
         const val BURST = 8
 
         // MEASURED 2026-07-22 (seed 0x1A9D5CAFE, 8-frame merge). Actuals -> baked bound (margin):
-        //   sky chroma std ratio (on/off) : 0.74        -> ceiling 0.85 (noise reduced)
+        //   sky chroma std ratio (on/off) : 0.86        -> ceiling 0.92 (noise reduced)
+        //     RE-MEASURED after the [ChromaRollOff] spatial gate (issue #107): both the on and
+        //     off arms run RENDITION's roll-off, and the UNGATED shoulder used to compress the
+        //     (uniformly saturated) sky in both, deflating its chroma std nonlinearly and
+        //     inflating the smoothing's RELATIVE reduction to 0.74. With the gate the sky
+        //     passes the roll-off untouched (off-arm std now 8.10), and the honest
+        //     smoothing-only reduction is 0.86 -- still a clear (>= 8% guaranteed) drop.
         //   sky mean Cb shift             : +4.39 codes -> gate [2, 12] (bounded deepening)
         //   sky hue shift                 : 0.04 deg    -> ceiling 2.0
         //   foliage chroma shift          : +3.78 codes -> floor 2.0, ceiling 12
@@ -279,7 +285,7 @@ class SemanticRenderingGoldenTest {
         //   ground/skin on-vs-off maxDiff : <= 2 codes  -> ceiling 3
         //   colorchart sky|foliage mask   : 0.089|0.096 -> ceiling 0.15 (position/gate keep it low)
         //   every grayscale scene mask    : 0.0000      -> ceiling 0.15 (exact 0)
-        const val MAX_SKY_STD_RATIO = 0.85
+        const val MAX_SKY_STD_RATIO = 0.92
         const val MIN_CB_SHIFT = 2.0
         const val MAX_CB_SHIFT = 12.0
         const val MIN_FOLIAGE_CHROMA_SHIFT = 2.0

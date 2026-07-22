@@ -178,13 +178,33 @@ class RenditionGoldenRegressionTest {
         //                                                 chroma smoothing trims noise)
         // See SemanticRenderingGoldenTest for the sky/foliage proofs and the mask false-positive
         // matrix (whole-image mask mean 0.089 sky / 0.096 foliage on colorchart).
+        //
+        // RE-BASELINED (colorchart only) after the [ChromaRollOff] shoulder gained its SPATIAL
+        // isolation gate (issue #107), seed 0xC0FFEE. The ungated shoulder compressed ANY pixel
+        // above its knee, so it desaturated the uniformly saturated colorchart broadly -- the
+        // 23.804 renPSNR-vs-clean above (and the 23.3 floor baked from it) was the fidelity
+        // cost of that whole-frame desaturation. The gate compresses only chroma that exceeds
+        // 1.5x its neighbourhood's mean, so the chart's patches (each its own neighbourhood)
+        // now pass through and the fidelity cost is largely RECOVERED. The five grayscale
+        // scenes carry no chroma and stay byte-identical; only colorchart moves:
+        //   colorchart renPSNR->clean: 23.971 -> 30.476 (floor RAISED 23.3 -> 29.8, actual*0.98;
+        //                                                 recovering most of the 31.07 the
+        //                                                 ungated shoulder had cost)
+        //   colorchart tgtMAE->clean : 10.360 -> 4.965  (the target no longer encodes the
+        //                                                 broad desaturation; still >> 2.0)
+        //   colorchart renMAE->tgt   : 2.415 -> 2.689   (ceiling 2.46 -> 2.75, actual*1.02.
+        //     NOT a tracking regression: the ungated shoulder crushed chroma VARIANCE in both
+        //     output and target, which artificially tightened tracking (pre-shoulder actual
+        //     was 2.812, ceiling 2.87); the gate restores the chart's real chroma spread and
+        //     tracking returns to just UNDER its pre-shoulder level -- while the fidelity
+        //     floor recovers ~6.5 dB.)
         val FLOORS = listOf(
             Floor("edges", maxMaeVsTarget = 1.74, minPsnrVsClean = 34.3),
             Floor("texture", maxMaeVsTarget = 1.71, minPsnrVsClean = 36.0),
             Floor("gradients", maxMaeVsTarget = 1.50, minPsnrVsClean = 36.2),
             Floor("lowlight", maxMaeVsTarget = 1.29, minPsnrVsClean = 34.1),
             Floor("highcontrast", maxMaeVsTarget = 2.50, minPsnrVsClean = 33.5),
-            Floor("colorchart", maxMaeVsTarget = 2.46, minPsnrVsClean = 23.3),
+            Floor("colorchart", maxMaeVsTarget = 2.75, minPsnrVsClean = 29.8),
         )
     }
 }

@@ -42,19 +42,23 @@ package com.poc.camera.pipeline
  * non-backlit scene is left bit-exactly untouched. Unlike the other stylistic strengths it
  * is deliberately NOT reduced by [skinProtection].
  *
- * [chromaRollOff] is the strength of the [ChromaRollOff] chroma-magnitude shoulder in
- * [0, 1] (0 = off). It runs LAST, after [Saturation] and [Contrast], to compress isolated
- * extreme chroma the earlier stages pushed past the roll-off knee (e.g. lips that escaped
- * the skin-protection ellipse and took the full saturation boost) back toward the rest of
- * the frame, while leaving normal saturation bit-exactly untouched. Like [backlitRescue] it
- * ships OFF in DEFAULT (0.0) and ON at 1.0 in [RENDITION]: the roll-off is a WHOLE-FRAME
- * shoulder with no spatial isolation, so on the clean-truth fidelity axis it would compress
- * the intentionally-saturated colorchart patches and read as error, pushing that scene's
- * chroma MAE past its committed floor (measured: colorchart MAE 4.12 -> ~6.4 at DEFAULT on).
- * The rendition axis stays consistent because [com.poc.camera.pipeline.quality.RenditionTargets]
- * derives its target from [RENDITION], so the target compresses the same chroma the output
- * does. See ChromaRollOffGoldenTest for the compression, hue-preservation and
- * normal-saturation-untouched proofs and the measured DEFAULT-decision evidence.
+ * [chromaRollOff] is the strength of the [ChromaRollOff] spatially gated chroma-magnitude
+ * shoulder in [0, 1] (0 = off). It runs after [Saturation] and [Contrast], to compress
+ * ISOLATED extreme chroma the earlier stages pushed past the roll-off knee (e.g. lips that
+ * escaped the skin-protection ellipse and took the full saturation boost) back toward the
+ * rest of the frame. The isolation gate (issue #107) compresses a pixel only when its
+ * chroma magnitude also exceeds 1.5x its neighbourhood's mean chroma, so uniformly
+ * saturated content -- the colorchart patches, a rich scene -- passes through nearly
+ * untouched instead of being desaturated broadly as the original whole-frame shoulder did
+ * (that shoulder cost colorchart 31.07 -> 23.80 dB of rendition PSNR-vs-clean; the gate
+ * recovers it). Like [backlitRescue] it ships OFF in DEFAULT (0.0) and ON at 1.0 in
+ * [RENDITION]: with the gate the operator no longer threatens the colorchart fidelity
+ * floor, but the clean-truth axis still has no matching target for the residual
+ * isolated-spot compression, so DEFAULT stays conservative. The rendition axis is
+ * consistent because [com.poc.camera.pipeline.quality.RenditionTargets] derives its target
+ * from [RENDITION], so the target compresses the same chroma the output does. See
+ * ChromaRollOffGoldenTest for the compression, uniform-passthrough, hue-preservation
+ * proofs and the measured DEFAULT-decision evidence.
  *
  * [semanticRendering] is the strength of the [SemanticRendering] sky/foliage rendering in
  * [0, 1] (0 = off). It runs LAST of all colour stages, AFTER [ChromaRollOff]: the [SkyMask] /
@@ -182,14 +186,15 @@ data class FinishingParams(
          * bit-exactly untouched -- which is why enabling it here does not move any existing
          * floor. See BacklitRescueGoldenTest for the lift, halo and detector-quiet proofs.
          *
-         * It also ships the [ChromaRollOff] shoulder on at full strength ([chromaRollOff] =
-         * 1.0), catching the post-saturation runaway chroma the rendition look can produce
-         * on an isolated extreme-chroma region. Unlike the backlit rescue this has no scene
-         * gate, so it DOES act on the rendition golden scenes -- but the rendition axis is
-         * self-consistent: [com.poc.camera.pipeline.quality.RenditionTargets] derives its
-         * target from these same RENDITION params, so the target compresses exactly the
-         * chroma the output does and the tracking floors hold. It is kept OFF in [DEFAULT]
-         * because the clean-truth fidelity axis has no such matching target (see
+         * It also ships the [ChromaRollOff] spatially gated shoulder on at full strength
+         * ([chromaRollOff] = 1.0), catching the post-saturation runaway chroma the rendition
+         * look can produce on an ISOLATED extreme-chroma region. Its isolation gate passes
+         * uniformly saturated content through nearly untouched (issue #107), so on the
+         * rendition golden scenes it barely moves even colorchart -- and the axis is
+         * self-consistent regardless: [com.poc.camera.pipeline.quality.RenditionTargets]
+         * derives its target from these same RENDITION params, so the target compresses
+         * exactly the chroma the output does and the tracking floors hold. It is kept OFF in
+         * [DEFAULT] because the clean-truth fidelity axis has no such matching target (see
          * [chromaRollOff]). See ChromaRollOffGoldenTest for the proofs.
          *
          * Finally it ships the [SemanticRendering] sky/foliage stage on at full strength
@@ -319,8 +324,9 @@ data class FinishingParams(
  *
  * [ChromaRollOff] runs after [Saturation] and [Contrast]: it exists to catch the runaway
  * chroma those stages can leave on an isolated extreme-chroma region, so it must see the
- * post-saturation colour it is there to tame, not an earlier state. It is a pure per-pixel op
- * with no global statistic, so its position does not perturb any upstream stats.
+ * post-saturation colour it is there to tame, not an earlier state. It is windowed-local
+ * (its isolation gate box-means the chroma-magnitude plane) with no global statistic, so
+ * its position does not perturb any upstream stats.
  *
  * [SemanticRendering] runs LAST of all, after [ChromaRollOff], as the final colour word before
  * the opaque pass. It applies bounded, region-targeted sky/foliage boosts driven by the
@@ -391,11 +397,12 @@ object FinishingPipeline {
     }
 
     /**
-     * Applies the [ChromaRollOff] chroma-magnitude shoulder to [frame] when
+     * Applies the [ChromaRollOff] spatially gated chroma-magnitude shoulder to [frame] when
      * [FinishingParams.chromaRollOff] is on, at that master strength. Returns [frame]
      * UNCHANGED (same reference, bit-exact) when the strength is 0. It carries no global
-     * statistic and has no spatial support, so it needs nothing from [FinishingStats] and
-     * is seam-free under [TiledFinishing] by construction.
+     * statistic; its isolation gate has a bounded spatial support (the box-mean
+     * neighbourhood radius), accounted for in [TiledFinishing.SUPPORT_RADIUS], so it needs
+     * nothing from [FinishingStats] and tiles seam-free with the standard halo.
      */
     internal fun applyChromaRollOff(frame: Frame, params: FinishingParams): Frame {
         if (params.chromaRollOff <= 0.0) return frame

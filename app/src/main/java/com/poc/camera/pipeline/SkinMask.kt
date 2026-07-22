@@ -93,9 +93,16 @@ object SkinMask {
     /**
      * Skin-likelihood prior of [frame] in [0, 1], one value per pixel (row-major), spatially
      * smoothed with a box blur of [blurRadius]. A grayscale frame yields an all-zero result.
+     *
+     * [luma] may supply the frame's precomputed Rec. 601 luma plane (issue #113: the
+     * finishing paths extract it once from the denoised state and share it across every
+     * mask), sparing this pass its own RGB -> Y derivation; null derives luma internally.
+     * The plane uses the same weights and expression order as the internal derivation, so
+     * the result is bit-identical either way (see SharedLumaPlaneTest).
      */
-    fun compute(frame: Frame, blurRadius: Int = DEFAULT_BLUR_RADIUS): DoubleArray {
+    fun compute(frame: Frame, blurRadius: Int = DEFAULT_BLUR_RADIUS, luma: DoubleArray? = null): DoubleArray {
         val src = frame.argb
+        require(luma == null || luma.size == src.size) { "luma must have one value per pixel" }
         val raw = DoubleArray(src.size)
         // Per-pixel prior is element-wise (row-parallel); the box blur below is parallel
         // internally and its output is bit-identical to the serial path.
@@ -105,7 +112,8 @@ object SkinMask {
                 val r = ((pixel shr 16) and 0xFF).toDouble()
                 val g = ((pixel shr 8) and 0xFF).toDouble()
                 val b = (pixel and 0xFF).toDouble()
-                raw[i] = likelihood(r, g, b)
+                val y = luma?.get(i) ?: (R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b)
+                raw[i] = chromaLikelihood(r, g, b) * lumaGate(y)
             }
         }
         val smoothed = BoxBlur.blur(raw, frame.width, frame.height, blurRadius)

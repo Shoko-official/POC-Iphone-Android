@@ -118,33 +118,39 @@ class PipelineBenchmarkTest {
             ),
         )
 
-        // Shared-luma sizing (issue #113): counted from the stage sources, the RENDITION
-        // chain runs 13 separate full-res RGB->Y passes per finished frame (detector,
-        // chroma denoise, skin mask, sky mask, 2x overcast mask, foliage mask, local tone,
-        // detail enhance, saturation, 2x chroma roll-off, semantic render; 14 with the
-        // backlit lift engaged) vs 5 in DEFAULT. The two WB cue passes run at the bounded
-        // <= 1 MP analysis resolution since issue #117, so they no longer count as full-res
-        // passes on either path. One measured pass sizes the redundancy in ms; the tiled
-        // path additionally re-extracts over the ~1.9x halo area.
+        // Shared-luma census (issue #113): counted from the stage sources, the RENDITION
+        // chain runs 8 separate full-res RGB->Y passes per finished frame (detector,
+        // chroma denoise, the SHARED denoised-state plane -- one extraction replacing the
+        // former skin mask, sky mask, 2x overcast mask, foliage mask and local tone
+        // passes -- detail enhance, saturation, 2x chroma roll-off, semantic render; 9
+        // with the backlit lift engaged) vs 4 in DEFAULT. Before #113 those counts were
+        // 13 (14 engaged) and 5. The two WB cue passes run at the bounded <= 1 MP
+        // analysis resolution since issue #117, so they no longer count as full-res
+        // passes on either path. The remaining passes each read a DIFFERENT frame state
+        // (or Saturation's integer convention), so no further plane can be shared -- see
+        // FinishingPipeline.sharedLumaPlane. One measured pass sizes the remaining cost
+        // in ms; the tiled path additionally re-extracts over the ~1.9x halo area.
         val luma12mp = PipelineBenchmark.lumaExtraction(native.w, native.h)
         println(luma12mp)
         println(
-            "shared-luma sizing: 13 RENDITION passes x %.1f ms = ~%.0f ms of RGB->Y at 12 MP (whole-frame equivalent)".format(
-                luma12mp.millis, 13 * luma12mp.millis,
+            "shared-luma census: 8 RENDITION passes x %.1f ms = ~%.0f ms of RGB->Y at 12 MP (whole-frame equivalent; 13 passes before #113)".format(
+                luma12mp.millis, 8 * luma12mp.millis,
             ),
         )
 
-        // Measured 2026-07-22 after the bounded white-balance estimation (issue #117;
+        // Measured 2026-07-22 after the shared denoised-state luma plane (issue #113;
         // 24-thread dev machine), for the record -- report-only, never gated: 3 MP
-        // whole-frame DEFAULT ~0.72 s / RENDITION ~0.94 s (1.31x); 12 MP tiled DEFAULT
-        // ~2.0 s / RENDITION ~3.2 s (1.62x). White balance fell from the dominant 3 MP
-        // stage (~37-53% of a ~2.4-2.6 s total -- the boxed gray-world sample lists plus
-        // two whole-frame double-luma sorts) to ~25 ms (~3%): gains are now estimated once
-        // on the <= 1 MP analysis frame with histogram cues and applied at full
-        // resolution. Dominant stages now: the 3 MP whole-frame path is led by
-        // detail-enhance (~54-69%) and chroma-denoise (~14-17%), the tiled 12 MP path by
-        // chroma-denoise (~23-38%), detail-enhance (~18-28%) and, in RENDITION,
-        // semantic-render (~24%). The off stages read 0.0 ms in DEFAULT.
+        // whole-frame DEFAULT ~0.78 s / RENDITION ~0.95 s (1.22x); 12 MP tiled DEFAULT
+        // ~2.2 s / RENDITION ~3.4 s (1.54x) -- within single-iteration run-to-run noise
+        // of the issue #117 numbers (previously 3 MP ~0.72 / ~0.94 s, 12 MP ~2.0 /
+        // ~3.2 s). The one shared extraction reports as its own near-free stage
+        // (shared-luma ~2-5 ms at 3 MP, ~16 ms summed across the 12 MP tiles) and the
+        // mask-side stages now run extraction-free: skin-mask ~16 ms at 3 MP / ~100 ms
+        // tiled 12 MP, semantic-masks ~76 ms at 3 MP / ~338 ms tiled 12 MP (RENDITION).
+        // Dominant stages are unchanged: the 3 MP whole-frame path is led by
+        // detail-enhance (~54-69%) and chroma-denoise (~12-17%), the tiled 12 MP path by
+        // detail-enhance (~22-34%), chroma-denoise (~22-33%) and, in RENDITION,
+        // semantic-render (~22%). The off stages read 0.0 ms in DEFAULT.
 
         // Structural sanity only -- absolute stage times are machine-dependent and stay
         // report-only. The paths and stage sets are deterministic.
@@ -199,6 +205,7 @@ class PipelineBenchmarkTest {
             FinishingPipeline.STAGE_BACKLIT,
             FinishingPipeline.STAGE_WHITE_BALANCE,
             FinishingPipeline.STAGE_CHROMA_DENOISE,
+            FinishingPipeline.STAGE_SHARED_LUMA,
             FinishingPipeline.STAGE_SKIN_MASK,
             FinishingPipeline.STAGE_SEMANTIC_MASKS,
             FinishingPipeline.STAGE_LOCAL_TONE,

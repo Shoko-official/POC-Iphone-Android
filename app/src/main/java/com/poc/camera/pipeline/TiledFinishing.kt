@@ -160,10 +160,12 @@ object TiledFinishing {
      * [SemanticRendering]'s sky chroma smoothing, which holds luma, cb, cr and the first
      * filtered chroma plane (4) plus the three semantic mask planes (sky, overcast, foliage)
      * while a [GuidedFilter.guided] pass over the second chroma plane holds its ~9 estimator
-     * planes plus two [BoxBlur] scratch (4 + 3 + 11 = 18, the peak). Used only by
-     * [peakBytesEstimate].
+     * planes plus two [BoxBlur] scratch (4 + 3 + 11 = 18, the peak). One more is budgeted
+     * for the shared denoised-state luma plane (issue #113), which goes dead after the
+     * local-tone stage but is conservatively counted as retained through the tail
+     * (4 + 3 + 11 + 1 = 19). Used only by [peakBytesEstimate].
      */
-    const val FLOAT_PLANES_PEAK: Int = 18
+    const val FLOAT_PLANES_PEAK: Int = 19
 
     /** Full-tile-size `IntArray` buffers live at once (a stage's src + out). */
     const val INT_PLANES_PEAK: Int = 2
@@ -309,23 +311,31 @@ object TiledFinishing {
                 balanced
             }
         }
+        // Shared luma plane of the denoised TILE (issue #113): per-tile scope, no cross-tile
+        // state -- extracted once here and read by the skin/sky/overcast/foliage priors and
+        // the local tone mapper below, exactly as FinishingPipeline.apply shares it on the
+        // whole frame. The values are bit-identical to each stage's own extraction, so tile
+        // cores are unaffected.
+        val sharedLuma = timedStage(timingHook, FinishingPipeline.STAGE_SHARED_LUMA) {
+            FinishingPipeline.sharedLumaPlane(denoised, params)
+        }
         // Skin-protection modulation is WINDOWED-local (SkinMask blur radius 8 -> support
         // 16 px, well under OVERLAP), so a tile core computes the same plane the whole-frame
         // path does and the finish stays seam-free. Computed identically to FinishingPipeline
         // via the shared helper.
         val skinModulation = timedStage(timingHook, FinishingPipeline.STAGE_SKIN_MASK) {
-            FinishingPipeline.skinModulation(denoised, params)
+            FinishingPipeline.skinModulation(denoised, params, sharedLuma)
         }
         // Semantic sky/overcast/foliage masks, computed on the denoised tile exactly as the
         // whole-frame path does. Their reach (32 px for sky/foliage, 44 px for the overcast
         // texture prior -- see the class doc) is inside OVERLAP and both sky position priors
         // use the absolute row offset, so the boost is seam-consistent tile-vs-whole-frame.
         val semanticMasks = timedStage(timingHook, FinishingPipeline.STAGE_SEMANTIC_MASKS) {
-            FinishingPipeline.semanticMasks(denoised, params, rowOffset, imageHeight)
+            FinishingPipeline.semanticMasks(denoised, params, rowOffset, imageHeight, sharedLuma)
         }
         val locallyMapped = timedStage(timingHook, FinishingPipeline.STAGE_LOCAL_TONE) {
             if (params.localContrast > 0.0) {
-                LocalToneMapper.apply(denoised, FinishingPipeline.localToneParams(params.localContrast), skinModulation)
+                LocalToneMapper.apply(denoised, FinishingPipeline.localToneParams(params.localContrast), skinModulation, sharedLuma)
             } else {
                 denoised
             }

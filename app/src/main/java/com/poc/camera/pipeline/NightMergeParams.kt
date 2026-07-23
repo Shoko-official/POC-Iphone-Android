@@ -14,7 +14,10 @@ package com.poc.camera.pipeline
  *    estimate is itself noisy and biased low, so the standard 3-8 ramp starts rejecting
  *    real, correctly-aligned pixels as if they were motion, discarding signal the merge
  *    needs. The wider ramp keeps those pixels (more frames averaged -> less residual
- *    noise) while still cutting true local motion, which sits far past 12 sigma.
+ *    noise) while still cutting true local motion: [RobustFrameMerger] applies the
+ *    ramp at both of its comparison scales, where pixel-scale motion sits far past
+ *    12 raw sigmas and object-scale motion -- even below the raw noise -- clears
+ *    12 low-pass sigmas.
  *
  *  - [motionWeightK] drives a per-frame GLOBAL weight from the frame's tile-align
  *    residual: a frame whose residual (after alignment) exceeds the burst's baseline

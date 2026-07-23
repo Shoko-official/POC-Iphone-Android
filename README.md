@@ -25,7 +25,9 @@ Quality is regression-gated in CI: PSNR/SSIM/MAE golden floors on synthetic scen
 
 ## App features
 
-Tap to focus/expose, pinch zoom, flash and torch, front camera with mirrored selfie saves, volume-key shutter with haptics, processing queue with stage indicator, last-capture thumbnail, quality presets (Natural / Vivid / Detail), HDR burst / night / super-resolution toggles, EXIF on processed outputs, and an in-app A/B comparison viewer with reference import and on-device PSNR/SSIM/MAE.
+Tap to focus/expose, pinch zoom, flash and torch, front camera with mirrored selfie saves, volume-key shutter with haptics, processing queue with stage indicator, last-capture thumbnail, quality presets (Natural / Vivid / Detail), HDR burst / night / super-resolution toggles, a manual backlit-rescue override (forces the shadow lift on for backlit shots the automatic detector would otherwise miss), EXIF on processed outputs, and an in-app A/B comparison viewer with reference import and on-device PSNR/SSIM/MAE.
+
+Camera state (zoom, flash, mode, lens, look) and the settings survive navigation and rotation.
 
 ## Build
 

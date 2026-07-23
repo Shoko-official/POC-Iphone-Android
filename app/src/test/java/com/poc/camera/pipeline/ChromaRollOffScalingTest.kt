@@ -115,12 +115,14 @@ class ChromaRollOffScalingTest {
 
     @Test
     fun tiledSupportChainIsSizedForTheRadiusCeiling() {
-        // chroma 8 + local-tone 32 + detail 6 + roll-off ceiling + sky-smooth 16 (see the
-        // TiledFinishing class doc). Kept in sync by this assertion: raising the radius
-        // ceiling without resizing the halo would silently break tile seam-freedom.
+        // chroma 8 + local-tone 32 + detail 6 + sky-smooth 16 (= 62 fixed stages) + the
+        // roll-off gate's TOTAL support at the radius ceiling: its box window 96 plus the
+        // radius/2 dilation of that mean, 48 (issue #167), = 144. Kept in sync by this
+        // assertion: raising the ceiling or the dilation without resizing the halo would
+        // silently break tile seam-freedom.
         assertEquals(
             "SUPPORT_RADIUS must cover the worst-case roll-off radius",
-            8 + 32 + 6 + ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS + 16,
+            62 + 96 + 48,
             TiledFinishing.SUPPORT_RADIUS,
         )
         assertTrue("OVERLAP must cover SUPPORT_RADIUS", TiledFinishing.OVERLAP >= TiledFinishing.SUPPORT_RADIUS)
@@ -128,14 +130,15 @@ class ChromaRollOffScalingTest {
 
     @Test
     fun dynamicOverlapTracksTheScaledRadiusUnderTheCeiling() {
-        // supportRadiusFor = the fixed 62 px stage chain + the width-scaled gate radius;
-        // overlapFor adds the 2 px house margin (issue #121).
+        // supportRadiusFor = the fixed 62 px stage chain + the width-scaled gate's total
+        // support (box window + radius/2 dilation, issue #167); overlapFor adds the 2 px
+        // house margin (issue #121).
         assertEquals(62, TiledFinishing.FIXED_STAGES_SUPPORT)
-        assertEquals(88, TiledFinishing.overlapFor(128)) // radius floor 24
-        assertEquals(88, TiledFinishing.overlapFor(ChromaRollOffParams.REFERENCE_WIDTH))
-        assertEquals(95, TiledFinishing.overlapFor(2016)) // radius 31 (3 MP working)
-        assertEquals(127, TiledFinishing.overlapFor(4032)) // radius 63: 12 MP pays 127, not the 160 ceiling
-        assertEquals(137, TiledFinishing.overlapFor(4714)) // radius 73 (12.5 MP 16:9)
+        assertEquals(100, TiledFinishing.overlapFor(128)) // radius floor 24 -> support 24+12
+        assertEquals(100, TiledFinishing.overlapFor(ChromaRollOffParams.REFERENCE_WIDTH))
+        assertEquals(110, TiledFinishing.overlapFor(2016)) // radius 31 -> support 31+15 (3 MP working)
+        assertEquals(158, TiledFinishing.overlapFor(4032)) // radius 63 -> support 63+31: 12 MP pays 158, not the ceiling
+        assertEquals(173, TiledFinishing.overlapFor(4714)) // radius 73 -> support 73+36 (12.5 MP 16:9)
         // At the radius cap the dynamic halo meets the compile-time ceiling exactly.
         assertEquals(TiledFinishing.OVERLAP, TiledFinishing.overlapFor(6168))
         // The ceiling bounds the dynamic halo at EVERY width, and the margin is constant.
@@ -192,6 +195,35 @@ class ChromaRollOffScalingTest {
         )
     }
 
+    // --- boundary-robust isolation gate (no halo) -----------------------------------
+
+    @Test
+    fun largeRegionBoundaryPassesThroughWithoutHalo() {
+        // A saturated square larger than the gate window on a neutral field. Its interior fills
+        // its own window and always passed through; the band within ~radius/3 of the edge used
+        // to be compressed because the raw box mean there is dragged down by the neutral
+        // surround -- a desaturation halo. The dilated reference (issue #167) must let that
+        // boundary band pass through too. (Isolated-spot compression, the gate's real job, is
+        // proven unchanged by operatorIsScaleConsistentWhenTheRadiusScalesWithWidth.)
+        val out = IntArray(SCENE_SIZE * SCENE_SIZE) { argb(120, 120, 120) }
+        fillRect(out, SCENE_SIZE, 34, 34, 94, 94, argb(30, 80, 200)) // 60 px region > the 49 px window
+        val frame = Frame(SCENE_SIZE, SCENE_SIZE, out, timestampMillis = 1L)
+        val result = ChromaRollOff.apply(frame, ChromaRollOffParams.DEFAULT)
+
+        // Interior control: fills its window, always a passthrough.
+        assertTrue(
+            "region interior must pass through",
+            chromaMag(result, 64, 64) >= chromaMag(frame, 64, 64) - 0.5,
+        )
+        // The fix: a pixel 2 px inside the left edge (the halo band) now passes through instead
+        // of being desaturated. The old box-mean gate compresses it to ~0.89x here.
+        val edgeIn = chromaMag(frame, 36, 64)
+        assertTrue(
+            "region boundary must pass through, no halo: ${chromaMag(result, 36, 64)} vs $edgeIn",
+            chromaMag(result, 36, 64) >= edgeIn * 0.98,
+        )
+    }
+
     // --- tiled vs whole-frame at a scaled radius -------------------------------------
 
     @Test
@@ -199,10 +231,10 @@ class ChromaRollOffScalingTest {
         val frame = wideScene(3084, 220)
         val params = FinishingParams.DEFAULT.copy(chromaRollOff = 1.0)
         // At width 3084 the call-site radius is genuinely scaled (48), not the floor, and
-        // the production width-adaptive halo is 112 (62 + 48 + 2, issue #121) -- the
-        // default overlap the apply call below takes.
+        // the production width-adaptive halo is 136 (62 + roll-off support 48+24 + 2, issues
+        // #121/#167) -- the default overlap the apply call below takes.
         assertEquals(48, ChromaRollOffParams.forImageWidth(frame.width).neighborhoodRadius)
-        assertEquals(112, TiledFinishing.overlapFor(frame.width))
+        assertEquals(136, TiledFinishing.overlapFor(frame.width))
 
         val whole = FinishingPipeline.apply(frame, params)
         // Not vacuous: the roll-off must engage at this radius on this scene.

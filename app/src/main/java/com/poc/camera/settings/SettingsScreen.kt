@@ -6,7 +6,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -80,6 +83,14 @@ fun SettingsScreen(
             modifier = Modifier
                 .padding(contentPadding)
                 .fillMaxSize()
+                // The settings list is taller than the screen (burst, night, super-res,
+                // merged, comparison, rendering, video and developer sections), so it MUST
+                // scroll or everything below the fold - the rendering presets, the manual
+                // backlit override, video and developer options - is unreachable. A plain
+                // Column still composes off-screen children (so semantics-based tests found
+                // them and missed this), but the user cannot reach them without scroll.
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
                 .padding(horizontal = 24.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {

@@ -136,10 +136,19 @@ fun CameraPreview(
         // separately from cameraProvider so onDispose can explicitly switch it off before
         // unbinding, regardless of which mode (or dispose reason) triggered the teardown.
         var boundCamera: Camera? = null
+        // The provider future resolves asynchronously on the main executor. If this effect is
+        // disposed (mode/lens/HDR/quality/look/retry change, or leaving the screen) before it
+        // resolves, onDispose runs while cameraProvider/activeEffect are still null - nothing to
+        // clean up - and the listener would then bind a camera and build the GL effect that
+        // nothing ever releases. The listener and onDispose both run on the main thread, so this
+        // plain flag (checked at the top of the listener, set in onDispose) closes the race
+        // without atomics: once onDispose has run, the listener bails before binding anything.
+        var disposed = false
         val providerFuture = ProcessCameraProvider.getInstance(context)
 
         providerFuture.addListener(
             {
+                if (disposed) return@addListener
                 try {
                     val provider = providerFuture.get()
                     cameraProvider = provider
@@ -380,6 +389,9 @@ fun CameraPreview(
         )
 
         onDispose {
+            // Bars a not-yet-resolved provider future from binding after teardown (see the
+            // `disposed` declaration above): the listener early-returns on next resolve.
+            disposed = true
             // Explicitly off before unbinding: a defensive no-op on devices where closing
             // the camera already kills the torch, and the one call that matters on devices
             // where it doesn't. Fire-and-forget - nothing left to observe the result of once

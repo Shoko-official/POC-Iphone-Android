@@ -23,12 +23,29 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.poc.camera.R
 import com.poc.camera.camera.VideoLook
+
+/**
+ * Stable node identifiers for instrumented tests (issue #136). Compose's default merged-tree
+ * text lookup resolves a SegmentedButton/Switch's own label to its parent node for reading
+ * state (assertIsSelected/assertIsOn work fine via onNodeWithText), but a click on that same
+ * text-derived node did not reliably reach the parent's own click/toggle action on the CI
+ * emulator - these tags let a test address the exact node that carries the state for both
+ * the click and the assertion, instead of relying on that merge behaviour.
+ */
+internal object SettingsTestTags {
+    const val PRESET_NATURAL = "preset_natural"
+    const val PRESET_VIVID = "preset_vivid"
+    const val PRESET_DETAIL = "preset_detail"
+    const val SWITCH_HDR_BURST = "switch_hdr_burst"
+    const val SWITCH_NIGHT_MODE = "switch_night"
+}
 
 /**
  * Full-screen settings destination. Every control applies immediately - there is no
@@ -90,6 +107,7 @@ fun SettingsScreen(
                         )
                     }
                     Switch(
+                        modifier = Modifier.testTag(SettingsTestTags.SWITCH_HDR_BURST),
                         checked = settings.hdrBurstEnabled,
                         onCheckedChange = { onSettingsChanged(settings.copy(hdrBurstEnabled = it)) },
                     )
@@ -115,6 +133,7 @@ fun SettingsScreen(
                         )
                     }
                     Switch(
+                        modifier = Modifier.testTag(SettingsTestTags.SWITCH_NIGHT_MODE),
                         checked = settings.nightModeEnabled,
                         onCheckedChange = { onSettingsChanged(settings.copy(nightModeEnabled = it)) },
                     )
@@ -369,7 +388,9 @@ private fun FinishingPresetControl(
     SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
         options.forEachIndexed { index, preset ->
             SegmentedButton(
-                modifier = Modifier.heightIn(min = 48.dp),
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag(finishingPresetTestTag(preset)),
                 shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
                 selected = selected == preset,
                 onClick = { onSelected(preset) },
@@ -384,6 +405,12 @@ private fun finishingPresetLabel(preset: FinishingPreset): Int = when (preset) {
     FinishingPreset.Natural -> R.string.finishing_preset_natural
     FinishingPreset.Vivid -> R.string.finishing_preset_vivid
     FinishingPreset.Detail -> R.string.finishing_preset_detail
+}
+
+private fun finishingPresetTestTag(preset: FinishingPreset): String = when (preset) {
+    FinishingPreset.Natural -> SettingsTestTags.PRESET_NATURAL
+    FinishingPreset.Vivid -> SettingsTestTags.PRESET_VIVID
+    FinishingPreset.Detail -> SettingsTestTags.PRESET_DETAIL
 }
 
 private fun finishingPresetDescription(preset: FinishingPreset): Int = when (preset) {

@@ -96,6 +96,41 @@ class PipelineBenchmarkTest {
     }
 
     @Test
+    fun bokehRenderStaysWithinTripwireAcrossScales() {
+        val burstSize = Sizes(2016, 1512) // ~3 MP (a 12 MP sensor decoded at sample 2)
+        val native = Sizes(4032, 3024) // 12 MP -- what a real portrait capture decodes at
+
+        // Warm up the JIT at EACH size before measuring it (mirrors BokehGoldenTest's own
+        // tripwire): a small-frame warm-up does not reliably carry over to DiscBlur's much
+        // larger radius/tap working set at these scales, so each size gets its own discarded
+        // pass first.
+        PipelineBenchmark.bokehRender(burstSize.w, burstSize.h)
+        val bokeh3mp = PipelineBenchmark.bokehRender(burstSize.w, burstSize.h)
+        PipelineBenchmark.bokehRender(native.w, native.h)
+        val bokeh12mp = PipelineBenchmark.bokehRender(native.w, native.h)
+
+        println("=== BokehRenderer.render timing (issue #128, parallelism=${com.poc.camera.pipeline.PipelineParallel.parallelism}) ===")
+        println(bokeh3mp)
+        println(bokeh12mp)
+        val scaling = bokeh12mp.millis / bokeh3mp.millis
+        println("bokeh 12MP/3MP scaling ratio = %.2f (pixel ratio = 4.0)".format(scaling))
+
+        // GENEROUS tripwire (not an SLA): DiscBlur's gather is O(pixels * tapCount) with a
+        // FIXED 24 taps (BokehParams.tapCount is not width-scaled -- see its KDoc), so cost
+        // is independent of the scaled radius and every stage is row/pixel parallel under
+        // PipelineParallel. Measured 2026-07-23 on a 24-thread dev machine (each size warmed
+        // up at itself first -- a small-frame warm-up does not reliably carry over to this
+        // kernel's working set): 3 MP ~210 ms, 12 MP ~560 ms (scaling ratio ~2.6x for a 4x
+        // pixel jump -- sub-linear, the fixed thread-pool overhead amortising better at the
+        // larger size). 60 s keeps >100x headroom on the slowest (12 MP) measurement for a
+        // catastrophic regression on a much slower CI machine or a single-threaded fallback.
+        assertTrue(
+            "12 MP bokeh render ${bokeh12mp.millis} ms exceeded the 60s regression tripwire",
+            bokeh12mp.millis < 60_000.0,
+        )
+    }
+
+    @Test
     fun finishingStageBreakdownReportsCurrentChain() {
         // Warm up both profiles on a small frame so the breakdowns are steady-state.
         PipelineBenchmark.finishingBreakdown(256, 256, FinishingParams.DEFAULT, "warmup")

@@ -1,6 +1,7 @@
 package com.poc.camera.camera
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,14 +21,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.poc.camera.ui.theme.HeroUiColors
 
 /**
  * Single source of truth for the camera viewfinder chrome's visual language (issue #82).
@@ -44,10 +48,24 @@ import androidx.compose.ui.unit.dp
  * original chrome relied on.
  */
 internal object ChromeTokens {
-    val Scrim = Color.Black.copy(alpha = 0.55f)
+    /**
+     * HeroUI v3 dark-surface scrim: the eclipse surface (#27272A) at high opacity rather
+     * than plain black, so chips read as HeroUI surfaces floating over the preview. The
+     * alpha keeps the worst-case legibility mitigation described in the class KDoc.
+     */
+    val Scrim = HeroUiColors.Surface.copy(alpha = 0.72f)
     val TextShadow = Shadow(color = Color.Black, offset = Offset(0f, 1f), blurRadius = 4f)
 
-    val ChipCornerRadius = 10.dp
+    /**
+     * HeroUI's signature crisp 1px border on dark surfaces: a light hairline rather than a
+     * dark outline, applied to every chip and action button so the chrome shares HeroUI's
+     * bordered-surface language.
+     */
+    val HairlineWidth = 1.dp
+    val Hairline = Color(0xFFFCFCFC).copy(alpha = 0.12f)
+
+    /** HeroUI field radius (--radius 8dp x 1.5). */
+    val ChipCornerRadius = 12.dp
     val ChipShape = RoundedCornerShape(ChipCornerRadius)
 
     /** Screen-edge inset shared by the top bar and bottom cluster. */
@@ -72,19 +90,33 @@ internal object ChromeTokens {
     val TouchTarget = 48.dp
     val IconSize = 22.dp
 
-    val OnChrome = Color.White
+    val OnChrome = HeroUiColors.Foreground
 
-    /** Icon colour on an active (inverted) action button - dark on the white fill. */
-    val OnActive = Color.Black
-    val DisabledAlpha = 0.38f
+    /** HeroUI accent (--accent): active/selected state colour for chrome toggles. */
+    val Accent = HeroUiColors.Accent
+
+    /** HeroUI accent-soft (--accent-soft, accent at 15%): active toggle fill. */
+    val AccentSoft = HeroUiColors.Accent.copy(alpha = 0.15f)
+
+    /** HeroUI danger (--danger): recording and destructive states. */
+    val Danger = HeroUiColors.Danger
+
+    /** HeroUI --disabled-opacity. */
+    val DisabledAlpha = 0.5f
 }
 
-/** Shared text style for every chrome label: quiet, white, shadowed for legibility. */
+/**
+ * Shared text style for every chrome label: quiet, snow-white, shadowed for legibility.
+ * Medium weight and tabular numerals follow HeroUI's label treatment - readouts like the
+ * zoom ratio and the recording timer keep a stable width as their digits change.
+ */
 @Composable
 internal fun chromeTextStyle(): TextStyle =
     MaterialTheme.typography.bodySmall.copy(
         color = ChromeTokens.OnChrome,
         shadow = ChromeTokens.TextShadow,
+        fontWeight = FontWeight.Medium,
+        fontFeatureSettings = "tnum",
     )
 
 /**
@@ -101,6 +133,7 @@ internal fun StatusChip(
     Row(
         modifier = modifier
             .background(ChromeTokens.Scrim, ChromeTokens.ChipShape)
+            .border(ChromeTokens.HairlineWidth, ChromeTokens.Hairline, ChromeTokens.ChipShape)
             .padding(
                 horizontal = ChromeTokens.ChipPaddingHorizontal,
                 vertical = ChromeTokens.ChipPaddingVertical,
@@ -131,10 +164,12 @@ internal fun StatusChip(
 
 /**
  * Action icon button: the one interactive-control shape on the chrome - a 48dp circular
- * scrim carrying a 22dp [CameraGlyphs] icon. [active] inverts it (white fill, dark icon) as
- * a non-colour state cue for toggles like the torch; [enabled] dims the icon to
- * [ChromeTokens.DisabledAlpha] the same way the rest of the screen signals a disabled
- * control. The icon's own [contentDescription] is null - the semantics live on the button.
+ * scrim carrying a 22dp [CameraGlyphs] icon. [active] renders HeroUI's soft accent variant
+ * (accent-soft fill + accent border) so toggles like the torch read as selected the way a
+ * HeroUI soft button does; the brighter border doubles as a non-colour cue. [enabled] dims
+ * the icon to [ChromeTokens.DisabledAlpha] (HeroUI's disabled opacity) the same way the
+ * rest of the screen signals a disabled control. The icon's own [contentDescription] is
+ * null - the semantics live on the button.
  */
 @Composable
 internal fun ActionIconButton(
@@ -145,10 +180,19 @@ internal fun ActionIconButton(
     enabled: Boolean = true,
     active: Boolean = false,
 ) {
+    val fill = if (active) {
+        // Soft fill composited over the scrim so the preview never bleeds through the
+        // accent tint - matches HeroUI's accent-soft over a dark surface.
+        ChromeTokens.Accent.copy(alpha = 0.28f).compositeOver(ChromeTokens.Scrim.copy(alpha = 1f))
+    } else {
+        ChromeTokens.Scrim
+    }
+    val borderColor = if (active) ChromeTokens.Accent else ChromeTokens.Hairline
     Box(
         modifier = modifier
             .size(ChromeTokens.TouchTarget)
-            .background(if (active) ChromeTokens.OnChrome else ChromeTokens.Scrim, CircleShape)
+            .background(fill, CircleShape)
+            .border(ChromeTokens.HairlineWidth, borderColor, CircleShape)
             .clickable(enabled = enabled, onClick = onClick)
             .semantics(mergeDescendants = true) {
                 role = Role.Button
@@ -156,11 +200,10 @@ internal fun ActionIconButton(
             },
         contentAlignment = Alignment.Center,
     ) {
-        val tint = if (active) ChromeTokens.OnActive else ChromeTokens.OnChrome
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = tint.copy(alpha = if (enabled) 1f else ChromeTokens.DisabledAlpha),
+            tint = ChromeTokens.OnChrome.copy(alpha = if (enabled) 1f else ChromeTokens.DisabledAlpha),
             modifier = Modifier.size(ChromeTokens.IconSize),
         )
     }

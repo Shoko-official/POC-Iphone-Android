@@ -55,6 +55,34 @@ class SemanticRenderingTest {
         assertTrue("foliage green must enrich", chromaMag(out, 12, 12) > chromaMag(frame, 12, 12) + 1.0)
     }
 
+    @Test
+    fun deepeningStaysInGamutAndPreservesHueAtBoundary() {
+        // A saturated blue-ish sky pixel already at the gamut edge (B = 255, zero headroom).
+        // The deepening would push B past 255; the old per-channel coerceIn pinned B at 255 while
+        // Cr kept scaling, rotating the hue ~2.3 deg. The gamut-aware scale clamp (issue #168) must
+        // cap the scale (to 1.0 here) so the hue angle is held fixed instead.
+        val frame = flat(8, 8, 150, 190, 255)
+        val out = SemanticRendering.apply(frame, ones(frame), zeros(frame), zeros(frame), params)
+        val angBefore = chromaAngle(frame, 4, 4)
+        val angAfter = chromaAngle(out, 4, 4)
+        assertTrue(
+            "hue must be preserved at the gamut boundary (${abs(angBefore - angAfter)} deg)",
+            abs(angBefore - angAfter) < 1.0,
+        )
+        // Blue was already clipped; it must stay 255, not be altered by a rotated reconstruction.
+        val px = out.argb[4 * out.width + 4]
+        assertTrue("blue stays clipped at 255", (px and 0xFF) == 255)
+    }
+
+    @Test
+    fun deepeningStillEngagesWhenHeadroomAllows() {
+        // Regression guard: a sky pixel with headroom (B = 210) must still deepen fully — the
+        // gamut clamp only bites when the boost would exceed 8-bit range.
+        val frame = flat(8, 8, 110, 155, 210)
+        val out = SemanticRendering.apply(frame, ones(frame), zeros(frame), zeros(frame), params)
+        assertTrue("sky with headroom must still deepen", chromaMag(out, 4, 4) > chromaMag(frame, 4, 4) + 1.0)
+    }
+
     // --- sky chroma smoothing reduces variance -------------------------------------
 
     @Test

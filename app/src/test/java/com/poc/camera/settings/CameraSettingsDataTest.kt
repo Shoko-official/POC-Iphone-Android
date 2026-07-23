@@ -22,6 +22,7 @@ class CameraSettingsDataTest {
         assertEquals(VideoQualityChoice.FHD, default.videoQuality)
         assertEquals(false, default.verboseTimings)
         assertEquals(false, default.unprocessedCapture)
+        assertEquals(false, default.forceBacklitRescue)
     }
 
     @Test
@@ -54,6 +55,7 @@ class CameraSettingsDataTest {
             videoQuality = VideoQualityChoice.UHD,
             verboseTimings = true,
             unprocessedCapture = true,
+            forceBacklitRescue = true,
         )
 
         val decoded = CameraSettingsData.fromRaw(
@@ -69,9 +71,25 @@ class CameraSettingsDataTest {
             videoQualityName = original.videoQuality.name,
             verboseTimings = original.verboseTimings,
             unprocessedCapture = original.unprocessedCapture,
+            forceBacklitRescue = original.forceBacklitRescue,
         )
 
         assertEquals(original, decoded)
+    }
+
+    @Test
+    fun fromRawFallsBackToForceBacklitRescueDisabledWhenMissing() {
+        val decoded = CameraSettingsData.fromRaw(
+            burstFrameCount = 6,
+            applyFinishingToMergedPhotos = true,
+            defaultCinematicLookName = null,
+            hdrBurstEnabled = false,
+            saveComparisonPair = false,
+            nightModeEnabled = false,
+            superResolutionEnabled = false,
+        )
+
+        assertEquals(CameraSettingsData.DEFAULT.forceBacklitRescue, decoded.forceBacklitRescue)
     }
 
     @Test

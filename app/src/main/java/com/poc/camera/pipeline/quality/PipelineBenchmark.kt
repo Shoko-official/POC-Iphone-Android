@@ -1,5 +1,7 @@
 package com.poc.camera.pipeline.quality
 
+import com.poc.camera.pipeline.BokehParams
+import com.poc.camera.pipeline.BokehRenderer
 import com.poc.camera.pipeline.BurstMergePipeline
 import com.poc.camera.pipeline.FinishingParams
 import com.poc.camera.pipeline.FinishingPipeline
@@ -7,6 +9,7 @@ import com.poc.camera.pipeline.Frame
 import com.poc.camera.pipeline.GuidedFilter
 import com.poc.camera.pipeline.PipelineParallel
 import com.poc.camera.pipeline.TiledFinishing
+import kotlin.math.sqrt
 
 /**
  * Wall-clock timing harness for the pure still pipeline at native-capture scales,
@@ -189,6 +192,23 @@ object PipelineBenchmark {
     }
 
     /**
+     * Times a single [BokehRenderer.render] pass at [width]x[height] using width-scaled
+     * [BokehParams.forImageWidth] params, on a deterministic synthetic portrait scene
+     * ([bokehScene]) -- the O(pixels * tapCount) Vogel-spiral gather ([com.poc.camera.pipeline.DiscBlur])
+     * that the portrait capture path runs at native decode resolution, unmeasured before
+     * issue #128. Segmentation and merge are out of scope; only the render call is timed.
+     * Input generation is excluded from the timing.
+     */
+    fun bokehRender(width: Int, height: Int, seed: Long = DEFAULT_SEED): Timing {
+        val scene = bokehScene(width, height, seed)
+        val params = BokehParams.forImageWidth(width)
+        val start = System.nanoTime()
+        BokehRenderer.render(scene.frame, scene.mask, params)
+        val millis = (System.nanoTime() - start) / 1_000_000.0
+        return Timing("bokeh-render", width, height, 1, 1, millis)
+    }
+
+    /**
      * Times [GuidedFilter.selfGuided] -- the dominant per-pixel finishing kernel (it
      * chains six [com.poc.camera.pipeline.BoxBlur] passes) -- both forced serial and
      * fully parallel at [width]x[height], for the row-parallel speedup record. The two
@@ -273,5 +293,97 @@ object PipelineBenchmark {
             state = (state * 1664525L + 1013904223L) and 0xFFFFFFFFL
             return ((state ushr 24) and 0xFFL).toInt()
         }
+    }
+
+    /** A synthetic portrait frame paired with its (hard, segmentation-style) subject mask. */
+    data class BokehScene(val frame: Frame, val mask: FloatArray)
+
+    /**
+     * A deterministic synthetic portrait scene at any [width]x[height]: a circular subject
+     * disc with interior LCG texture over an LCG-textured background, plus a few
+     * near-clipped background highlight points -- the same failure-mode shape as
+     * [com.poc.camera.pipeline.quality.BokehGoldenTest]'s fixture (subject-colour bleed at
+     * the boundary, highlight bloom, texture to measure blur against), adapted to run at any
+     * resolution for [bokehRender] and the width-scaling proofs (issue #128). The mask is a
+     * hard 0/1 disc (segmentation-style; [com.poc.camera.pipeline.BlurMap] does the
+     * feathering), matching production.
+     */
+    fun bokehScene(width: Int, height: Int, seed: Long = DEFAULT_SEED): BokehScene {
+        require(width > 0 && height > 0) { "dimensions must be positive" }
+        val cx = width / 2.0
+        val cy = height / 2.0
+        val subjectR = width.coerceAtMost(height) * 0.22
+        val cell = (width / 80).coerceAtLeast(4)
+        val bgTex = textureLattice(seed xor 0x1111_1111L, cell, amp = 55, width, height)
+        val subTex = textureLattice(seed xor 0x2222_2222L, cell + 2, amp = 40, width, height)
+        val argb = IntArray(width * height)
+        val mask = FloatArray(width * height)
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val i = y * width + x
+                val dx = x - cx
+                val dy = y - cy
+                if (sqrt(dx * dx + dy * dy) <= subjectR) {
+                    val r = (165 + subTex[i].toInt()).coerceIn(0, 255)
+                    argb[i] = (0xFF shl 24) or (r shl 16) or (35 shl 8) or 40
+                    mask[i] = 1f
+                } else {
+                    val g = (150 + bgTex[i].toInt()).coerceIn(0, 255)
+                    argb[i] = (0xFF shl 24) or (30 shl 16) or (g shl 8) or 45
+                    mask[i] = 0f
+                }
+            }
+        }
+        // A few near-clipped background highlight points (proportional placement), so the
+        // bloom stage has real near-clipped signal to lift at any resolution.
+        val hlR = (width / 200).coerceAtLeast(1)
+        for ((fx, fy) in HIGHLIGHT_FRACTIONS) {
+            val hx = (fx * width).toInt()
+            val hy = (fy * height).toInt()
+            for (yy in (hy - hlR)..(hy + hlR)) {
+                if (yy !in 0 until height) continue
+                for (xx in (hx - hlR)..(hx + hlR)) {
+                    if (xx !in 0 until width) continue
+                    argb[yy * width + xx] = (0xFF shl 24) or (252 shl 16) or (252 shl 8) or 252
+                }
+            }
+        }
+        return BokehScene(Frame(width, height, argb, timestampMillis = 0L), mask)
+    }
+
+    /** Proportional (x, y) placement of [bokehScene]'s highlight points, scale-independent. */
+    private val HIGHLIGHT_FRACTIONS = listOf(0.14 to 0.16, 0.83 to 0.14, 0.5 to 0.06)
+
+    /**
+     * Coarse [cell]-spaced LCG lattice bilinearly interpolated to [width]x[height], values in
+     * [0, amp] -- adapted from [com.poc.camera.pipeline.quality.BokehGoldenTest]'s fixed-size
+     * texture lattice to run at any resolution (issue #128).
+     */
+    private fun textureLattice(seed: Long, cell: Int, amp: Int, width: Int, height: Int): DoubleArray {
+        var state = seed and 0xFFFFFFFFL
+        fun next(): Double {
+            state = (state * 1664525L + 1013904223L) and 0xFFFFFFFFL
+            return ((state ushr 24) and 0xFFL).toDouble() / 255.0 * amp
+        }
+        val gw = width / cell + 2
+        val gh = height / cell + 2
+        val grid = DoubleArray(gw * gh) { next() }
+        val out = DoubleArray(width * height)
+        for (y in 0 until height) {
+            val gy = y / cell
+            val fy = (y % cell).toDouble() / cell
+            for (x in 0 until width) {
+                val gx = x / cell
+                val fx = (x % cell).toDouble() / cell
+                val v00 = grid[gy * gw + gx]
+                val v10 = grid[gy * gw + gx + 1]
+                val v01 = grid[(gy + 1) * gw + gx]
+                val v11 = grid[(gy + 1) * gw + gx + 1]
+                val top = v00 + (v10 - v00) * fx
+                val bot = v01 + (v11 - v01) * fx
+                out[y * width + x] = top + (bot - top) * fy
+            }
+        }
+        return out
     }
 }

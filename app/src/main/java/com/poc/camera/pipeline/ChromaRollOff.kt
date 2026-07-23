@@ -23,8 +23,10 @@ import kotlin.math.sqrt
  *    passthrough) and the fully compressed chroma (1). It lets [FinishingParams.chromaRollOff]
  *    dial the effect between off and full without changing the tuned knee/soft curve.
  *  - [isolationFactor] the spatial gate (issue #107): the per-pixel effective knee is
- *    `kneeEff = max(knee, isolationFactor * localMean)` where `localMean` is the box mean
- *    of the chroma-magnitude plane over the [neighborhoodRadius] window. A pixel therefore
+ *    `kneeEff = max(knee, isolationFactor * localRef)` where `localRef` is the box mean of
+ *    the chroma-magnitude plane over the [neighborhoodRadius] window, then dilated by
+ *    [ChromaRollOff.dilationRadiusFor] so a large region's boundary is referenced like its
+ *    interior rather than desaturated into a halo (issue #167). A pixel therefore
  *    compresses only when its magnitude exceeds BOTH the global [knee] AND
  *    [isolationFactor] times its neighbourhood's typical chroma. In a uniformly saturated
  *    region `localMean ~= mag`, so `kneeEff ~= isolationFactor * mag > mag` and nothing
@@ -144,12 +146,14 @@ data class ChromaRollOffParams(
  * operator exists to catch ISOLATED runaway chroma (the validated real case: lifted lips
  * glowing red), not to desaturate rich scenes, so the gate makes "isolated" explicit: the
  * chroma-magnitude plane is box-blurred ([BoxBlur], [ChromaRollOffParams.neighborhoodRadius])
- * into a local reference, and the per-pixel effective knee is
- * `max(knee, isolationFactor * localMean)`. A uniformly saturated region is its own
- * neighbourhood, so its effective knee sits above its own magnitude and it passes through;
- * an isolated spot on a low-chroma surround reads a low local mean, so its effective knee
- * collapses to the global knee and it compresses exactly as before. The real-pair lips case
- * remains the anchor (see ChromaRollOffGoldenTest).
+ * and that mean is then dilated ([WindowedMax], [dilationRadiusFor], issue #167) into a
+ * boundary-robust local reference, and the per-pixel effective knee is
+ * `max(knee, isolationFactor * localRef)`. A saturated region that fills its own window is
+ * protected across its WHOLE extent -- interior AND the boundary band the raw box mean used to
+ * under-reference and desaturate (a halo: the box mean at a region edge is dragged down by the
+ * low-chroma side); an isolated spot on a low-chroma surround reads a low reference all around
+ * it, so its effective knee collapses to the global knee and it compresses. The real-pair lips
+ * case remains the anchor (see ChromaRollOffGoldenTest).
  *
  * It exists to catch post-saturation runaway chroma, so [FinishingPipeline] runs it AFTER
  * [Saturation] and [Contrast], as the last colour operator before [SemanticRendering]: a
@@ -160,23 +164,23 @@ data class ChromaRollOffParams(
  *
  * ## Determinism / parallelism
  *
- * The operator is three passes: an element-wise magnitude-plane pass, one [BoxBlur] (both
- * row/column-parallel and bit-identical across chunk counts by [BoxBlur]'s contract), and an
- * element-wise compression pass -- so the whole operator runs under the [PipelineParallel]
- * row-parallel contract and is BYTE-identical across chunk counts. It derives no global
- * statistic, but the box mean gives it a spatial support of
- * [ChromaRollOffParams.neighborhoodRadius] pixels, which [TiledFinishing] accounts for in
- * its width-adaptive halo ([TiledFinishing.supportRadiusFor], issue #121; ceiling
- * [TiledFinishing.SUPPORT_RADIUS] at the [ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS]
- * cap of the resolution-adaptive radius). At [ChromaRollOffParams.strength] <= 0 the
+ * The operator is four passes: an element-wise magnitude-plane pass, one [BoxBlur] then one
+ * [WindowedMax] dilation of that mean (both row/column-parallel and bit-identical across chunk
+ * counts by their contracts, issue #167), and an element-wise compression pass -- so the whole
+ * operator runs under the [PipelineParallel] row-parallel contract and is BYTE-identical across
+ * chunk counts. It derives no global statistic, but the box mean plus its dilation give it a
+ * spatial support of `neighborhoodRadius + neighborhoodRadius/2` pixels ([supportRadiusFor]),
+ * which [TiledFinishing] accounts for in its width-adaptive halo
+ * ([TiledFinishing.supportRadiusFor], issue #121; ceiling [TiledFinishing.SUPPORT_RADIUS] at
+ * the [ChromaRollOffParams.MAX_NEIGHBORHOOD_RADIUS] cap of the resolution-adaptive radius). At [ChromaRollOffParams.strength] <= 0 the
  * input frame is returned unchanged (same reference, bit-exact passthrough). A pixel with
  * chroma magnitude at or under its effective knee reconstructs to its exact input (the
  * scale is exactly 1 and `Y + (channel - Y)` rounds back to the channel), so below-knee and
  * uniformly-saturated content is bit-exact even at full strength.
  *
  * Memory: two extra `DoubleArray` planes (the magnitude plane and the luma plane pass 3
- * reuses, issue #122) plus [BoxBlur]'s two transient planes -- bounded, and far under the
- * finishing chain's guided-filter peaks.
+ * reuses, issue #122), the dilated-reference plane, plus [BoxBlur]'s and [WindowedMax]'s
+ * transient planes -- bounded, and far under the finishing chain's guided-filter peaks.
  *
  * Pure Kotlin, deterministic, no Android dependencies. Mirrors the validated prototype.
  */
@@ -225,9 +229,19 @@ object ChromaRollOff {
                 mag[i] = sqrt(cr * cr + cb * cb)
             }
         }
-        // Pass 2: the local chroma reference -- the box mean of the magnitude plane over
-        // the neighbourhood window. Bit-identical across chunk counts (BoxBlur contract).
+        // Pass 2: the local chroma reference -- the box mean of the magnitude plane over the
+        // neighbourhood window, then a windowed MAX (dilation) of that mean (issue #167). The
+        // raw box mean of a pixel on the EDGE of a large saturated region is dragged down by the
+        // low-chroma side of its window, collapsing its effective knee and desaturating a rim
+        // inside the region (a halo). Dilating the mean by [dilationRadiusFor] lets every such
+        // edge pixel inherit the high interior mean within reach, so a pixel embedded in a
+        // window-filling region is protected across its whole extent; an isolated spot, whose
+        // mean is low all around it, still reads a low reference and compresses. Both passes are
+        // bit-identical across chunk counts (BoxBlur / WindowedMax contracts).
         val localMean = BoxBlur.blur(mag, frame.width, frame.height, params.neighborhoodRadius, chunkCount)
+        val localRef = WindowedMax.dilate(
+            localMean, frame.width, frame.height, dilationRadiusFor(params.neighborhoodRadius), chunkCount,
+        )
         // Pass 3: per-pixel compression against the effective knee. Element-wise over the
         // precomputed planes, so row-parallel and bit-identical across chunk counts.
         val out = IntArray(src.size)
@@ -246,7 +260,7 @@ object ChromaRollOff {
                 // isolationFactor times its neighbourhood's mean chroma. Below the effective
                 // knee the scale is exactly 1 (identity); above it the compressed magnitude
                 // drives a < 1 scale, blended toward identity by strength.
-                val kneeEff = max(knee, isolationFactor * localMean[i])
+                val kneeEff = max(knee, isolationFactor * localRef[i])
                 val scale = if (m > kneeEff) {
                     val full = shoulder(m, kneeEff, soft) / m
                     1.0 + strength * (full - 1.0)
@@ -261,6 +275,24 @@ object ChromaRollOff {
         }
         return Frame(frame.width, frame.height, out, frame.timestampMillis)
     }
+
+    /**
+     * The windowed-max (dilation) radius applied to the box-mean reference to make the
+     * isolation gate boundary-robust (issue #167), as a fraction of [neighborhoodRadius].
+     * Half the box radius fully covers the halo band (which extends ~radius/3 into a region for
+     * the default isolationFactor) with margin, while keeping the added spatial support -- and
+     * so the tile halo -- as small as possible; the colorchart rendition target stays within
+     * its committed ceiling at this radius.
+     */
+    fun dilationRadiusFor(neighborhoodRadius: Int): Int = neighborhoodRadius / 2
+
+    /**
+     * Total spatial support (in pixels) of the operator for a given [neighborhoodRadius]: the
+     * box-mean window plus the [dilationRadiusFor] dilation of that mean. [TiledFinishing] sizes
+     * the ChromaRollOff contribution to the tile halo from this so a tiled core reproduces the
+     * whole-frame gate exactly.
+     */
+    fun supportRadiusFor(neighborhoodRadius: Int): Int = neighborhoodRadius + dilationRadiusFor(neighborhoodRadius)
 
     /**
      * The soft chroma-magnitude shoulder at the GLOBAL knee: [shoulder] with

@@ -21,11 +21,12 @@ import kotlin.math.max
  * The halo is the production default, [TiledFinishing.overlapFor]: on these sub-reference-
  * width fixtures the roll-off gate radius min-clamps to 24
  * ([com.poc.camera.pipeline.ChromaRollOffParams.forImageWidth]), so the actual chain
- * support is `8 + 32 + 6 + 24 + 16 = 86` and the halo resolves to a seam-sufficient 88.
- * Before issue #121 the production halo was the fixed ceiling 160 -- which would make
- * every padded tile swallow the whole 256 px frame and reduce the stitching to a vacuous
- * single-tile comparison -- so this suite forced 88 by hand; the width-adaptive default
- * now takes that value naturally and the suite gates the REAL production path.
+ * support is `8 + 32 + 6 + (24 + 12) + 16 = 98` -- the roll-off gate contributing its box
+ * window 24 plus the radius/2 dilation of that mean (issue #167) -- and the halo resolves to
+ * a seam-sufficient 100. Before issue #121 the production halo was the fixed ceiling -- which
+ * would make every padded tile swallow the whole 256 px frame and reduce the stitching to a
+ * vacuous single-tile comparison -- so this suite forced the exact value by hand; the
+ * width-adaptive default now takes it naturally and the suite gates the REAL production path.
  * Tiled-vs-whole-frame consistency at a genuinely SCALED radius is proven by
  * ChromaRollOffScalingTest.
  *
@@ -38,13 +39,13 @@ class TiledFinishingBitIdentityTest {
     private val tileSize = TILE
 
     @Test
-    fun productionDynamicHaloAtTheseFixtureWidthsIsTheSeamSufficientEightyEight() {
+    fun productionDynamicHaloAtTheseFixtureWidthsIsTheSeamSufficientOneHundred() {
         // The premise the suite rests on (see the class doc): at every fixture width the
-        // production width-adaptive halo resolves to 88 -- above the actual 86 px chain
+        // production width-adaptive halo resolves to 100 -- above the actual 98 px chain
         // support, far under the frame -- so tiles are genuinely stitched, not vacuously
         // single-tile, and the assertions below run the real production overlap.
         for (width in intArrayOf(17, 40, 137, 201, 256, 300)) {
-            assertEquals("overlapFor($width)", 88, TiledFinishing.overlapFor(width))
+            assertEquals("overlapFor($width)", 100, TiledFinishing.overlapFor(width))
         }
     }
 

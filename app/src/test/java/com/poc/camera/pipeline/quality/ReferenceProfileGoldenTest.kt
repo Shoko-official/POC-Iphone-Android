@@ -375,10 +375,14 @@ class ReferenceProfileGoldenTest {
         //         this; only near-white "light" edges up (+0.022, tone curve not saturation sets
         //         its chroma). MAX_CHROMA_INFL (1.1) guards a gross over-saturation regression
         //         (actual max 0.766). At 0.85 the mid/deep patches are bounded harder than at 0.7.
-        //       MAX_LUMA_DELTA (4.0): |protected - unprotected| skin mean luma (actual max 3.17);
+        //       MAX_LUMA_DELTA (4.3): |protected - unprotected| skin mean luma (actual max 4.12);
         //         a touch higher than the 0.7 baseline because the stronger protection reduces the
         //         (now stronger-saturation) operators by more, so protected sits nearer the merged
         //         truth. Protection only REDUCES operators; it never lightens/darkens/shifts skin.
+        //         RE-BASELINED 2026-07-23 with the issue #175 AWB anti-overshoot probe cap: the
+        //         uncast skin chart now honestly gets identity white balance (its ~19% gray
+        //         background arms the probe), removing the spurious skin-driven de-warm the old
+        //         actual (3.17) silently depended on - see SkinProtectionGoldenTest's matching note.
         const val MAX_SAT_DELTA = 6.0
         const val MAX_NOISE_RATIO = 0.99
         const val MAX_SHADOW_LIFT = 12
@@ -386,6 +390,6 @@ class ReferenceProfileGoldenTest {
         const val HUE_EPS = 2.5
         const val CHROMA_BAND = 0.05
         const val MAX_CHROMA_INFL = 1.1
-        const val MAX_LUMA_DELTA = 4.0
+        const val MAX_LUMA_DELTA = 4.3
     }
 }

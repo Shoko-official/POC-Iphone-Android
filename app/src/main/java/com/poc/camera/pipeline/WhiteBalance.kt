@@ -144,6 +144,32 @@ object WhiteBalance {
     const val CUE_WEIGHT_FLOOR = 32.0
 
     /**
+     * Saturation ceiling of the strict-neutral PROBE population (issue #175). Far below
+     * [GRAY_SATURATION_MAX]: a pixel this close to gray is either a genuinely neutral
+     * surface under a balanced illuminant or a neutral surface under at most a very mild
+     * cast - either way it is the scene's own most reliable illuminant probe.
+     */
+    const val NEUTRAL_PROBE_SATURATION_MAX = 0.10
+
+    /**
+     * Minimum fraction of the frame the strict-neutral probe must cover to be trusted.
+     *
+     * Sized from measured probe fractions across the synthetic scene family: genuinely
+     * cast scenes still contain a thin slice of ACCIDENTAL near-neutrals (hues the cast
+     * happens to compensate, plus near-clipped whites where the cast compresses away) -
+     * measured at 2.8-5.5% on the cast colorchart scenes - while scenes with real neutral
+     * content measure 10%+ (colorchart 16%, skin chart background 19%, gray-dominant
+     * scenes 38-96%). 0.08 sits between the two populations with margin on both sides, so
+     * the cap never engages from accidental neutrals under a genuine cast, and a
+     * real gray surface (card, wall, pavement) covering under ~8% of the frame simply
+     * does not arm the guard.
+     */
+    const val NEUTRAL_PROBE_MIN_FRACTION = 0.08
+
+    /** Tolerance widening the probe-derived gain interval (see [capTowardProbe]). */
+    const val NEUTRAL_PROBE_TOLERANCE = 0.005
+
+    /**
      * Neutral tolerance (deadband) on the estimated per-channel gain deviation from 1.0.
      * A combined gain whose deviation from 1.0 is within this band is treated as scene
      * colour or estimator noise, NOT an illuminant cast, and is snapped to identity.
@@ -229,9 +255,43 @@ object WhiteBalance {
             bGainAcc += w * (c.meanG / c.meanB)
             weightSum += w
         }
-        val rGain = boundGain(rGainAcc / weightSum, maxGain, neutralTolerance, neutralSoftRange)
-        val bGain = boundGain(bGainAcc / weightSum, maxGain, neutralTolerance, neutralSoftRange)
+        var rawR = rGainAcc / weightSum
+        var rawB = bGainAcc / weightSum
+
+        // Anti-overshoot guard (issue #175). The saturation admission gate alone cannot
+        // separate a warm SURFACE from a warm ILLUMINANT: a frame dominated by
+        // low-saturation wood reads as a tungsten cast, and the correction pushes the
+        // scene's TRUE neutrals past neutral into blue. When a meaningful strictly-neutral
+        // population exists it is the scene's own illuminant probe, and the correction is
+        // capped so it can never push that probe PAST neutral. Under a genuine cast the
+        // probe population either does not exist (everything is tinted beyond the strict
+        // gate - the cap never engages) or is itself tinted (its own neutralising gains
+        // are far from 1, so the interval is wide and the estimated correction passes
+        // through untouched, up to the probe's own level).
+        val probe = neutralProbeCue(frame)
+        if (
+            probe.count >= maxOf(1, (n * NEUTRAL_PROBE_MIN_FRACTION).roundToInt()) &&
+            probe.meanR > EPS && probe.meanG > EPS && probe.meanB > EPS
+        ) {
+            rawR = capTowardProbe(rawR, probe.meanG / probe.meanR, NEUTRAL_PROBE_TOLERANCE)
+            rawB = capTowardProbe(rawB, probe.meanG / probe.meanB, NEUTRAL_PROBE_TOLERANCE)
+        }
+
+        val rGain = boundGain(rawR, maxGain, neutralTolerance, neutralSoftRange)
+        val bGain = boundGain(rawB, maxGain, neutralTolerance, neutralSoftRange)
         return WhiteBalanceGains(rGain, 1.0, bGain)
+    }
+
+    /**
+     * Constrains a raw gain to the interval spanned by identity and [probeGain] (the gain
+     * that would exactly neutralise the strict-neutral probe), widened by [tolerance] on
+     * the probe side. A correction may go as far as the probe justifies - never past it,
+     * and never in a direction that moves an already-neutral probe away from neutral.
+     */
+    private fun capTowardProbe(raw: Double, probeGain: Double, tolerance: Double): Double {
+        val upper = maxOf(1.0, probeGain * (1.0 + tolerance))
+        val lower = minOf(1.0, probeGain * (1.0 - tolerance))
+        return raw.coerceIn(lower, upper)
     }
 
     /**
@@ -354,6 +414,40 @@ object WhiteBalance {
             meanR = trimmedMean(rHist, count, GRAY_TRIM_FRACTION),
             meanG = trimmedMean(gHist, count, GRAY_TRIM_FRACTION),
             meanB = trimmedMean(bHist, count, GRAY_TRIM_FRACTION),
+            count = count,
+        )
+    }
+
+    /**
+     * The strict-neutral probe cue (issue #175): mean colour over mid-luma pixels whose
+     * saturation is below [NEUTRAL_PROBE_SATURATION_MAX] - a far tighter gate than the
+     * gray-world admission. Used only by the anti-overshoot cap in [estimateGains], never
+     * as a voting cue. Plain means (no trimming): the population is already the most
+     * selective one the estimator has. Exposed for direct testing.
+     */
+    internal fun neutralProbeCue(frame: Frame): Cue {
+        val src = frame.argb
+        var sumR = 0L
+        var sumG = 0L
+        var sumB = 0L
+        var count = 0
+        for (pixel in src) {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            val luma = R_WEIGHT * r + G_WEIGHT * g + B_WEIGHT * b
+            if (luma < GRAY_LUMA_MIN || luma > GRAY_LUMA_MAX) continue
+            val max = maxOf(r, g, b)
+            val min = minOf(r, g, b)
+            val sat = if (max == 0) 0.0 else (max - min).toDouble() / max
+            if (sat > NEUTRAL_PROBE_SATURATION_MAX) continue
+            sumR += r; sumG += g; sumB += b; count++
+        }
+        if (count == 0) return Cue(0.0, 0.0, 0.0, 0)
+        return Cue(
+            meanR = sumR.toDouble() / count,
+            meanG = sumG.toDouble() / count,
+            meanB = sumB.toDouble() / count,
             count = count,
         )
     }

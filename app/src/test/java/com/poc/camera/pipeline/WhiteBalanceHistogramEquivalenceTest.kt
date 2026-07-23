@@ -182,9 +182,30 @@ class WhiteBalanceHistogramEquivalenceTest {
             bGainAcc += w * (c.meanG / c.meanB)
             weightSum += w
         }
-        val rGain = referenceBoundGain(rGainAcc / weightSum, maxGain)
-        val bGain = referenceBoundGain(bGainAcc / weightSum, maxGain)
+        var rawR = rGainAcc / weightSum
+        var rawB = bGainAcc / weightSum
+
+        // Mirrors the issue #175 anti-overshoot probe cap: the probe cue is plain direct
+        // sums (no histogram involved), so the reference reuses the production cue and
+        // replicates only the combination arithmetic under equivalence test.
+        val probe = WhiteBalance.neutralProbeCue(frame)
+        if (
+            probe.count >= maxOf(1, (n * WhiteBalance.NEUTRAL_PROBE_MIN_FRACTION).roundToInt()) &&
+            probe.meanR > EPS && probe.meanG > EPS && probe.meanB > EPS
+        ) {
+            rawR = referenceCapTowardProbe(rawR, probe.meanG / probe.meanR)
+            rawB = referenceCapTowardProbe(rawB, probe.meanG / probe.meanB)
+        }
+
+        val rGain = referenceBoundGain(rawR, maxGain)
+        val bGain = referenceBoundGain(rawB, maxGain)
         return WhiteBalanceGains(rGain, 1.0, bGain)
+    }
+
+    private fun referenceCapTowardProbe(raw: Double, probeGain: Double): Double {
+        val upper = maxOf(1.0, probeGain * (1.0 + WhiteBalance.NEUTRAL_PROBE_TOLERANCE))
+        val lower = minOf(1.0, probeGain * (1.0 - WhiteBalance.NEUTRAL_PROBE_TOLERANCE))
+        return raw.coerceIn(lower, upper)
     }
 
     private fun referenceBoundGain(raw: Double, maxGain: Double): Double {

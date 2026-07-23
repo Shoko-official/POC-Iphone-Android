@@ -46,6 +46,62 @@ class WhiteBalanceTest {
         return Frame(size, size, argb, 0L)
     }
 
+    /**
+     * A warm-surface-dominant scene with an embedded TRUE-NEUTRAL patch (issue #175):
+     * [woodFraction] of the pixels are a low-saturation warm wood tone (admitted by the
+     * gray-world saturation gate) and the rest are genuine neutral gray. Deterministic
+     * jitter keeps both populations realistic without randomness.
+     */
+    private fun warmSceneWithNeutralPatch(size: Int, woodFraction: Double): Frame {
+        var state = 0x0BADC0DEL
+        fun jitter(): Int {
+            state = (state * 1664525L + 1013904223L) and 0xFFFFFFFFL
+            return ((state ushr 20) % 7L).toInt() - 3 // [-3, 3]
+        }
+        val n = size * size
+        val woodCount = (n * woodFraction).toInt()
+        val argb = IntArray(n) { i ->
+            if (i < woodCount) {
+                // Warm oak: sat = (150-92)/150 ~= 0.39 < GRAY_SATURATION_MAX, mid-luma.
+                rgb(
+                    (150 + jitter()).coerceIn(0, 255),
+                    (118 + jitter()).coerceIn(0, 255),
+                    (92 + jitter()).coerceIn(0, 255),
+                )
+            } else {
+                // True neutral gray (a checkerboard/gray card in the scene).
+                rgb(
+                    (128 + jitter()).coerceIn(0, 255),
+                    (128 + jitter()).coerceIn(0, 255),
+                    (128 + jitter()).coerceIn(0, 255),
+                )
+            }
+        }
+        return Frame(size, size, argb, 0L)
+    }
+
+    /**
+     * Issue #175 invariant: a scene dominated by a warm SURFACE (not a warm illuminant)
+     * that also contains genuine neutral content must not have that true neutral pushed
+     * PAST neutral toward blue. The neutral patch is the scene's own illuminant probe -
+     * when a meaningful near-neutral population reads as balanced, the estimator must not
+     * chase the warm surface average into a blue cast.
+     */
+    @Test
+    fun warmDominantSceneDoesNotPushTrueNeutralsPastNeutral() {
+        val frame = warmSceneWithNeutralPatch(size = 96, woodFraction = 0.84)
+        val gains = WhiteBalance.estimateGains(frame)
+        // Apply the estimate to a perfect neutral: it must stay neutral. Blue-ward
+        // overshoot ((b - r) after gains) beyond ~2 codes is the cold cast the real
+        // A/B pair exhibited.
+        val r = 128.0 * gains.rGain
+        val b = 128.0 * gains.bGain
+        assertTrue(
+            "true neutral pushed blue-ward by ${b - r} codes (rGain=${gains.rGain} bGain=${gains.bGain})",
+            b - r <= 2.0,
+        )
+    }
+
     @Test
     fun grayWorldExcludesSaturatedOutliers() {
         // A warm-cast neutral surface (gray * 1.25R / 1.0G / 0.8B) with vivid red

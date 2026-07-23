@@ -94,4 +94,32 @@ class HighlightBloomTest {
         assertEquals(254f, out[1], 1e-3f)
         assertEquals(254f, out[2], 1e-3f)
     }
+
+    /**
+     * A saturated single-channel highlight (a coloured LED / string light) is a genuine clipped
+     * highlight: its blue channel is at 255 even though its Rec.601 luma (29.1) is far below the
+     * threshold. The per-channel gate must bloom it — a luma gate would have left it untouched,
+     * making coloured bokeh balls ~3x too dim. The boost is hue-preserving (all channels scale by
+     * the same gain), so the zero channels stay zero.
+     */
+    @Test
+    fun clippedSingleChannelHighlightBloomsHuePreserving() {
+        val out = run(0f, 0f, 255f, background = 1f, threshold = 235.0, boost = 3.0)
+        // max channel 255 -> ramp 1 -> gain 3: blue lifts to headroom, R/G stay 0 (hue held).
+        assertEquals(0f, out[0], 1e-3f)
+        assertEquals(0f, out[1], 1e-3f)
+        assertEquals(765f, out[2], 1e-3f)
+    }
+
+    /**
+     * A coloured but sub-threshold pixel (brightest channel below the threshold) stays untouched,
+     * so the gate does not bloom ordinary saturated mid-tones.
+     */
+    @Test
+    fun colouredSubThresholdPixelIsPassthrough() {
+        val out = run(0f, 0f, 200f, background = 1f, threshold = 235.0, boost = 3.0)
+        assertEquals(0f, out[0], 1e-3f)
+        assertEquals(0f, out[1], 1e-3f)
+        assertEquals(200f, out[2], 1e-3f)
+    }
 }

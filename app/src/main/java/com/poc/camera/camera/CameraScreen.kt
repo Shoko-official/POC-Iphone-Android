@@ -109,6 +109,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.Observer
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.poc.camera.R
+import com.poc.camera.ui.theme.HeroUiColors
 import com.poc.camera.compare.ComparePair
 import com.poc.camera.compare.GuidedCompareStep
 import com.poc.camera.compare.ReferenceImageLoader
@@ -1364,7 +1365,7 @@ private fun CameraCaptureScreen(
                             Box(
                                 modifier = Modifier
                                     .size(8.dp)
-                                    .background(Color.Red, CircleShape),
+                                    .background(ChromeTokens.Danger, CircleShape),
                             )
                             Text(
                                 text = RecordingTimeFormatter.format(elapsedMillis),
@@ -1982,6 +1983,13 @@ private fun ModeSelector(
             SegmentedButton(
                 modifier = Modifier.heightIn(min = 48.dp),
                 shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                // HeroUI segmented-control states via the theme's role mapping: the selected
+                // thumb is secondaryContainer (HeroUI --segment) with snow text; unselected
+                // labels drop to the muted foreground the way HeroUI mutes unselected tabs.
+                colors = SegmentedButtonDefaults.colors(
+                    inactiveContainerColor = HeroUiColors.Background.copy(alpha = 0.72f),
+                    inactiveContentColor = HeroUiColors.Muted,
+                ),
                 selected = selected == candidateMode,
                 enabled = enabled,
                 onClick = { onSelected(candidateMode) },
@@ -2069,17 +2077,17 @@ private fun ShutterButton(
             mode.isVideoLike && isRecording -> Box(
                 modifier = Modifier
                     .size(28.dp)
-                    .background(Color.Red, RoundedCornerShape(6.dp)),
+                    .background(ChromeTokens.Danger, RoundedCornerShape(8.dp)),
             )
             mode.isVideoLike -> Box(
                 modifier = Modifier
                     .size(60.dp)
-                    .background(Color.Red, CircleShape),
+                    .background(ChromeTokens.Danger, CircleShape),
             )
             else -> Box(
                 modifier = Modifier
                     .size(60.dp)
-                    .background(Color.White, CircleShape),
+                    .background(ChromeTokens.OnChrome, CircleShape),
             )
         }
     }

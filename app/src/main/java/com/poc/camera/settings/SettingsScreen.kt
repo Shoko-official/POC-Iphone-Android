@@ -45,6 +45,7 @@ internal object SettingsTestTags {
     const val PRESET_DETAIL = "preset_detail"
     const val SWITCH_HDR_BURST = "switch_hdr_burst"
     const val SWITCH_NIGHT_MODE = "switch_night"
+    const val SWITCH_FORCE_BACKLIT = "switch_force_backlit"
 }
 
 /**
@@ -231,6 +232,27 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_force_backlit_rescue_label),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            text = stringResource(R.string.settings_force_backlit_rescue_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        modifier = Modifier.testTag(SettingsTestTags.SWITCH_FORCE_BACKLIT),
+                        checked = settings.forceBacklitRescue,
+                        onCheckedChange = { onSettingsChanged(settings.copy(forceBacklitRescue = it)) },
+                    )
+                }
             }
 
             HorizontalDivider()

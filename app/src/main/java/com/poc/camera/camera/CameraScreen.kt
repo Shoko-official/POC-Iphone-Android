@@ -42,7 +42,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
@@ -1289,6 +1291,10 @@ private fun CameraCaptureScreen(
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
+                // The viewfinder is edge-to-edge (preview draws behind the system bars), so the
+                // top controls must inset below the status bar or the settings gear collides with
+                // the clock/battery (verified on a Pixel emulator). Inset first, then the visual margin.
+                .statusBarsPadding()
                 .fillMaxWidth()
                 .padding(start = ChromeTokens.EdgeInset, end = ChromeTokens.EdgeInset, top = ChromeTokens.EdgeInset),
             verticalArrangement = Arrangement.spacedBy(ChromeTokens.ChipSpacing),
@@ -1505,6 +1511,7 @@ private fun CameraCaptureScreen(
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
+                    .navigationBarsPadding()
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(ChromeTokens.ChipSpacing),
             ) {
@@ -1583,6 +1590,8 @@ private fun CameraCaptureScreen(
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
+                // Clear the gesture/navigation bar so the shutter cluster is never under it.
+                .navigationBarsPadding()
                 .padding(bottom = 24.dp),
         ) {
             Column(

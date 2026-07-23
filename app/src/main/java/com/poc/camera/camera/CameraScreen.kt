@@ -127,6 +127,7 @@ import com.poc.camera.settings.VideoQualityLogic
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -740,7 +741,14 @@ private fun CameraCaptureScreen(
                             snackbarHostState.showSnackbar(message)
                         }
                     }
-                } catch (e: Exception) {
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    // Throwable, not Exception: an OutOfMemoryError from the full-resolution
+                    // pipeline is an Error, and letting it escape this coroutine kills the whole
+                    // process (and loses the capture). Recover the queue state and surface the
+                    // failure instead - the app must never die because one capture failed.
+                    Log.e(TAG, "Portrait capture processing failed", e)
                     withContext(Dispatchers.Main) {
                         processingCount = (processingCount - 1).coerceAtLeast(0)
                         if (processingCount == 0) currentProcessingStage = null
@@ -916,7 +924,15 @@ private fun CameraCaptureScreen(
                                 snackbarHostState.showSnackbar(message)
                             }
                         }
-                    } catch (e: Exception) {
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        // Throwable, not Exception: an OutOfMemoryError from the full-resolution
+                        // pipeline is an Error, and letting it escape this coroutine kills the
+                        // whole process (and loses the capture). Recover the queue state and
+                        // surface the failure instead - the app must never die because one
+                        // capture failed.
+                        Log.e(TAG, "Photo capture processing failed", e)
                         withContext(Dispatchers.Main) {
                             processingCount = (processingCount - 1).coerceAtLeast(0)
                             if (processingCount == 0) currentProcessingStage = null

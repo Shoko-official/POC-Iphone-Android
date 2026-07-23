@@ -30,6 +30,18 @@ class LutShaderSourceTest {
     }
 
     @Test
+    fun fragmentShaderQualifiesHighpWithMediumpFallback() {
+        val source = LutShaderSource.fragmentShader(17)
+        // highp where available (fixes the mediump atlas-addressing banding, issue #156)...
+        assertTrue(source.contains("#ifdef GL_FRAGMENT_PRECISION_HIGH"))
+        assertTrue(source.contains("precision highp float;"))
+        assertTrue(source.contains("#else"))
+        // ...with the original mediump path preserved verbatim as the no-regression fallback.
+        assertTrue(source.contains("precision mediump float;"))
+        assertTrue(source.contains("#endif"))
+    }
+
+    @Test
     fun fragmentShaderEmbedsSizeConstants() {
         val source = LutShaderSource.fragmentShader(17)
         assertTrue("expected LUT_SIZE 17.0", source.contains("17.0"))

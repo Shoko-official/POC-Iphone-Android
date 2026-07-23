@@ -190,8 +190,14 @@ private val LastCaptureSaver: Saver<LastCapture?, List<String>> = Saver(
         }
     },
     restore = { saved ->
+        // Defensive (issue #143): a stale or foreign persisted value can carry a media-type
+        // string that no longer maps to a CaptureMediaType constant. rememberSaveable does
+        // not catch restore-time exceptions, so a bare valueOf would crash the whole restore;
+        // fall back to "no last capture" instead, mirroring ComparePairSaver's tolerant style.
         if (saved.size == 2) {
-            LastCapture(uri = saved[0].toUri(), mediaType = CaptureMediaType.valueOf(saved[1]))
+            runCatching { CaptureMediaType.valueOf(saved[1]) }.getOrNull()?.let {
+                LastCapture(uri = saved[0].toUri(), mediaType = it)
+            }
         } else {
             null
         }
@@ -1075,10 +1081,29 @@ private fun CameraCaptureScreen(
     // Bridges MainActivity's hardware volume-key dispatch into this screen's own shutter
     // action - Activity.onKeyDown can't reach into composable state directly, so
     // MainActivity increments volumeShutterTrigger instead (see VolumeShutterPolicy for the
-    // gating decision made there). 0 is the sentinel "no press yet" value, so the initial
-    // composition never fires a phantom capture.
+    // gating decision made there).
+    //
+    // Edge-trigger (issue #143): volumeShutterTrigger is an Activity-scoped level/counter, but
+    // this consumer's LaunchedEffect is re-run every time CameraScreen re-enters composition -
+    // which a Settings/Compare round trip forces by disposing and rebuilding this whole
+    // subtree. A bare `if (trigger > 0)` therefore re-fired the shutter on every return after
+    // any real press this session (a phantom photo, or a stray record start/stop). We instead
+    // seed a per-consumer baseline from the current counter and fire only when it has since
+    // advanced past that baseline (VolumeShutterPolicy.isFreshTrigger).
+    //
+    // Plain `remember`, deliberately NOT `rememberSaveable`: the baseline must mirror the
+    // trigger's own lifetime, and the trigger is a plain Activity field (MainActivity) with no
+    // configChanges override in the manifest, so it resets to 0 whenever the Activity is
+    // recreated (rotation / process death). Re-seeding the baseline from the trigger on each
+    // fresh composition keeps the two in lock-step - baseline == trigger right after any
+    // recreation, so no phantom fire. A rememberSaveable baseline would instead survive that
+    // recreation and, paired with the reset (0) trigger, would fire a phantom capture on the
+    // first rotation after a real press. It restores across nav too, because the trigger is
+    // preserved across nav (Activity not recreated) and the re-seed reads that preserved value.
+    var lastHandledTrigger by remember { mutableIntStateOf(volumeShutterTrigger) }
     LaunchedEffect(volumeShutterTrigger) {
-        if (volumeShutterTrigger > 0) {
+        if (VolumeShutterPolicy.isFreshTrigger(volumeShutterTrigger, lastHandledTrigger)) {
+            lastHandledTrigger = volumeShutterTrigger
             onShutterPressed()
         }
     }

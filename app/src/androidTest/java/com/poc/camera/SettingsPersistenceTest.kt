@@ -10,6 +10,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
@@ -99,16 +100,10 @@ class SettingsPersistenceTest {
         composeRule.onNodeWithTag(SettingsTestTags.SWITCH_HDR_BURST).performClick()
         composeRule.onNodeWithTag(SettingsTestTags.SWITCH_NIGHT_MODE).performClick()
 
-        // Scope note: this test covers the two boolean switches only. The PRESET
-        // SegmentedButton is deliberately excluded - its selected state (driven through
-        // MainActivity's shared settings callback, unlike the LOCAL-state mode selector
-        // PortraitModeTest exercises) did not read as selected even on a fresh post-
-        // recreation compose across three emulator runs, indicating the preset value may
-        // not round-trip the callback/persistence path at all. That is a genuine question,
-        // not a test-addressing artifact, so it is tracked as a device-verified issue
-        // rather than asserted here on an unverifiable path. Switch persistence exercises
-        // the same SharedPreferencesCameraSettings.save()/load() contract with a control
-        // whose ToggleableState semantics are unambiguous.
+        // Scope note: this test covers the two boolean switches only; the PRESET
+        // SegmentedButton has its own dedicated test below
+        // ([presetSelectionPersistsAcrossActivityRecreation]). Both exercise the same
+        // SharedPreferencesCameraSettings.save()/load() contract.
 
         // The real persistence proof: recreate the Activity so its settings state is
         // re-read from SharedPreferencesCameraSettings.load() fresh (not merely surviving
@@ -122,5 +117,52 @@ class SettingsPersistenceTest {
         composeRule.onNodeWithContentDescription(openSettingsDescription).performClick()
         composeRule.onNodeWithTag(SettingsTestTags.SWITCH_HDR_BURST).assertIsOn()
         composeRule.onNodeWithTag(SettingsTestTags.SWITCH_NIGHT_MODE).assertIsOn()
+    }
+
+    /**
+     * Issue #138: the finishing-preset SegmentedButton round-trips through the same
+     * [com.poc.camera.settings.SharedPreferencesCameraSettings] save/load path as the
+     * switches, driven via MainActivity's shared settings callback.
+     *
+     * An earlier revision of the sibling switch test tried to assert the preset inline and
+     * saw PRESET_VIVID read as not-selected even post-recreation across three CI runs. Root
+     * cause (understood only after issue #152): the preset row sits below the fold, and the
+     * settings content column was not scrollable at the time, so the SegmentedButton was laid
+     * out beyond the viewport. [performClick] dispatches a synthetic tap at the node's centre;
+     * for an off-window node that tap never reached the button, so its onClick never fired and
+     * the selection never changed - it was never a persistence defect. Now that the column
+     * scrolls (#152), [performScrollTo] brings each preset chip into the viewport before the
+     * tap, and the round-trip asserts cleanly.
+     */
+    @Test
+    fun presetSelectionPersistsAcrossActivityRecreation() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val openSettingsDescription = context.getString(R.string.open_settings_content_description)
+        val backDescription = context.getString(R.string.settings_back_content_description)
+
+        composeRule.onNodeWithContentDescription(openSettingsDescription).performClick()
+
+        // Sanity check: resetPersistedSettings landed on CameraSettingsData.DEFAULT, whose
+        // finishing preset is Natural - a failure here means the reset is broken, not the
+        // persistence this test targets.
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_NATURAL).performScrollTo().assertIsSelected()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_VIVID).assertIsNotSelected()
+
+        // Switch to Vivid. Scroll it into view first so the tap lands on the chip (see KDoc).
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_VIVID).performScrollTo().performClick()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_VIVID).assertIsSelected()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_NATURAL).assertIsNotSelected()
+
+        // The real persistence proof: recreate the Activity so its settings state is re-read
+        // from SharedPreferencesCameraSettings.load() fresh, then reopen Settings and confirm
+        // Vivid comes straight back from the persisted value.
+        composeRule.onNodeWithContentDescription(backDescription).performClick()
+        composeRule.onNodeWithContentDescription(openSettingsDescription).assertExists()
+        composeRule.activityRule.scenario.recreate()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithContentDescription(openSettingsDescription).performClick()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_VIVID).performScrollTo().assertIsSelected()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_NATURAL).assertIsNotSelected()
     }
 }

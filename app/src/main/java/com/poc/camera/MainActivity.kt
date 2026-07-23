@@ -16,6 +16,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.net.toUri
@@ -132,46 +133,64 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    when (destination) {
-                        AppDestination.Camera -> CameraScreen(
-                            modifier = Modifier.fillMaxSize(),
-                            settings = settings,
-                            onOpenSettings = { destination = AppDestination.Settings },
-                            comparePair = comparePair,
-                            onOpenCompare = { destination = AppDestination.Compare },
-                            onComparePairCaptured = { comparePair = it },
-                            guidedStep = guidedStep,
-                            onGuidedCaptureCompleted = {
-                                onGuidedEvent(GuidedCompareEvent.CaptureCompleted)
-                                destination = AppDestination.Compare
-                            },
-                            onGuidedCancel = { onGuidedEvent(GuidedCompareEvent.Cancelled) },
-                            volumeShutterTrigger = volumeShutterTrigger,
-                            onCameraPermissionStateChanged = { state ->
-                                cameraPermissionGranted = state == CameraPermissionState.Granted
-                            },
-                        )
-                        AppDestination.Settings -> SettingsScreen(
-                            modifier = Modifier.fillMaxSize(),
-                            settings = settings,
-                            onSettingsChanged = { updated ->
-                                settings = updated
-                                cameraSettings.save(updated)
-                            },
-                            onBack = { destination = AppDestination.Camera },
-                        )
-                        AppDestination.Compare -> CompareScreen(
-                            modifier = Modifier.fillMaxSize(),
-                            pair = comparePair,
-                            onBack = { destination = AppDestination.Camera },
-                            guidedStep = guidedStep,
-                            onStartGuidedComparison = {
-                                onGuidedEvent(GuidedCompareEvent.Start)
-                                destination = AppDestination.Camera
-                            },
-                            onGuidedReferencePicked = { onGuidedEvent(GuidedCompareEvent.ReferencePicked) },
-                            onGuidedCancel = { onGuidedEvent(GuidedCompareEvent.Cancelled) },
-                        )
+                    // Per-destination saveable state (issue #143): the `when (destination)`
+                    // below disposes and rebuilds each branch's whole subtree on every
+                    // navigation. Compose only restores `rememberSaveable` state from the
+                    // SaveableStateRegistry on an OS-driven save (config change / process
+                    // death), never on an ordinary composable disposal+reinsertion - so
+                    // without this holder a Settings/Compare round trip silently reset every
+                    // bit of CameraScreen's saved state (mode, zoom, flash, lens facing, video
+                    // look, last-capture thumbnail, permission) back to defaults, contradicting
+                    // the "survives a round trip" comments on that state. comparePair/guidedStep
+                    // above escape this because they are hoisted here, outside the `when`.
+                    // Wrapping each branch in a SaveableStateProvider keyed by the destination
+                    // saves that branch's saved state before it leaves composition and restores
+                    // it on return - the same mechanism androidx.navigation.compose.NavHost uses
+                    // to preserve per-destination state across both navigation and config change
+                    // (AppDestination is an enum, hence Serializable, hence a Bundle-storable key).
+                    val destinationStateHolder = rememberSaveableStateHolder()
+                    destinationStateHolder.SaveableStateProvider(destination) {
+                        when (destination) {
+                            AppDestination.Camera -> CameraScreen(
+                                modifier = Modifier.fillMaxSize(),
+                                settings = settings,
+                                onOpenSettings = { destination = AppDestination.Settings },
+                                comparePair = comparePair,
+                                onOpenCompare = { destination = AppDestination.Compare },
+                                onComparePairCaptured = { comparePair = it },
+                                guidedStep = guidedStep,
+                                onGuidedCaptureCompleted = {
+                                    onGuidedEvent(GuidedCompareEvent.CaptureCompleted)
+                                    destination = AppDestination.Compare
+                                },
+                                onGuidedCancel = { onGuidedEvent(GuidedCompareEvent.Cancelled) },
+                                volumeShutterTrigger = volumeShutterTrigger,
+                                onCameraPermissionStateChanged = { state ->
+                                    cameraPermissionGranted = state == CameraPermissionState.Granted
+                                },
+                            )
+                            AppDestination.Settings -> SettingsScreen(
+                                modifier = Modifier.fillMaxSize(),
+                                settings = settings,
+                                onSettingsChanged = { updated ->
+                                    settings = updated
+                                    cameraSettings.save(updated)
+                                },
+                                onBack = { destination = AppDestination.Camera },
+                            )
+                            AppDestination.Compare -> CompareScreen(
+                                modifier = Modifier.fillMaxSize(),
+                                pair = comparePair,
+                                onBack = { destination = AppDestination.Camera },
+                                guidedStep = guidedStep,
+                                onStartGuidedComparison = {
+                                    onGuidedEvent(GuidedCompareEvent.Start)
+                                    destination = AppDestination.Camera
+                                },
+                                onGuidedReferencePicked = { onGuidedEvent(GuidedCompareEvent.ReferencePicked) },
+                                onGuidedCancel = { onGuidedEvent(GuidedCompareEvent.Cancelled) },
+                            )
+                        }
                     }
                 }
             }

@@ -398,6 +398,12 @@ private fun CameraCaptureScreen(
     // liveZoomState mirrors ZoomState (see the DisposableEffect below) so the torch chip
     // reflects what the camera actually reports - e.g. if it auto-disables the torch itself.
     var liveTorchState by remember { mutableStateOf<Int?>(null) }
+    // Bumped on every torch-button tap so the apply effect below re-runs even when the tap does
+    // not change torchEnabled's value. Without it, re-enabling the torch after the camera has
+    // auto-disabled it (liveTorchState OFF while torchEnabled is still true) would be a no-op:
+    // toggle(torchIsOn) yields the value torchEnabled already holds, so the state write is
+    // dropped and enableTorch is never re-issued.
+    var torchApplyToken by remember { mutableIntStateOf(0) }
     // Settings only seed the initial look for a fresh session; once the user picks a
     // look in Cinematic mode it stays under their control for the rest of the session.
     var videoLook by rememberSaveable { mutableStateOf(settings.defaultCinematicLook) }
@@ -503,7 +509,7 @@ private fun CameraCaptureScreen(
     // a fresh/rebound camera (cameraHandle) or the user toggling the top-status control
     // (torchEnabled). Fire-and-forget, like the zoom calls elsewhere on this screen - nothing
     // here needs to await the future beyond what liveTorchState reports back.
-    LaunchedEffect(cameraHandle, torchEnabled) {
+    LaunchedEffect(cameraHandle, torchEnabled, torchApplyToken) {
         cameraHandle?.cameraControl?.enableTorch(torchEnabled)
     }
 
@@ -1439,7 +1445,12 @@ private fun CameraCaptureScreen(
                                 torchContentDescriptionOff
                             },
                             active = torchIsOn,
-                            onClick = { torchEnabled = TorchLogic.toggle(torchIsOn) },
+                            onClick = {
+                                torchEnabled = TorchLogic.toggle(torchIsOn)
+                                // Force the apply effect to re-run even when the value above is
+                                // unchanged (re-enabling after the camera auto-disabled the torch).
+                                torchApplyToken++
+                            },
                         )
                     }
 

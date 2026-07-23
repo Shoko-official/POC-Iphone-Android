@@ -84,6 +84,11 @@ object HighlightBloom {
 
     /** Classic smoothstep: 0 for x <= e0, 1 for x >= e1, C1-smooth in between. */
     private fun smoothstep(e0: Double, e1: Double, x: Double): Double {
+        // Degenerate span (e1 == e0, permitted by BokehParams when highlightThreshold == 255):
+        // the ramp collapses to a hard step at the edge. Guarding here avoids the 0/0 = NaN that
+        // the division below would otherwise produce (coerceIn does not clamp NaN), which would
+        // propagate through the gain into the output and crash the final roundToInt composite.
+        if (e1 <= e0) return if (x >= e1) 1.0 else 0.0
         val t = ((x - e0) / (e1 - e0)).coerceIn(0.0, 1.0)
         return t * t * (3.0 - 2.0 * t)
     }

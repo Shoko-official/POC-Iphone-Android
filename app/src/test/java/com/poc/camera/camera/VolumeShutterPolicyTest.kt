@@ -2,6 +2,8 @@ package com.poc.camera.camera
 
 import android.view.KeyEvent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VolumeShutterPolicyTest {
@@ -120,5 +122,41 @@ class VolumeShutterPolicyTest {
         )
 
         assertEquals(VolumeShutterPolicy.Action.Ignore, action)
+    }
+
+    // -- edge-trigger guard (issue #143) ------------------------------------------------------
+
+    @Test
+    fun sentinelCounterNeverFires() {
+        // Initial composition: no press yet, baseline seeded from the same 0 sentinel.
+        assertFalse(VolumeShutterPolicy.isFreshTrigger(current = 0, lastHandled = 0))
+    }
+
+    @Test
+    fun advancingPastTheBaselineFires() {
+        // A genuine press increments the counter beyond the last-handled baseline.
+        assertTrue(VolumeShutterPolicy.isFreshTrigger(current = 1, lastHandled = 0))
+        assertTrue(VolumeShutterPolicy.isFreshTrigger(current = 5, lastHandled = 4))
+    }
+
+    @Test
+    fun bareRemountWithUnchangedCounterDoesNotFire() {
+        // Nav round trip: the subtree is rebuilt, the consumer re-seeds its baseline from the
+        // preserved counter, so counter == baseline and no phantom capture fires.
+        assertFalse(VolumeShutterPolicy.isFreshTrigger(current = 3, lastHandled = 3))
+    }
+
+    @Test
+    fun counterResetBelowBaselineDoesNotFire() {
+        // Activity recreation (rotation / process death) resets the counter to 0 while a
+        // stale baseline could still read high; the > 0 sentinel keeps that from firing.
+        assertFalse(VolumeShutterPolicy.isFreshTrigger(current = 0, lastHandled = 2))
+    }
+
+    @Test
+    fun rapidDoublePressAdvancingByTwoStillFires() {
+        // A coalesced double-press increments by two between observations; it still reads as a
+        // fresh trigger (fires once - see isFreshTrigger's documented coalescing limit).
+        assertTrue(VolumeShutterPolicy.isFreshTrigger(current = 2, lastHandled = 0))
     }
 }

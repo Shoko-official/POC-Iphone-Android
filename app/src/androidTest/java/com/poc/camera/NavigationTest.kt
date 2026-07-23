@@ -76,4 +76,44 @@ class NavigationTest {
             .onNodeWithContentDescription(context.getString(R.string.record_button_content_description))
             .assertExists()
     }
+
+    /**
+     * Regression for issue #143 (Bug 1): CameraScreen's `rememberSaveable` state must survive
+     * a Settings round trip. Before the fix, MainActivity's `when (destination)` disposed and
+     * rebuilt the whole CameraScreen subtree on every navigation, and Compose only restores
+     * `rememberSaveable` state on an OS-driven save (config change / process death), never on
+     * an ordinary disposal - so the selected [com.poc.camera.camera.CameraMode] silently reset
+     * to the Photo default on returning from Settings. The `SaveableStateProvider` wrapper now
+     * preserves it. Mode is used as the assertable proxy for that state (a deterministic tap,
+     * unlike pinch-zoom); its record affordance is a pure function of mode, so this stays
+     * flake-resistant and independent of any real camera bind on the emulator.
+     */
+    @Test
+    fun cameraModeSurvivesSettingsRoundTrip() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+
+        // Move off the Photo default into Video, whose distinct record affordance is a
+        // deterministic, camera-independent signal of the current mode.
+        composeRule.onNodeWithText(context.getString(R.string.mode_video)).performClick()
+        composeRule
+            .onNodeWithContentDescription(context.getString(R.string.record_button_content_description))
+            .assertExists()
+
+        // Round-trip through Settings and back.
+        composeRule
+            .onNodeWithContentDescription(context.getString(R.string.open_settings_content_description))
+            .performClick()
+        composeRule
+            .onNodeWithText(context.getString(R.string.settings_section_burst))
+            .assertExists()
+        composeRule
+            .onNodeWithContentDescription(context.getString(R.string.settings_back_content_description))
+            .performClick()
+
+        // The mode must have survived: the record affordance is still shown, not the photo
+        // shutter it would revert to if the subtree had reset to defaults.
+        composeRule
+            .onNodeWithContentDescription(context.getString(R.string.record_button_content_description))
+            .assertExists()
+    }
 }

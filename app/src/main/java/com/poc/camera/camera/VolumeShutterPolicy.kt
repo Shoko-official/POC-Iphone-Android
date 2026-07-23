@@ -43,4 +43,27 @@ object VolumeShutterPolicy {
         !permissionGranted -> Action.Ignore
         else -> Action.TriggerShutter
     }
+
+    /**
+     * Edge-trigger guard for the volume-shutter consumer (issue #143). [MainActivity]'s
+     * `volumeShutterTrigger` counter is incremented once per accepted press by [decide]'s
+     * caller, but the `LaunchedEffect(volumeShutterTrigger)` that consumes it in CameraScreen
+     * is re-run every time that screen re-enters composition - which a Settings/Compare round
+     * trip forces by disposing and rebuilding the whole subtree. A level/counter key means a
+     * bare remount re-runs the effect with the same value, which used to re-fire the shutter
+     * with no user input (a phantom photo, or a stray record start/stop).
+     *
+     * The consumer seeds [lastHandled] from the current counter on every (re)composition, so
+     * this returns true only when the counter has since advanced past that baseline - a
+     * genuine new press - not merely because the effect remounted. [current] == 0 is the
+     * "no press yet" sentinel and never fires.
+     *
+     * Known coalescing limit (pre-existing, unchanged): if two presses increment the counter
+     * within a single recomposition window, the effect observes only the latest value and
+     * fires once, so a very fast double-press can yield a single capture. That was already
+     * true of the old `if (current > 0)` consumer and is a property of a level trigger, not a
+     * regression introduced here.
+     */
+    fun isFreshTrigger(current: Int, lastHandled: Int): Boolean =
+        current > 0 && current != lastHandled
 }

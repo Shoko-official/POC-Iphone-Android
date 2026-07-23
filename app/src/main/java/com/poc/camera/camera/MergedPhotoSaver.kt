@@ -32,42 +32,47 @@ object MergedPhotoSaver {
 
     fun save(context: Context, frame: Frame, prefix: String, exif: ExifMetadata? = null): Uri {
         val bitmap = BitmapFrameConverter.fromFrame(frame)
-        val supportsPendingFlag = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-        val values = PhotoMediaStoreValuesFactory.create(
-            timestampMillis = frame.timestampMillis,
-            supportsPendingFlag = supportsPendingFlag,
-            prefix = prefix,
-        )
-        val contentValues = PhotoContentValuesAdapter.toContentValues(values)
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-            ?: throw IOException("MediaStore insert returned null")
-
+        // Recycle on every exit path after the allocation - including the null-insert throw
+        // below, which fires before the inner try and previously left the (tens-of-MB) bitmap
+        // for the GC on storage-full / provider failures.
         try {
-            resolver.openOutputStream(uri)?.use { stream ->
-                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, stream)) {
-                    throw IOException("JPEG compression failed")
+            val supportsPendingFlag = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+            val values = PhotoMediaStoreValuesFactory.create(
+                timestampMillis = frame.timestampMillis,
+                supportsPendingFlag = supportsPendingFlag,
+                prefix = prefix,
+            )
+            val contentValues = PhotoContentValuesAdapter.toContentValues(values)
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+                ?: throw IOException("MediaStore insert returned null")
+
+            try {
+                resolver.openOutputStream(uri)?.use { stream ->
+                    if (!bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, stream)) {
+                        throw IOException("JPEG compression failed")
+                    }
+                } ?: throw IOException("Could not open output stream for $uri")
+            } catch (e: IOException) {
+                resolver.delete(uri, null, null)
+                throw e
+            }
+
+            if (exif != null) {
+                ExifMetadataWriter.write(resolver, uri, exif)
+            }
+
+            if (supportsPendingFlag) {
+                val pendingCleared = ContentValues().apply {
+                    put(MediaStore.Images.Media.IS_PENDING, 0)
                 }
-            } ?: throw IOException("Could not open output stream for $uri")
-        } catch (e: IOException) {
-            resolver.delete(uri, null, null)
-            throw e
+                resolver.update(uri, pendingCleared, null, null)
+            }
+
+            return uri
         } finally {
             bitmap.recycle()
         }
-
-        if (exif != null) {
-            ExifMetadataWriter.write(resolver, uri, exif)
-        }
-
-        if (supportsPendingFlag) {
-            val pendingCleared = ContentValues().apply {
-                put(MediaStore.Images.Media.IS_PENDING, 0)
-            }
-            resolver.update(uri, pendingCleared, null, null)
-        }
-
-        return uri
     }
 
     private const val JPEG_QUALITY = 95

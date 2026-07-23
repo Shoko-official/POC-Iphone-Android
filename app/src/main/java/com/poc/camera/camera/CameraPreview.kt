@@ -328,11 +328,13 @@ fun CameraPreview(
                                 .build()
 
                             // Only the Cinematic look enters the GL path; Neutral binds plainly for
-                            // zero overhead. Effect construction (incl. EGL init) is guarded so any
-                            // GL failure logs and falls back to binding without a look.
+                            // zero overhead. The shipped LUT is the skin-safe grade (issue #134):
+                            // the skin protection is baked into the lattice, so the GL cost is
+                            // identical to the raw look. Effect construction (incl. EGL init) is
+                            // guarded so any GL failure logs and falls back to binding without a look.
                             val effect = if (look == VideoLook.Cinematic) {
                                 try {
-                                    LookCameraEffect.create(Looks.cinematic(LookCameraEffect.LUT_SIZE))
+                                    LookCameraEffect.create(Looks.skinSafeCinematic(LookCameraEffect.LUT_SIZE))
                                 } catch (t: Throwable) {
                                     Log.e(TAG, "LUT effect init failed; binding without look", t)
                                     null

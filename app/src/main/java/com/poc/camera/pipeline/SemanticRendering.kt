@@ -202,6 +202,9 @@ object SemanticRendering {
                 val skySmooth = strength * params.skySmoothStrength * max(sky, overcastSkyMask[i])
                 var chB = cb[i] + skySmooth * (cbFiltered[i] - cb[i])
                 var chR = cr[i] + skySmooth * (crFiltered[i] - cr[i])
+                // 3. Foliage luma (shadow) lift, bounded. Computed before the deepening so the
+                //    gamut clamp below can see the luma the chroma is reconstructed against.
+                val adjY = y + strength * params.foliageLumaLift * fol
                 // 2. Bounded chroma deepening: a single scale on both chroma components (so hue
                 //    is preserved), with the chroma-magnitude shift capped per region.
                 val extraGain = strength * (params.skySatGain * sky + params.foliageSatGain * fol)
@@ -210,14 +213,17 @@ object SemanticRendering {
                 val mag = sqrt(chR * chR + chB * chB)
                 if (mag > 1e-6 && extraGain > 0.0) {
                     val targetMag = (mag * (1.0 + extraGain)).coerceAtMost(mag + shiftCap)
-                    val scale = targetMag / mag
+                    // Gamut-aware clamp (issue #168): cap the deepening scale so every reconstructed
+                    // channel stays in [0, 255]. The independent per-channel coerceIn below would
+                    // otherwise pin the binding channel at the boundary while the others keep moving,
+                    // rotating hue and breaking this stage's documented hue-invariance. Never below
+                    // 1.0, so a pixel already at the gamut edge is left as-is, not desaturated.
+                    val scale = (targetMag / mag).coerceAtMost(maxOf(1.0, maxInGamutScale(adjY, chR, chB)))
                     chB *= scale
                     chR *= scale
                 }
-                // 3. Foliage luma (shadow) lift, bounded.
-                val adjY = y + strength * params.foliageLumaLift * fol
                 // Reconstruct RGB from the adjusted luma + chroma (luma preserved except the lift;
-                // Cg follows Cr/Cb, so scaling both preserved hue).
+                // Cg follows Cr/Cb, so scaling both preserves hue).
                 val nr = (adjY + chR).roundToInt().coerceIn(0, 255)
                 val nb = (adjY + chB).roundToInt().coerceIn(0, 255)
                 val ng = (adjY - (R_WEIGHT * chR + B_WEIGHT * chB) / G_WEIGHT).roundToInt().coerceIn(0, 255)
@@ -225,5 +231,24 @@ object SemanticRendering {
             }
         }
         return Frame(frame.width, frame.height, out, frame.timestampMillis)
+    }
+
+    /**
+     * Largest scale s >= 0 for which every reconstructed channel (R uses [chR], B uses [chB], G
+     * uses the derived Cg) stays within [0, 255] when combined with [adjY]. [adjY] is clamped into
+     * range first so a blown lifted luma cannot yield a negative limit (which would flip the chroma
+     * sign and invert hue). [chR]/[chB] are the pre-scale chroma components.
+     */
+    private fun maxInGamutScale(adjY: Double, chR: Double, chB: Double): Double {
+        val a = adjY.coerceIn(0.0, 255.0)
+        val chG = -(R_WEIGHT * chR + B_WEIGHT * chB) / G_WEIGHT
+        return minOf(channelScaleLimit(a, chR), channelScaleLimit(a, chB), channelScaleLimit(a, chG))
+    }
+
+    /** Max s >= 0 keeping a + coef*s in [0, 255], given a in [0, 255]. */
+    private fun channelScaleLimit(a: Double, coef: Double): Double = when {
+        coef > 1e-9 -> (255.0 - a) / coef
+        coef < -1e-9 -> -a / coef
+        else -> Double.MAX_VALUE
     }
 }

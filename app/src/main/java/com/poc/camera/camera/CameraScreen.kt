@@ -113,6 +113,7 @@ import com.poc.camera.compare.ReferenceImageLoader
 import com.poc.camera.pipeline.BokehParams
 import com.poc.camera.pipeline.BokehRenderer
 import com.poc.camera.pipeline.BurstMergePipeline
+import com.poc.camera.pipeline.FinishingParams
 import com.poc.camera.pipeline.FinishingPipeline
 import com.poc.camera.pipeline.Frame
 import com.poc.camera.pipeline.HdrMergePipeline
@@ -661,7 +662,8 @@ private fun CameraCaptureScreen(
                     // simplification (issue #80): settings.applyFinishingToMergedPhotos only
                     // gates Photo's burst/HDR/night/SR merges, not Portrait.
                     val finishStart = System.currentTimeMillis()
-                    val finished = FinishingPipeline.apply(bokehApplied, settings.finishingPreset.params)
+                    val portraitFinishingParams = applyBacklitRescueOverride(settings.finishingPreset.params, settings)
+                    val finished = FinishingPipeline.apply(bokehApplied, portraitFinishingParams)
                     val finishMillis = System.currentTimeMillis() - finishStart
                     withContext(Dispatchers.Main) { currentProcessingStage = ProcessingStage.Saving }
                     val saveStart = System.currentTimeMillis()
@@ -822,11 +824,12 @@ private fun CameraCaptureScreen(
                         // applies to the merged burst frame. Night captures use the night
                         // finishing profile, regardless of preset; every other merge
                         // (standard or HDR) uses the user's chosen rendition preset.
-                        val finishingParams = if (settings.nightModeEnabled) {
+                        val baseFinishingParams = if (settings.nightModeEnabled) {
                             NightPipeline.FINISHING_PARAMS
                         } else {
                             settings.finishingPreset.params
                         }
+                        val finishingParams = applyBacklitRescueOverride(baseFinishingParams, settings)
                         withContext(Dispatchers.Main) {
                             currentProcessingStage = ProcessingStage.Finishing
                         }
@@ -2169,6 +2172,21 @@ private fun CameraPermissionSettingsPrompt(modifier: Modifier = Modifier) {
         }
     }
 }
+
+/**
+ * Manual backlit-rescue override (issue #147): forces [FinishingParams.backlitRescueDetectorGated]
+ * off when [CameraSettingsData.forceBacklitRescue] is on, so [FinishingPipeline.apply]
+ * engages [com.poc.camera.pipeline.BacklitRescue] at full strength instead of trusting
+ * [com.poc.camera.pipeline.BacklitDetector], which misses real backlit captures whose
+ * subject shadows are crushed below its SHADOW_FLOOR (issue #145). Applied uniformly at
+ * every burst finishing call site (standard/HDR/night/SR share [params] here; Portrait
+ * calls this separately) so the toggle behaves the same everywhere. A no-op copy when the
+ * toggle is off, and effectively a no-op on a profile whose own [FinishingParams.backlitRescue]
+ * is 0 (e.g. [FinishingParams.NIGHT]) since [FinishingPipeline.applyBacklitRescue]'s master-
+ * strength early return runs first regardless.
+ */
+private fun applyBacklitRescueOverride(params: FinishingParams, settings: CameraSettingsData): FinishingParams =
+    if (settings.forceBacklitRescue) params.copy(backlitRescueDetectorGated = false) else params
 
 private fun Context.currentCameraPermissionState(): CameraPermissionState =
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {

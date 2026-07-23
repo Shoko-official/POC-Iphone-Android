@@ -37,6 +37,10 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
             KEY_UNPROCESSED_CAPTURE,
             CameraSettingsData.DEFAULT.unprocessedCapture,
         ),
+        forceBacklitRescue = prefs.getBoolean(
+            KEY_FORCE_BACKLIT_RESCUE,
+            CameraSettingsData.DEFAULT.forceBacklitRescue,
+        ),
     )
 
     override fun save(data: CameraSettingsData) {
@@ -53,6 +57,7 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
             putString(KEY_VIDEO_QUALITY, data.videoQuality.name)
             putBoolean(KEY_VERBOSE_TIMINGS, data.verboseTimings)
             putBoolean(KEY_UNPROCESSED_CAPTURE, data.unprocessedCapture)
+            putBoolean(KEY_FORCE_BACKLIT_RESCUE, data.forceBacklitRescue)
         }
     }
 
@@ -70,5 +75,6 @@ class SharedPreferencesCameraSettings(context: Context) : CameraSettings {
         private const val KEY_VIDEO_QUALITY = "video_quality"
         private const val KEY_VERBOSE_TIMINGS = "verbose_timings"
         private const val KEY_UNPROCESSED_CAPTURE = "unprocessed_capture"
+        private const val KEY_FORCE_BACKLIT_RESCUE = "force_backlit_rescue"
     }
 }

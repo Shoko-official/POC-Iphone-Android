@@ -42,6 +42,17 @@ package com.poc.camera.pipeline
  * non-backlit scene is left bit-exactly untouched. Unlike the other stylistic strengths it
  * is deliberately NOT reduced by [skinProtection].
  *
+ * [backlitRescueDetectorGated] controls whether [backlitRescue]'s engagement is still gated
+ * by the [BacklitDetector] scene read (issue #147). Default true keeps the existing,
+ * detector-gated behaviour. [BacklitDetector] is histogram-only and, on a real backlit
+ * capture whose subject shadows are crushed below [BacklitDetector.SHADOW_FLOOR], reads
+ * strength 0 and never engages the rescue (issue #145) -- so a user-facing manual override
+ * sets this false to force full engagement (`strength = 1.0`) regardless of what the
+ * detector reads. Forcing it only matters on a profile that also carries [backlitRescue] >
+ * 0 (every shipped preset via [RENDITION] / [REFERENCE]); it is a no-op on a profile like
+ * [DEFAULT] or [NIGHT] whose [backlitRescue] is 0, since [applyBacklitRescue]'s early return
+ * on that master strength runs first either way.
+ *
  * [chromaRollOff] is the strength of the [ChromaRollOff] spatially gated chroma-magnitude
  * shoulder in [0, 1] (0 = off). It runs after [Saturation] and [Contrast], to compress
  * ISOLATED extreme chroma the earlier stages pushed past the roll-off knee (e.g. lips that
@@ -106,6 +117,7 @@ data class FinishingParams(
     val backlitRescue: Double = 0.0,
     val chromaRollOff: Double = 0.0,
     val semanticRendering: Double = 0.0,
+    val backlitRescueDetectorGated: Boolean = true,
 ) {
     companion object {
         /**
@@ -551,12 +563,15 @@ object FinishingPipeline {
 
     /**
      * Applies the adaptive [BacklitRescue] to [frame] when [FinishingParams.backlitRescue] is
-     * on, gating engagement with the [BacklitDetector] scene strength. Returns [frame]
-     * UNCHANGED (same reference, bit-exact) when the master strength is 0 or the detector
-     * reports the scene is not backlit, so a non-backlit capture is left completely
-     * untouched. The effective engagement is `backlitRescue * detector.strength`, so the
-     * lift is dialled by both the master strength and how strongly the scene reads as
-     * backlit.
+     * on, gating engagement with the [BacklitDetector] scene strength unless
+     * [FinishingParams.backlitRescueDetectorGated] is false (the manual override, issue
+     * #147), in which case the detector is skipped entirely and the scene strength is taken
+     * as 1.0 -- full engagement, forced. Returns [frame] UNCHANGED (same reference,
+     * bit-exact) when the master strength is 0, or when gated and the detector reports the
+     * scene is not backlit, so a non-backlit capture is left completely untouched by
+     * default. The effective engagement is `backlitRescue * strength`, so the lift is
+     * dialled by both the master strength and how strongly the scene reads as backlit (or,
+     * forced, by the master strength alone).
      *
      * The rescue is memory-bounded at any resolution (issue #108): the detector histogram
      * is a cheap full-resolution pass, and above [BacklitRescue.MAX_BASE_PIXELS] the
@@ -566,7 +581,7 @@ object FinishingPipeline {
      */
     internal fun applyBacklitRescue(frame: Frame, params: FinishingParams): Frame {
         if (params.backlitRescue <= 0.0) return frame
-        val strength = BacklitDetector.detect(frame).strength
+        val strength = if (params.backlitRescueDetectorGated) BacklitDetector.detect(frame).strength else 1.0
         val engagement = params.backlitRescue * strength
         if (engagement <= 0.0) return frame
         return BacklitRescue.apply(frame, BacklitRescueParams.DEFAULT, engagement)

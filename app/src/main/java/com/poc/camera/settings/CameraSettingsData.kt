@@ -30,6 +30,14 @@ data class CameraSettingsData(
     // A/B comparison and debugging against the normal processed flow. Off by default - the
     // processed path is the reference-class behaviour this issue exists to ship.
     val unprocessedCapture: Boolean = DEFAULT_UNPROCESSED_CAPTURE,
+    // Manual backlit-rescue override (issue #147): BacklitDetector is histogram-only and,
+    // on a real backlit capture whose subject shadows are crushed below its SHADOW_FLOOR,
+    // reads strength 0 and never engages BacklitRescue (issue #145). When on, every burst
+    // finishing call forces FinishingParams.backlitRescueDetectorGated to false so the
+    // rescue engages at full strength regardless of the detector's read. Off by default -
+    // it only matters on a backlit shot and forcing a shadow lift on a non-backlit one would
+    // be an unwanted change to the look.
+    val forceBacklitRescue: Boolean = DEFAULT_FORCE_BACKLIT_RESCUE,
 ) {
     companion object {
         const val DEFAULT_BURST_FRAME_COUNT = 6
@@ -40,6 +48,7 @@ data class CameraSettingsData(
         const val DEFAULT_HDR_VIDEO_ENABLED = false
         const val DEFAULT_VERBOSE_TIMINGS = false
         const val DEFAULT_UNPROCESSED_CAPTURE = false
+        const val DEFAULT_FORCE_BACKLIT_RESCUE = false
         val DEFAULT_FINISHING_PRESET = FinishingPreset.Natural
         val DEFAULT_VIDEO_QUALITY = VideoQualityChoice.FHD
         val ALLOWED_BURST_FRAME_COUNTS = listOf(3, 6, 9)
@@ -66,6 +75,7 @@ data class CameraSettingsData(
             videoQualityName: String? = null,
             verboseTimings: Boolean = DEFAULT_VERBOSE_TIMINGS,
             unprocessedCapture: Boolean = DEFAULT_UNPROCESSED_CAPTURE,
+            forceBacklitRescue: Boolean = DEFAULT_FORCE_BACKLIT_RESCUE,
         ): CameraSettingsData = CameraSettingsData(
             burstFrameCount = sanitizeBurstFrameCount(burstFrameCount),
             applyFinishingToMergedPhotos = applyFinishingToMergedPhotos,
@@ -82,6 +92,7 @@ data class CameraSettingsData(
                 ?: DEFAULT.videoQuality,
             verboseTimings = verboseTimings,
             unprocessedCapture = unprocessedCapture,
+            forceBacklitRescue = forceBacklitRescue,
         )
     }
 }

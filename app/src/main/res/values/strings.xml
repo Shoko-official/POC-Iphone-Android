@@ -74,6 +74,8 @@
     <string name="finishing_preset_natural_description">Balanced tone and colour - the reference rendition every burst is tuned against.</string>
     <string name="finishing_preset_vivid_description">Punchier colour and contrast, with a stronger local-contrast lift.</string>
     <string name="finishing_preset_detail_description">Extra sharpening for texture, with colour kept close to Natural.</string>
+    <string name="settings_force_backlit_rescue_label">Force backlit rescue</string>
+    <string name="settings_force_backlit_rescue_description">Forces the shadow-lift rescue on for backlit shots even when the scene detector misses it. Only matters on a backlit photo; leave off otherwise.</string>
     <string name="settings_section_video">Video</string>
     <string name="settings_hdr_video_label">HDR video (HLG)</string>
     <string name="settings_hdr_video_description">Records 10-bit HLG when supported by the device; falls back to SDR otherwise.</string>

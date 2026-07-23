@@ -42,6 +42,23 @@ package com.poc.camera.pipeline
  * detector quiet on those scenes while still firing on a true backlit subject. This is a
  * deliberate tightening of the plain "below [LUMA_LOW]" criterion, not a re-baseline.
  *
+ * ## Known limitation (measured on a real reference, issue #145)
+ *
+ * Because the detector is HISTOGRAM-ONLY, it cannot distinguish a backlit *subject* from a
+ * high-contrast *scene* by shape alone -- they share the bimodal signature, and the sole
+ * thing separating them is [SHADOW_FLOOR]. On a real backlit Pixel frame (a face under a
+ * sunlit background) whose subject shadows the RAW development crushed BELOW [SHADOW_FLOOR]
+ * (measured: only 13.6% of pixels landed in the recoverable [24,60) band, under the 0.25
+ * [DARK_FRACTION] threshold), the detector reads strength 0 and [BacklitRescue] never
+ * engages -- so the shipped Natural profile leaves that face darker than the tuned target.
+ * Lowering [SHADOW_FLOOR] to catch it would re-admit crushed high-contrast blacks (the exact
+ * false positive the floor exists to block), so a histogram-only detector cannot fix this
+ * without regressing that gate. The real resolution is a SPATIAL / subject-aware prior (is
+ * the dark mass a coherent region, not scattered crushed blacks?), which needs real backlit
+ * captures to validate rather than the single synthetic golden and one RAW development
+ * available now. Tracked in issue #145; do not naively re-tune the thresholds against one
+ * frame.
+ *
  * Deterministic, pure Kotlin, no Android dependencies. The histogram is a whole-frame
  * reduction, so it runs serially (it is a single O(pixels) pass and never a hot spot).
  */

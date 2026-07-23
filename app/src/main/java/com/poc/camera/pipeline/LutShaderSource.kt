@@ -45,7 +45,15 @@ object LutShaderSource {
         val atlasWidth = "${size * size}.0"
         return """
             #extension GL_OES_EGL_image_external : require
+            // Atlas addressing reaches ~N*N (288.5 at N=17); at the GLES2 mediump minimum
+            // (fp16) that intermediate lands in [256,512) where the ULP is 0.25, quantising
+            // the red interpolation position and banding smooth gradients. Use highp where the
+            // GPU supports it in the fragment stage; fall back to mediump verbatim otherwise.
+            #ifdef GL_FRAGMENT_PRECISION_HIGH
+            precision highp float;
+            #else
             precision mediump float;
+            #endif
             varying vec2 vTextureCoord;
             uniform samplerExternalOES $UNIFORM_INPUT_TEXTURE;
             uniform sampler2D $UNIFORM_LUT_TEXTURE;

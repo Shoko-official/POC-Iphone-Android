@@ -6,14 +6,14 @@ import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertIsSelected
-import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
-import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
+import com.poc.camera.settings.SettingsTestTags
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -43,6 +43,14 @@ private const val CAMERA_SETTINGS_PREFS_NAME = "camera_settings"
  * forces an Activity recreation right after clearing, which re-runs `onCreate` and reloads
  * settings from the now-empty file, giving every test a deterministic
  * [com.poc.camera.settings.CameraSettingsData.DEFAULT] starting point.
+ *
+ * Node addressing uses [SettingsTestTags] rather than label text: an earlier text-based
+ * revision of this test (`onNodeWithText(vividLabel).performClick()`, relying on the merged
+ * semantics tree collapsing the label into its parent SegmentedButton) clicked correctly for
+ * reading afterwards but did not reliably drive the SegmentedButton's own click/toggle action
+ * on the CI emulator - see [SettingsTestTags]'s own doc in SettingsScreen.kt. Every click and
+ * assertion below targets the exact tagged node that carries the click action and the
+ * selected/checked state, removing that ambiguity.
  *
  * What this proves: toggling the Photo look preset to Vivid and switching HDR burst and
  * Night mode on survives backing out to the viewfinder and reopening Settings (in-app
@@ -77,8 +85,6 @@ class SettingsPersistenceTest {
     @Test
     fun presetAndSwitchTogglesPersistAcrossNavigationAndActivityRecreation() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val naturalLabel = context.getString(R.string.finishing_preset_natural)
-        val vividLabel = context.getString(R.string.finishing_preset_vivid)
         val openSettingsDescription = context.getString(R.string.open_settings_content_description)
         val backDescription = context.getString(R.string.settings_back_content_description)
 
@@ -87,24 +93,18 @@ class SettingsPersistenceTest {
         // Sanity check: resetPersistedSettings actually landed on CameraSettingsData.DEFAULT
         // before this test's own toggles below - a clear failure here means the reset
         // itself is broken, not the persistence this test otherwise targets.
-        composeRule.onNodeWithText(naturalLabel).assertIsSelected()
-        composeRule.onAllNodes(isToggleable())[0].assertIsOff()
-        composeRule.onAllNodes(isToggleable())[1].assertIsOff()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_NATURAL).assertIsSelected()
+        composeRule.onNodeWithTag(SettingsTestTags.SWITCH_HDR_BURST).assertIsOff()
+        composeRule.onNodeWithTag(SettingsTestTags.SWITCH_NIGHT_MODE).assertIsOff()
 
-        composeRule.onNodeWithText(vividLabel).performClick()
-        // Switches carry no individual content description of their own (see
-        // SettingsScreen.kt), and the Night mode section title duplicates its own row
-        // label text verbatim ("Night mode" both places), so onNodeWithText can't address
-        // either switch uniquely - index into declaration order instead. HDR burst is the
-        // first Switch on the screen, Night mode the second (SettingsScreen's Burst photo
-        // section, then Night mode section - both ahead of every other switch below them).
-        composeRule.onAllNodes(isToggleable())[0].performClick()
-        composeRule.onAllNodes(isToggleable())[1].performClick()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_VIVID).performClick()
+        composeRule.onNodeWithTag(SettingsTestTags.SWITCH_HDR_BURST).performClick()
+        composeRule.onNodeWithTag(SettingsTestTags.SWITCH_NIGHT_MODE).performClick()
 
-        composeRule.onNodeWithText(vividLabel).assertIsSelected()
-        composeRule.onNodeWithText(naturalLabel).assertIsNotSelected()
-        composeRule.onAllNodes(isToggleable())[0].assertIsOn()
-        composeRule.onAllNodes(isToggleable())[1].assertIsOn()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_VIVID).assertIsSelected()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_NATURAL).assertIsNotSelected()
+        composeRule.onNodeWithTag(SettingsTestTags.SWITCH_HDR_BURST).assertIsOn()
+        composeRule.onNodeWithTag(SettingsTestTags.SWITCH_NIGHT_MODE).assertIsOn()
 
         // Back out to the viewfinder and reopen Settings: the literal "navigate back;
         // reopen settings" case - MainActivity keeps one shared `settings` var across
@@ -114,10 +114,10 @@ class SettingsPersistenceTest {
         composeRule.onNodeWithContentDescription(openSettingsDescription).assertExists()
 
         composeRule.onNodeWithContentDescription(openSettingsDescription).performClick()
-        composeRule.onNodeWithText(vividLabel).assertIsSelected()
-        composeRule.onNodeWithText(naturalLabel).assertIsNotSelected()
-        composeRule.onAllNodes(isToggleable())[0].assertIsOn()
-        composeRule.onAllNodes(isToggleable())[1].assertIsOn()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_VIVID).assertIsSelected()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_NATURAL).assertIsNotSelected()
+        composeRule.onNodeWithTag(SettingsTestTags.SWITCH_HDR_BURST).assertIsOn()
+        composeRule.onNodeWithTag(SettingsTestTags.SWITCH_NIGHT_MODE).assertIsOn()
 
         // Land back on the viewfinder before recreating, so the post-recreate state is
         // unambiguous regardless of how `destination` (rememberSaveable in MainActivity)
@@ -132,9 +132,9 @@ class SettingsPersistenceTest {
         composeRule.waitForIdle()
 
         composeRule.onNodeWithContentDescription(openSettingsDescription).performClick()
-        composeRule.onNodeWithText(vividLabel).assertIsSelected()
-        composeRule.onNodeWithText(naturalLabel).assertIsNotSelected()
-        composeRule.onAllNodes(isToggleable())[0].assertIsOn()
-        composeRule.onAllNodes(isToggleable())[1].assertIsOn()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_VIVID).assertIsSelected()
+        composeRule.onNodeWithTag(SettingsTestTags.PRESET_NATURAL).assertIsNotSelected()
+        composeRule.onNodeWithTag(SettingsTestTags.SWITCH_HDR_BURST).assertIsOn()
+        composeRule.onNodeWithTag(SettingsTestTags.SWITCH_NIGHT_MODE).assertIsOn()
     }
 }

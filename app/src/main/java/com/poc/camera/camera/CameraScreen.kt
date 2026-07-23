@@ -326,12 +326,14 @@ private fun CameraCaptureScreen(
             burstDecodeExecutor.shutdown()
         }
     }
-    // Per-device native-resolution ceiling for burst decode: high-memory devices decode
-    // 12 MP+ sensors at native resolution, low-memory devices stay conservative. Read once
-    // from the device memory class (a device constant); see BurstImageGeometry.
-    val maxBurstPixels = remember(context) {
-        val memoryClassMb = (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).memoryClass
-        BurstImageGeometry.maxBurstPixelsFor(memoryClassMb)
+    // Per-app heap size (MB) for the burst decode budget - the LARGE memory class, since
+    // the manifest declares largeHeap (issue #171). A device constant, read once; the
+    // per-capture pixel bound is derived from it AND the frame count of the specific
+    // capture being armed (night 12 vs burst 3/6/9 vs HDR brackets) - see
+    // BurstImageGeometry.maxBurstPixelsFor, whose budget math replaces the old
+    // frame-count-blind bound that OOM'd real devices.
+    val memoryClassMb = remember(context) {
+        (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).largeMemoryClass
     }
     var mode by rememberSaveable { mutableStateOf(CameraMode.Photo) }
     // Which physical camera is bound (issue #71); survives mode switches and process death
@@ -619,6 +621,15 @@ private fun CameraCaptureScreen(
         // lensFacing late could pick up a flip that happened after this burst was already
         // captured on the old lens.
         val captureLensFacing = lensFacing
+        // The decode bound is budgeted against the number of frames THIS capture holds in
+        // memory at merge time - the controller's count (night raises it to 12, see the
+        // CameraPreview burstFrameCount wiring below).
+        val frameCount = if (settings.nightModeEnabled) {
+            NightPipeline.NIGHT_BURST_FRAME_COUNT
+        } else {
+            settings.burstFrameCount
+        }
+        val maxBurstPixels = BurstImageGeometry.maxBurstPixelsFor(memoryClassMb, frameCount)
         val frameCapture = BurstController.FrameCapture { onResult ->
             BurstImageCapture.acquire(capture, burstCaptureExecutor) { acquireResult ->
                 onResult(acquireResult.map { jpeg -> { BurstImageCapture.decode(jpeg, maxBurstPixels) } })
@@ -784,6 +795,18 @@ private fun CameraCaptureScreen(
         // whatever lensFacing reads once this burst's merge finishes - see
         // startPortraitCapture's matching captureLensFacing comment for why that matters.
         val captureLensFacing = lensFacing
+        val exposure = exposureController
+        // The decode bound is budgeted against the number of frames THIS capture holds in
+        // memory at merge time, mirroring the dispatch below: night's long burst first,
+        // then HDR's bracket total, then the standard burst count.
+        val frameCount = if (settings.nightModeEnabled) {
+            NightPipeline.NIGHT_BURST_FRAME_COUNT
+        } else if (settings.hdrBurstEnabled && exposure != null) {
+            exposure.steps.size * exposure.framesPerEv
+        } else {
+            settings.burstFrameCount
+        }
+        val maxBurstPixels = BurstImageGeometry.maxBurstPixelsFor(memoryClassMb, frameCount)
         val frameCapture = BurstController.FrameCapture { onResult ->
             BurstImageCapture.acquire(capture, burstCaptureExecutor) { acquireResult ->
                 onResult(
@@ -793,7 +816,6 @@ private fun CameraCaptureScreen(
                 )
             }
         }
-        val exposure = exposureController
 
         // Merge (single-EV or HDR) off the main thread, then finish, persist and report;
         // shared by every dispatch branch below. spans carries the capture/decode sums

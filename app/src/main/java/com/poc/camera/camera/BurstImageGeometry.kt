@@ -50,30 +50,59 @@ object BurstImageGeometry {
     const val MAX_BURST_PIXELS: Int = 12_500_000
 
     /**
-     * Conservative decoded-pixel bound (~8 MP) for low-memory-class devices, keeping the
-     * resident 6-frame burst footprint near ~192 MB. This is the previous default bound;
-     * [maxBurstPixelsFor] returns it below [HIGH_MEMORY_CLASS_MB].
+     * Floor on the per-frame decoded-pixel bound (~2 MP, 1080p-class). Below this the
+     * merged output stops being a usable photo, so the budget never pushes under it even
+     * on a tiny heap - the capture coroutines' failure handling (issue #171) is the
+     * backstop if such a device still cannot hold the burst.
      */
-    const val CONSERVATIVE_MAX_BURST_PIXELS: Int = 8_000_000
+    const val MIN_BURST_PIXELS: Int = 2_000_000
 
     /**
-     * Memory class (MB, from [android.app.ActivityManager.getMemoryClass]) at or above
-     * which the native [MAX_BURST_PIXELS] bound is used. A 256 MB (or larger) per-app
-     * heap comfortably holds the ~300 MB resident + accumulator peak of a native 12.5 MP
-     * burst; below it the conservative bound applies. (Devices frequently expose a larger
-     * effective heap than the reported class, so gating on 256 is deliberately safe.)
+     * Heap fallback (MB) when the reported memory class is non-positive (unknown):
+     * a standard-heap baseline, deliberately pessimistic.
      */
-    const val HIGH_MEMORY_CLASS_MB: Int = 256
+    const val FALLBACK_MEMORY_CLASS_MB: Int = 192
 
     /**
-     * The per-frame decoded-pixel bound for a device whose [android.app.ActivityManager]
-     * reports [memoryClassMb] MB: [MAX_BURST_PIXELS] (~12.5 MP native) at or above
-     * [HIGH_MEMORY_CLASS_MB], else [CONSERVATIVE_MAX_BURST_PIXELS] (~8 MP). Pure step
-     * function so it is unit tested without Android. A non-positive class is treated as
-     * unknown and gets the conservative bound.
+     * Merge-accumulator cost per pixel: [com.poc.camera.pipeline.RobustFrameMerger] holds
+     * four full-frame `DoubleArray` planes (R/G/B sums + weight) while merging, 4 * 8 bytes.
      */
-    fun maxBurstPixelsFor(memoryClassMb: Int): Int =
-        if (memoryClassMb >= HIGH_MEMORY_CLASS_MB) MAX_BURST_PIXELS else CONSERVATIVE_MAX_BURST_PIXELS
+    const val MERGE_ACCUMULATOR_BYTES_PER_PIXEL: Int = 32
+
+    /**
+     * The per-frame decoded-pixel bound for a capture of [frameCount] frames on a device
+     * whose per-app heap is [memoryClassMb] MB (read from
+     * [android.app.ActivityManager.getLargeMemoryClass] - the app declares
+     * `largeHeap`, issue #171).
+     *
+     * The former step function ([HIGH_MEMORY_CLASS_MB]-gated native-vs-8MP bound) ignored
+     * the frame count, and its own memory math shows why that crashed real devices
+     * (26 recorded OOMs, issue #171): the merge holds ALL frames at once, so night mode's
+     * 12-frame burst at the 8 MP bound is 12 * 32 MB = 384 MB of resident IntArrays plus
+     * ~256 MB of merge accumulators - far past even a 512 MB large heap.
+     *
+     * This bound solves the actual constraint instead: the merge peak
+     * (`frameCount` ARGB inputs at 4 B/px + [MERGE_ACCUMULATOR_BYTES_PER_PIXEL]) must fit
+     * in half the heap, leaving the other half for the camera stack, decode transients and
+     * the (whole-frame, sub-[com.poc.camera.pipeline.FinishingPipeline.TILED_THRESHOLD_PIXELS])
+     * finishing chain:
+     *
+     *   pixels = (heap / 2) / (4 * frames + 32)
+     *
+     * clamped to [[MIN_BURST_PIXELS], [MAX_BURST_PIXELS]]. On a 512 MB large heap that
+     * yields ~4.8 MP for a 6-frame burst, ~3.9 MP for 9 frames and ~3.3 MP for the
+     * 12-frame night burst; a 1 GB heap keeps ~9.6 MP for 6 frames. Pure math, unit
+     * tested without Android.
+     */
+    fun maxBurstPixelsFor(memoryClassMb: Int, frameCount: Int): Int {
+        val classMb = if (memoryClassMb > 0) memoryClassMb else FALLBACK_MEMORY_CLASS_MB
+        val frames = frameCount.coerceAtLeast(1)
+        val budgetBytes = classMb.toLong() * 1024L * 1024L / 2L
+        val bytesPerPixel = 4L * frames + MERGE_ACCUMULATOR_BYTES_PER_PIXEL
+        return (budgetBytes / bytesPerPixel)
+            .coerceIn(MIN_BURST_PIXELS.toLong(), MAX_BURST_PIXELS.toLong())
+            .toInt()
+    }
 
     /**
      * Smallest power-of-two `inSampleSize` for which a [sourceWidth] x [sourceHeight]

@@ -1,0 +1,28 @@
+name: Export BTP UI payload parts
+
+on:
+  push:
+    branches:
+      - codex/btp-apk-builder
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Describe payload
+        run: |
+          wc -c .btp-build/ui.part* .btp-build/exact-ui.part* || true
+          sha256sum .btp-build/ui.part* .btp-build/exact-ui.part* || true
+      - name: Upload payload files
+        uses: actions/upload-artifact@v4
+        with:
+          name: btp-ui-payload-parts-${{ github.sha }}
+          retention-days: 3
+          path: |
+            .btp-build/ui.part*
+            .btp-build/exact-ui.part*

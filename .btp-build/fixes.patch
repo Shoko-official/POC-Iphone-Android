@@ -1,0 +1,125 @@
+diff -ruN btp-baseline/app/src/main/java/fr/controlebtp/app/MainViewModel.kt btp-patched/app/src/main/java/fr/controlebtp/app/MainViewModel.kt
+--- btp-baseline/app/src/main/java/fr/controlebtp/app/MainViewModel.kt	2026-07-28 13:33:55.000000000 +0000
++++ btp-patched/app/src/main/java/fr/controlebtp/app/MainViewModel.kt	2026-07-28 16:02:26.231722212 +0000
+@@ -407,7 +407,10 @@
+     fun exportConsumed(success: Boolean) {
+         _state.value = _state.value.copy(
+             exportPayload = null,
+-            notice = UiNotice(if (success) "Rapport PDF signé enregistré." else "Enregistrement du PDF annulé.", isError = !success),
++            notice = UiNotice(
++                text = if (success) "Rapport PDF signé enregistré." else "Enregistrement du PDF annulé.",
++                isError = !success,
++            ),
+         )
+     }
+ 
+ diff -ruN btp-baseline/app/src/main/java/fr/controlebtp/app/core/Models.kt btp-patched/app/src/main/java/fr/controlebtp/app/core/Models.kt
+--- btp-baseline/app/src/main/java/fr/controlebtp/app/core/Models.kt	2026-07-28 15:34:50.000000000 +0000
++++ btp-patched/app/src/main/java/fr/controlebtp/app/core/Models.kt	2026-07-28 16:02:26.239722213 +0000
+@@ -128,7 +128,12 @@
+     val invalidCardCount: Int,
+     val conformityCount: Int,
+     val conformityPercent: Float,
+-)
++) {
++    val declaredPresentCount: Int get() = declaredCount
++    val outsideRosterCount: Int get() = undeclaredCount
++    val unknownValidityCount: Int get() = (scannedCount - validCardCount - invalidCardCount).coerceAtLeast(0)
++    val absentOrUncontrolledCount: Int get() = (expectedCount - declaredCount).coerceAtLeast(0)
++}
+ 
+ object ReportMetricsCalculator {
+     fun calculate(snapshot: ProjectSnapshot): ReportMetrics {
+ diff -ruN btp-baseline/app/src/main/java/fr/controlebtp/app/ui/components/Components.kt btp-patched/app/src/main/java/fr/controlebtp/app/ui/components/Components.kt
+--- btp-baseline/app/src/main/java/fr/controlebtp/app/ui/components/Components.kt	2026-07-28 13:37:11.000000000 +0000
++++ btp-patched/app/src/main/java/fr/controlebtp/app/ui/components/Components.kt	2026-07-28 16:02:26.235722212 +0000
+@@ -51,9 +51,13 @@
+ enum class BadgeKind { Primary, Success, Warning, Danger, Neutral }
+ 
+ @Composable
+-fun AppCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
++fun AppCard(
++    modifier: Modifier = Modifier,
++    onClick: (() -> Unit)? = null,
++    content: @Composable () -> Unit,
++) {
+     Surface(
+-        modifier = modifier,
++        modifier = if (onClick == null) modifier else modifier.clickable(onClick = onClick),
+         shape = RoundedCornerShape(22.dp),
+         color = MaterialTheme.colorScheme.surface,
+         border = BorderStroke(1.dp, Line),
+@@ -164,9 +168,10 @@
+ fun SectionHeading(
+     title: String,
+     subtitle: String? = null,
++    modifier: Modifier = Modifier,
+     trailing: (@Composable (() -> Unit))? = null,
+ ) {
+-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
++    Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier.fillMaxWidth()) {
+         Column(Modifier.weight(1f)) {
+             Text(title, style = MaterialTheme.typography.titleMedium)
+             if (!subtitle.isNullOrBlank()) {
+ diff -ruN btp-baseline/app/src/main/java/fr/controlebtp/app/ui/screens/AuxiliaryScreens.kt btp-patched/app/src/main/java/fr/controlebtp/app/ui/screens/AuxiliaryScreens.kt
+--- btp-baseline/app/src/main/java/fr/controlebtp/app/ui/screens/AuxiliaryScreens.kt	2026-07-28 15:34:20.000000000 +0000
++++ btp-patched/app/src/main/java/fr/controlebtp/app/ui/screens/AuxiliaryScreens.kt	2026-07-28 16:02:26.235722212 +0000
+@@ -1,3 +1,5 @@
++@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
++
+ package fr.controlebtp.app.ui.screens
+ 
+ import androidx.compose.foundation.Canvas
+ diff -ruN btp-baseline/app/src/main/java/fr/controlebtp/app/ui/screens/PrepareScreen.kt btp-patched/app/src/main/java/fr/controlebtp/app/ui/screens/PrepareScreen.kt
+--- btp-baseline/app/src/main/java/fr/controlebtp/app/ui/screens/PrepareScreen.kt	2026-07-28 13:33:56.000000000 +0000
++++ btp-patched/app/src/main/java/fr/controlebtp/app/ui/screens/PrepareScreen.kt	2026-07-28 16:02:26.235722212 +0000
+@@ -313,6 +313,29 @@
+ }
+ 
+ @Composable
++private fun ConfirmDangerDialog(
++    title: String,
++    message: String,
++    confirmLabel: String,
++    onDismiss: () -> Unit,
++    onConfirm: () -> Unit,
++) {
++    androidx.compose.material3.AlertDialog(
++        onDismissRequest = onDismiss,
++        title = { Text(title) },
++        text = { Text(message) },
++        confirmButton = {
++            TextButton(onClick = onConfirm) {
++                Text(confirmLabel, color = Danger)
++            }
++        },
++        dismissButton = {
++            TextButton(onClick = onDismiss) { Text("Annuler") }
++        },
++    )
++}
++
++@Composable
+ private fun ReadinessRow(
+     icon: androidx.compose.ui.graphics.vector.ImageVector,
+     title: String,
+ diff -ruN btp-baseline/app/src/main/java/fr/controlebtp/app/ui/screens/ResultScreen.kt btp-patched/app/src/main/java/fr/controlebtp/app/ui/screens/ResultScreen.kt
+--- btp-baseline/app/src/main/java/fr/controlebtp/app/ui/screens/ResultScreen.kt	2026-07-28 13:33:56.000000000 +0000
++++ btp-patched/app/src/main/java/fr/controlebtp/app/ui/screens/ResultScreen.kt	2026-07-28 16:02:26.235722212 +0000
+@@ -20,7 +20,6 @@
+ import androidx.compose.material.icons.outlined.Edit
+ import androidx.compose.material.icons.outlined.ErrorOutline
+ import androidx.compose.material.icons.outlined.Refresh
+-import androidx.compose.material.icons.outlined.Signature
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Scaffold
+@@ -155,7 +154,7 @@
+                 ) {
+                     Row(Modifier.padding(15.dp), verticalAlignment = Alignment.Top) {
+                         Icon(
+-                            if (signature.isConfigured) Icons.Outlined.Check else Icons.Outlined.Signature,
++                            if (signature.isConfigured) Icons.Outlined.Check else Icons.Outlined.Edit,
+                             null,
+                             tint = if (signature.isConfigured) Success else Warning,
+                         )

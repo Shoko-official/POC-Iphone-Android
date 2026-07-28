@@ -35,6 +35,7 @@ jobs:
           mkdir -p ci/scanner-src
           tar -xJf ci/scanner-buildsrc.tar.xz -C ci/scanner-src
           test -f ci/scanner-src/settings.gradle.kts
+          sed -i 's/Scanner\.FieldRow/ScannerFieldRow/g' ci/scanner-src/app/src/main/res/values/styles.xml ci/scanner-src/app/src/main/res/layout/activity_scanner.xml
       - name: Test and build APK
         working-directory: ci/scanner-src
         run: gradle --no-daemon --stacktrace :core:test :app:assembleDebug

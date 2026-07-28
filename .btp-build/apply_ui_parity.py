@@ -9,12 +9,20 @@ import sys
 root = Path(sys.argv[1] if len(sys.argv) > 1 else "generated")
 builder = Path(__file__).resolve().parent
 
-parts = sorted(builder.glob("ui.part*"))
-if len(parts) != 3:
-    raise RuntimeError(f"Expected 3 exact-UI parts, found {len(parts)}")
+parts = [
+    builder / "ui.part00",
+    builder / "ui.part00z",
+    builder / "ui.part01",
+    builder / "ui.part02",
+]
+missing = [str(part) for part in parts if not part.is_file()]
+if missing:
+    raise RuntimeError(f"Missing exact-UI payload parts: {missing}")
 encoded = "".join(part.read_text(encoding="utf-8") for part in parts)
-if hashlib.sha256(encoded.encode()).hexdigest() != "6d886edb9246488c76de2478ec984f1529f8f6915d582d352cb8cbc2e630379b":
-    raise RuntimeError("Exact UI payload checksum mismatch")
+actual_hash = hashlib.sha256(encoded.encode()).hexdigest()
+expected_hash = "6d886edb9246488c76de2478ec984f1529f8f6915d582d352cb8cbc2e630379b"
+if actual_hash != expected_hash:
+    raise RuntimeError(f"Exact UI payload checksum mismatch: {actual_hash}")
 html = gzip.decompress(base64.b64decode(encoded))
 if b"UX V8 Forest Motion" not in html or b"V10" not in html:
     raise RuntimeError("The reconstructed HTML is not the user-supplied V10 interface")

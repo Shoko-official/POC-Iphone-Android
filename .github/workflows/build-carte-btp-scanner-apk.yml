@@ -3,6 +3,8 @@ name: Build Carte BTP Scanner APK v1.1.0
 on:
   push:
     branches: ["build/carte-btp-scanner-v1.1.0"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

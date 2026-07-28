@@ -5,10 +5,10 @@ import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import com.google.android.gms.tasks.Tasks
-import com.google.mlkit.vision.barcode.Barcode
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
@@ -53,8 +53,8 @@ class BtpJavascriptBridge(
                 Tasks.await(Tasks.whenAllComplete(textTask, barcodeTask))
 
                 val rawText = if (textTask.isSuccessful) textTask.result?.text.orEmpty() else ""
-                val barcodes = if (barcodeTask.isSuccessful) barcodeTask.result.orEmpty() else emptyList()
-                val rawQr = barcodes.mapNotNull(Barcode::getRawValue)
+                val barcodes: List<Barcode> = if (barcodeTask.isSuccessful) barcodeTask.result.orEmpty() else emptyList()
+                val rawQr = barcodes.mapNotNull { barcode -> barcode.rawValue }
                     .firstOrNull { QrHashExtractor.extract(it).isNotBlank() }
                     .orEmpty()
                 val qrHash = QrHashExtractor.extract(rawQr)

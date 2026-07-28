@@ -9,26 +9,39 @@ import sys
 root = Path(sys.argv[1] if len(sys.argv) > 1 else "generated")
 builder = Path(__file__).resolve().parent
 
-parts = [
+required = [
     builder / "ui.part00",
-    builder / "ui.part00z",
+    builder / "ui.part00c1",
+    builder / "ui.part00c2",
     builder / "ui.part01",
     builder / "ui.part02",
 ]
-missing = [str(part) for part in parts if not part.is_file()]
+missing = [str(part) for part in required if not part.is_file()]
 if missing:
     raise RuntimeError(f"Missing exact-UI payload parts: {missing}")
 
-diagnostic_dir = root / "app/build/reports/ui-payload"
-diagnostic_dir.mkdir(parents=True, exist_ok=True)
-for part in parts:
-    shutil.copyfile(part, diagnostic_dir / part.name)
+# The first GitHub payload retained the first 7,014 exact characters. The two
+# correction fragments replace everything after that boundary without changing
+# one CSS rule, one visual token or one interaction from the supplied HTML.
+prefix = (builder / "ui.part00").read_text(encoding="utf-8")[:7014]
+encoded = "".join(
+    [
+        prefix,
+        (builder / "ui.part00c1").read_text(encoding="utf-8"),
+        (builder / "ui.part00c2").read_text(encoding="utf-8"),
+        (builder / "ui.part01").read_text(encoding="utf-8"),
+        (builder / "ui.part02").read_text(encoding="utf-8"),
+    ]
+)
 
-encoded = "".join(part.read_text(encoding="utf-8") for part in parts)
 actual_hash = hashlib.sha256(encoded.encode()).hexdigest()
 expected_hash = "6d886edb9246488c76de2478ec984f1529f8f6915d582d352cb8cbc2e630379b"
-if actual_hash != expected_hash:
-    raise RuntimeError(f"Exact UI payload checksum mismatch: {actual_hash}")
+if len(encoded) != 53604 or actual_hash != expected_hash:
+    diagnostic_dir = root / "app/build/reports/ui-payload"
+    diagnostic_dir.mkdir(parents=True, exist_ok=True)
+    (diagnostic_dir / "reconstructed-ui.b64").write_text(encoded, encoding="utf-8")
+    raise RuntimeError(f"Exact UI payload mismatch: size={len(encoded)}, sha256={actual_hash}")
+
 html = gzip.decompress(base64.b64decode(encoded))
 if b"UX V8 Forest Motion" not in html or b"V10" not in html:
     raise RuntimeError("The reconstructed HTML is not the user-supplied V10 interface")

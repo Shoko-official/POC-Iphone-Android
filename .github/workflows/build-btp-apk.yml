@@ -45,7 +45,7 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      - name: Restore and verify source archive
+      - name: Restore, verify and patch source archive
         shell: bash
         run: |
           cat .btp-build/source.part* > /tmp/controle-btp-project.b64
@@ -57,6 +57,7 @@ jobs:
           tar -xzf /tmp/controle-btp-project.tgz -C generated --strip-components=1
           test -f generated/settings.gradle.kts
           test -f generated/app/build.gradle.kts
+          python3 .btp-build/apply_fixes.py generated
 
       - name: Unit tests, Android Lint and debug APK
         shell: bash

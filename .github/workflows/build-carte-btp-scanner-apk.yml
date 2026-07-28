@@ -1,0 +1,65 @@
+name: Build Carte BTP Scanner APK v1.1.0
+
+on:
+  push:
+    branches: ["build/carte-btp-scanner-v1.1.0"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      - name: Restore and patch scanner project
+        run: |
+          set -euxo pipefail
+          rm -rf ci/scanner-src ci/scanner-buildsrc.tar.xz ci/scanner-v1.1.patch ci/scanner-v1.1-build.patch
+          cat ci/carte-btp-scanner.part* | base64 --decode > ci/scanner-buildsrc.tar.xz
+          mkdir -p ci/scanner-src
+          tar -xJf ci/scanner-buildsrc.tar.xz -C ci/scanner-src
+          test -f ci/scanner-src/settings.gradle.kts
+          base64 --decode ci/scanner-v1.1.patch.gz.b64 | gzip -d > ci/scanner-v1.1.patch
+          sed '/^--- a\/core\/src\/test\/kotlin\/fr\/btpcontrole\/scanner\/core\/BtpQrParserTest.kt/,$d' ci/scanner-v1.1.patch > ci/scanner-v1.1-build.patch
+          (cd ci/scanner-src && patch --batch -p1 < ../scanner-v1.1-build.patch)
+          grep -q 'versionName = "1.1.0"' ci/scanner-src/app/build.gradle.kts
+          test -f ci/scanner-src/app/src/main/java/fr/btpcontrole/scanner/camera/LiveQrDetection.kt
+          grep -q 'CAMERA_LIVE_QR' ci/scanner-src/core/src/main/kotlin/fr/btpcontrole/scanner/core/Models.kt
+          grep -q 'gestion.cartebtp.fr' ci/scanner-src/core/src/main/kotlin/fr/btpcontrole/scanner/core/BtpQrParser.kt
+      - name: Test and build APK
+        working-directory: ci/scanner-src
+        run: gradle --no-daemon --stacktrace :core:test :app:assembleDebug
+      - name: Verify APK
+        run: |
+          set -euxo pipefail
+          APK="ci/scanner-src/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          unzip -t "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK"
+          sha256sum "$APK" | tee ci/Carte-BTP-Scanner-v1.1.0-fixed-debug.apk.sha256
+          cp "$APK" ci/Carte-BTP-Scanner-v1.1.0-fixed-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: carte-btp-scanner-v1.1.0-fixed-apk
+          path: |
+            ci/Carte-BTP-Scanner-v1.1.0-fixed-debug.apk
+            ci/Carte-BTP-Scanner-v1.1.0-fixed-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 7

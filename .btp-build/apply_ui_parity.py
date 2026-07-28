@@ -18,6 +18,12 @@ parts = [
 missing = [str(part) for part in parts if not part.is_file()]
 if missing:
     raise RuntimeError(f"Missing exact-UI payload parts: {missing}")
+
+diagnostic_dir = root / "app/build/reports/ui-payload"
+diagnostic_dir.mkdir(parents=True, exist_ok=True)
+for part in parts:
+    shutil.copyfile(part, diagnostic_dir / part.name)
+
 encoded = "".join(part.read_text(encoding="utf-8") for part in parts)
 actual_hash = hashlib.sha256(encoded.encode()).hexdigest()
 expected_hash = "6d886edb9246488c76de2478ec984f1529f8f6915d582d352cb8cbc2e630379b"

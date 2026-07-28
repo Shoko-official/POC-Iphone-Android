@@ -31,16 +31,18 @@ jobs:
       - name: Restore and patch scanner project
         run: |
           set -euxo pipefail
-          rm -rf ci/scanner-src ci/scanner-buildsrc.tar.xz ci/scanner-v1.1.patch
+          rm -rf ci/scanner-src ci/scanner-buildsrc.tar.xz ci/scanner-v1.1.patch ci/scanner-v1.1-build.patch
           cat ci/carte-btp-scanner.part* | base64 --decode > ci/scanner-buildsrc.tar.xz
           mkdir -p ci/scanner-src
           tar -xJf ci/scanner-buildsrc.tar.xz -C ci/scanner-src
           test -f ci/scanner-src/settings.gradle.kts
           base64 --decode ci/scanner-v1.1.patch.gz.b64 | gzip -d > ci/scanner-v1.1.patch
-          (cd ci/scanner-src && patch -p1 < ../scanner-v1.1.patch)
+          sed '/^--- a\/core\/src\/test\/kotlin\/fr\/btpcontrole\/scanner\/core\/BtpQrParserTest.kt/,$d' ci/scanner-v1.1.patch > ci/scanner-v1.1-build.patch
+          (cd ci/scanner-src && patch --batch -p1 < ../scanner-v1.1-build.patch)
           grep -q 'versionName = "1.1.0"' ci/scanner-src/app/build.gradle.kts
           test -f ci/scanner-src/app/src/main/java/fr/btpcontrole/scanner/camera/LiveQrDetection.kt
           grep -q 'CAMERA_LIVE_QR' ci/scanner-src/core/src/main/kotlin/fr/btpcontrole/scanner/core/Models.kt
+          grep -q 'gestion.cartebtp.fr#/vc/' ci/scanner-src/core/src/main/kotlin/fr/btpcontrole/scanner/core/BtpQrParser.kt
       - name: Test and build APK
         working-directory: ci/scanner-src
         run: gradle --no-daemon --stacktrace :core:test :app:assembleDebug

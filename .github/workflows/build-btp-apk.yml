@@ -58,6 +58,7 @@ jobs:
           test -f generated/settings.gradle.kts
           test -f generated/app/build.gradle.kts
           python3 .btp-build/apply_fixes.py generated
+          python3 .btp-build/apply_lint_fix.py generated
 
       - name: Unit tests, Android Lint and debug APK
         shell: bash

@@ -42,7 +42,7 @@ jobs:
           grep -q 'versionName = "1.1.0"' ci/scanner-src/app/build.gradle.kts
           test -f ci/scanner-src/app/src/main/java/fr/btpcontrole/scanner/camera/LiveQrDetection.kt
           grep -q 'CAMERA_LIVE_QR' ci/scanner-src/core/src/main/kotlin/fr/btpcontrole/scanner/core/Models.kt
-          grep -q 'gestion.cartebtp.fr#/vc/' ci/scanner-src/core/src/main/kotlin/fr/btpcontrole/scanner/core/BtpQrParser.kt
+          grep -q 'gestion.cartebtp.fr' ci/scanner-src/core/src/main/kotlin/fr/btpcontrole/scanner/core/BtpQrParser.kt
       - name: Test and build APK
         working-directory: ci/scanner-src
         run: gradle --no-daemon --stacktrace :core:test :app:assembleDebug

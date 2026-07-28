@@ -48,32 +48,41 @@ jobs:
       - name: Restore and patch Android project
         shell: bash
         run: |
-          set -euo pipefail
-          cat .btp-build/source.part* > /tmp/controle-btp-project.b64
-          test "$(wc -c < /tmp/controle-btp-project.b64)" = "60308"
-          echo "ecf3dfa8f11ff1083814dfdb0e1fa967b4da88d223fd6a0b1c45386e741693d6  /tmp/controle-btp-project.b64" | sha256sum -c -
-          base64 --decode /tmp/controle-btp-project.b64 > /tmp/controle-btp-project.tgz
-          echo "240b60d7e03a0e92fbbba65cf7ffc1e731ea69e77748af33f5422c9a9e9260dc  /tmp/controle-btp-project.tgz" | sha256sum -c -
-          mkdir -p generated dist
-          tar -xzf /tmp/controle-btp-project.tgz -C generated --strip-components=1
-          test -f generated/settings.gradle.kts
-          test -f generated/app/build.gradle.kts
+          mkdir -p dist generated
+          set -o pipefail
+          {
+            set -euxo pipefail
+            cat .btp-build/source.part* > /tmp/controle-btp-project.b64
+            test "$(wc -c < /tmp/controle-btp-project.b64)" = "60308"
+            echo "ecf3dfa8f11ff1083814dfdb0e1fa967b4da88d223fd6a0b1c45386e741693d6  /tmp/controle-btp-project.b64" | sha256sum -c -
+            base64 --decode /tmp/controle-btp-project.b64 > /tmp/controle-btp-project.tgz
+            echo "240b60d7e03a0e92fbbba65cf7ffc1e731ea69e77748af33f5422c9a9e9260dc  /tmp/controle-btp-project.tgz" | sha256sum -c -
+            tar -xzf /tmp/controle-btp-project.tgz -C generated --strip-components=1
+            test -f generated/settings.gradle.kts
+            test -f generated/app/build.gradle.kts
 
-          python3 .btp-build/apply_fixes.py generated
-          python3 .btp-build/apply_lint_fix.py generated
+            python3 .btp-build/apply_fixes.py generated
+            python3 .btp-build/apply_lint_fix.py generated
 
-          test "$(wc -c < .btp-build/product-patch.gz.b64)" = "18152"
-          echo "559353bf7d95902479990fa0375b0ab00ffeacfea51799bb17d1246b35cb31e5  .btp-build/product-patch.gz.b64" | sha256sum -c -
-          base64 --decode .btp-build/product-patch.gz.b64 > /tmp/btp-product-fixes.patch.gz
-          echo "627922fc0605e67ed4f0e1a60feae4a08f1a88276fe3b129f1d9dbeaa790b354  /tmp/btp-product-fixes.patch.gz" | sha256sum -c -
-          gzip -dc /tmp/btp-product-fixes.patch.gz > /tmp/btp-product-fixes.patch
-          echo "b77830adc3cf6527d4f557529f1032beb2ec920ae3ff46cd07df6de4f9198735  /tmp/btp-product-fixes.patch" | sha256sum -c -
-          patch -p1 -d generated < /tmp/btp-product-fixes.patch
+            test "$(wc -c < .btp-build/product-patch.gz.b64)" = "18152"
+            echo "559353bf7d95902479990fa0375b0ab00ffeacfea51799bb17d1246b35cb31e5  .btp-build/product-patch.gz.b64" | sha256sum -c -
+            base64 --decode .btp-build/product-patch.gz.b64 > /tmp/btp-product-fixes.patch.gz
+            echo "627922fc0605e67ed4f0e1a60feae4a08f1a88276fe3b129f1d9dbeaa790b354  /tmp/btp-product-fixes.patch.gz" | sha256sum -c -
+            gzip -dc /tmp/btp-product-fixes.patch.gz > /tmp/btp-product-fixes.patch
+            echo "b77830adc3cf6527d4f557529f1032beb2ec920ae3ff46cd07df6de4f9198735  /tmp/btp-product-fixes.patch" | sha256sum -c -
+            patch -p1 -d generated < /tmp/btp-product-fixes.patch
 
-          python3 .btp-build/apply_ui_parity.py generated
-          test -f generated/app/src/main/assets/btp/index.html
-          grep -q "V10" generated/app/src/main/assets/btp/index.html
-          grep -q "project-card-active:hover" generated/app/src/main/assets/btp/index.html
+            wc -c .btp-build/ui.part* | tee dist/ui-part-sizes.txt
+            cat .btp-build/ui.part* > /tmp/exact-ui.b64
+            wc -c /tmp/exact-ui.b64 | tee dist/ui-total-size.txt
+            sha256sum /tmp/exact-ui.b64 | tee dist/ui-payload-sha256.txt
+            python3 .btp-build/apply_ui_parity.py generated
+            test -f generated/app/src/main/assets/btp/index.html
+            wc -c generated/app/src/main/assets/btp/index.html | tee dist/ui-html-size.txt
+            sha256sum generated/app/src/main/assets/btp/index.html | tee dist/ui-html-sha256.txt
+            grep -q "V10" generated/app/src/main/assets/btp/index.html
+            grep -q "project-card-active:hover" generated/app/src/main/assets/btp/index.html
+          } 2>&1 | tee dist/restore.log
 
       - name: Unit tests, Android Lint and debug APK
         shell: bash
@@ -96,7 +105,7 @@ jobs:
         with:
           name: controle-btp-ui-exacte-${{ github.sha }}
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
           path: |
             dist/**
             generated/app/build/reports/**

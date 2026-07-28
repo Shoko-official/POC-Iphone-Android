@@ -1,10 +1,8 @@
-name: Build Carte BTP Scanner APK
+name: Build Carte BTP Scanner APK v1.1.0
 
 on:
   push:
-    branches: ["build/carte-btp-scanner-apk"]
-  pull_request:
-    branches: [main]
+    branches: ["build/carte-btp-scanner-v1.1.0"]
   workflow_dispatch:
 
 permissions:
@@ -28,28 +26,36 @@ jobs:
         run: |
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
-      - name: Restore scanner project
+      - name: Restore and patch scanner project
         run: |
-          rm -rf ci/scanner-src ci/scanner-buildsrc.tar.xz
+          set -euxo pipefail
+          rm -rf ci/scanner-src ci/scanner-buildsrc.tar.xz ci/scanner-v1.1.patch
           cat ci/carte-btp-scanner.part* | base64 --decode > ci/scanner-buildsrc.tar.xz
           mkdir -p ci/scanner-src
           tar -xJf ci/scanner-buildsrc.tar.xz -C ci/scanner-src
           test -f ci/scanner-src/settings.gradle.kts
-          sed -i 's/Scanner\.FieldRow/ScannerFieldRow/g' ci/scanner-src/app/src/main/res/values/styles.xml ci/scanner-src/app/src/main/res/layout/activity_scanner.xml
+          base64 --decode ci/scanner-v1.1.patch.gz.b64 | gzip -d > ci/scanner-v1.1.patch
+          (cd ci/scanner-src && patch -p1 < ../scanner-v1.1.patch)
+          grep -q 'versionName = "1.1.0"' ci/scanner-src/app/build.gradle.kts
+          test -f ci/scanner-src/app/src/main/java/fr/btpcontrole/scanner/camera/LiveQrDetection.kt
+          grep -q 'CAMERA_LIVE_QR' ci/scanner-src/core/src/main/kotlin/fr/btpcontrole/scanner/core/Models.kt
       - name: Test and build APK
         working-directory: ci/scanner-src
         run: gradle --no-daemon --stacktrace :core:test :app:assembleDebug
       - name: Verify APK
         run: |
+          set -euxo pipefail
           APK="ci/scanner-src/app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
           unzip -t "$APK"
-          sha256sum "$APK" | tee ci/app-debug.apk.sha256
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK"
+          sha256sum "$APK" | tee ci/Carte-BTP-Scanner-v1.1.0-fixed-debug.apk.sha256
+          cp "$APK" ci/Carte-BTP-Scanner-v1.1.0-fixed-debug.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: carte-btp-scanner-debug-apk
+          name: carte-btp-scanner-v1.1.0-fixed-apk
           path: |
-            ci/scanner-src/app/build/outputs/apk/debug/app-debug.apk
-            ci/app-debug.apk.sha256
+            ci/Carte-BTP-Scanner-v1.1.0-fixed-debug.apk
+            ci/Carte-BTP-Scanner-v1.1.0-fixed-debug.apk.sha256
           if-no-files-found: error
           retention-days: 7

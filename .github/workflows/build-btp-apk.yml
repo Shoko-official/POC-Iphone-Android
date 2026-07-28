@@ -1,0 +1,176 @@
+name: Build and Test BTP APK — Exact HTML UI
+
+on:
+  push:
+    branches:
+      - codex/btp-apk-builder
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: btp-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Restore and patch Android project
+        shell: bash
+        run: |
+          mkdir -p dist generated
+          set -o pipefail
+          {
+            set -euxo pipefail
+            cat .btp-build/source.part* > /tmp/controle-btp-project.b64
+            test "$(wc -c < /tmp/controle-btp-project.b64)" = "60308"
+            echo "ecf3dfa8f11ff1083814dfdb0e1fa967b4da88d223fd6a0b1c45386e741693d6  /tmp/controle-btp-project.b64" | sha256sum -c -
+            base64 --decode /tmp/controle-btp-project.b64 > /tmp/controle-btp-project.tgz
+            echo "240b60d7e03a0e92fbbba65cf7ffc1e731ea69e77748af33f5422c9a9e9260dc  /tmp/controle-btp-project.tgz" | sha256sum -c -
+            tar -xzf /tmp/controle-btp-project.tgz -C generated --strip-components=1
+            test -f generated/settings.gradle.kts
+            test -f generated/app/build.gradle.kts
+
+            python3 .btp-build/apply_fixes.py generated
+            python3 .btp-build/apply_lint_fix.py generated
+
+            test "$(wc -c < .btp-build/product-patch.gz.b64)" = "18152"
+            echo "559353bf7d95902479990fa0375b0ab00ffeacfea51799bb17d1246b35cb31e5  .btp-build/product-patch.gz.b64" | sha256sum -c -
+            base64 --decode .btp-build/product-patch.gz.b64 > /tmp/btp-product-fixes.patch.gz
+            echo "627922fc0605e67ed4f0e1a60feae4a08f1a88276fe3b129f1d9dbeaa790b354  /tmp/btp-product-fixes.patch.gz" | sha256sum -c -
+            gzip -dc /tmp/btp-product-fixes.patch.gz > /tmp/btp-product-fixes.patch
+            echo "b77830adc3cf6527d4f557529f1032beb2ec920ae3ff46cd07df6de4f9198735  /tmp/btp-product-fixes.patch" | sha256sum -c -
+            patch -p1 -d generated < /tmp/btp-product-fixes.patch
+
+            python3 .btp-build/apply_ui_parity.py generated
+            test -f generated/app/src/main/assets/btp/index.html
+            wc -c generated/app/src/main/assets/btp/index.html | tee dist/ui-html-size.txt
+            sha256sum generated/app/src/main/assets/btp/index.html | tee dist/ui-html-sha256.txt
+            grep -q "V10" generated/app/src/main/assets/btp/index.html
+            grep -q "project-card-active:hover" generated/app/src/main/assets/btp/index.html
+          } 2>&1 | tee dist/restore.log
+
+      - name: Unit tests, Android Lint and debug APK
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --stacktrace -p generated clean testDebugUnitTest lintDebug assembleDebug 2>&1 | tee dist/build.log
+
+      - name: Prepare deliverables
+        if: success()
+        shell: bash
+        run: |
+          cp generated/app/build/outputs/apk/debug/app-debug.apk dist/Controle-BTP-v1.1.0-interface-exacte-debug.apk
+          sha256sum dist/Controle-BTP-v1.1.0-interface-exacte-debug.apk > dist/Controle-BTP-v1.1.0-interface-exacte-debug.apk.sha256
+          unzip -t dist/Controle-BTP-v1.1.0-interface-exacte-debug.apk | tee dist/apk-structure-check.txt
+          grep -q "No errors detected" dist/apk-structure-check.txt
+
+      - name: Upload APK and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: controle-btp-ui-exacte-${{ github.sha }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            dist/**
+            generated/app/build/reports/**
+            generated/app/build/test-results/**
+
+  emulator-smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: controle-btp-ui-exacte-${{ github.sha }}
+          path: artifact
+
+      - name: Prepare evidence directory
+        run: mkdir -p "$GITHUB_WORKSPACE/smoke"
+
+      - name: Enable KVM
+        shell: bash
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install and inspect exact interface
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          script: |
+            set -euo pipefail
+            SMOKE="$GITHUB_WORKSPACE/smoke"
+            APK="$GITHUB_WORKSPACE/artifact/dist/Controle-BTP-v1.1.0-interface-exacte-debug.apk"
+            adb install -r "$APK" | tee "$SMOKE/install.txt"
+            adb logcat -c
+            adb shell am force-stop fr.controlebtp.app.debug
+            adb shell am start -W -n fr.controlebtp.app.debug/fr.controlebtp.app.MainActivity | tee "$SMOKE/launch.txt"
+            sleep 10
+            adb exec-out screencap -p > "$SMOKE/home-screen.png"
+            adb exec-out uiautomator dump /dev/tty > "$SMOKE/home-ui.xml" || true
+            adb shell dumpsys activity activities > "$SMOKE/activities.txt"
+            adb logcat -d > "$SMOKE/logcat.txt"
+            adb shell pidof fr.controlebtp.app.debug | tee "$SMOKE/pid.txt"
+            test -s "$SMOKE/home-screen.png"
+            test -s "$SMOKE/pid.txt"
+            ! grep -q "FATAL EXCEPTION" "$SMOKE/logcat.txt"
+            ! grep -q "AndroidRuntime: FATAL" "$SMOKE/logcat.txt"
+
+      - name: Upload emulator evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: controle-btp-ui-exacte-emulator-${{ github.sha }}
+          retention-days: 30
+          if-no-files-found: error
+          path: smoke/**

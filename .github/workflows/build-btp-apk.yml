@@ -1,0 +1,84 @@
+name: Build BTP APK
+
+on:
+  push:
+    branches:
+      - codex/btp-apk-builder
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: btp-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Restore and verify source archive
+        shell: bash
+        run: |
+          cat .btp-build/source.part* > /tmp/controle-btp-project.b64
+          test "$(wc -c < /tmp/controle-btp-project.b64)" = "60308"
+          echo "ecf3dfa8f11ff1083814dfdb0e1fa967b4da88d223fd6a0b1c45386e741693d6  /tmp/controle-btp-project.b64" | sha256sum -c -
+          base64 --decode /tmp/controle-btp-project.b64 > /tmp/controle-btp-project.tgz
+          echo "240b60d7e03a0e92fbbba65cf7ffc1e731ea69e77748af33f5422c9a9e9260dc  /tmp/controle-btp-project.tgz" | sha256sum -c -
+          mkdir -p generated
+          tar -xzf /tmp/controle-btp-project.tgz -C generated --strip-components=1
+          test -f generated/settings.gradle.kts
+          test -f generated/app/build.gradle.kts
+
+      - name: Unit tests, Android Lint and debug APK
+        shell: bash
+        run: gradle --no-daemon --stacktrace -p generated clean testDebugUnitTest lintDebug assembleDebug
+
+      - name: Prepare deliverables
+        if: success()
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp generated/app/build/outputs/apk/debug/app-debug.apk dist/Controle-BTP-v1.0.0-debug.apk
+          sha256sum dist/Controle-BTP-v1.0.0-debug.apk > dist/Controle-BTP-v1.0.0-debug.apk.sha256
+          unzip -t dist/Controle-BTP-v1.0.0-debug.apk
+
+      - name: Upload APK and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: controle-btp-apk-${{ github.sha }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            dist/**
+            generated/app/build/reports/**
+            generated/app/build/test-results/**

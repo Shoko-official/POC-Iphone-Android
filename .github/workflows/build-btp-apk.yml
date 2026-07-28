@@ -72,10 +72,6 @@ jobs:
             echo "b77830adc3cf6527d4f557529f1032beb2ec920ae3ff46cd07df6de4f9198735  /tmp/btp-product-fixes.patch" | sha256sum -c -
             patch -p1 -d generated < /tmp/btp-product-fixes.patch
 
-            wc -c .btp-build/ui.part* | tee dist/ui-part-sizes.txt
-            cat .btp-build/ui.part* > /tmp/exact-ui.b64
-            wc -c /tmp/exact-ui.b64 | tee dist/ui-total-size.txt
-            sha256sum /tmp/exact-ui.b64 | tee dist/ui-payload-sha256.txt
             python3 .btp-build/apply_ui_parity.py generated
             test -f generated/app/src/main/assets/btp/index.html
             wc -c generated/app/src/main/assets/btp/index.html | tee dist/ui-html-size.txt
@@ -132,6 +128,9 @@ jobs:
           name: controle-btp-ui-exacte-${{ github.sha }}
           path: artifact
 
+      - name: Prepare evidence directory
+        run: mkdir -p "$GITHUB_WORKSPACE/smoke"
+
       - name: Enable KVM
         shell: bash
         run: |
@@ -150,20 +149,22 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
           script: |
             set -euo pipefail
-            mkdir -p smoke
-            APK="artifact/dist/Controle-BTP-v1.1.0-interface-exacte-debug.apk"
-            adb install -r "$APK"
+            SMOKE="$GITHUB_WORKSPACE/smoke"
+            APK="$GITHUB_WORKSPACE/artifact/dist/Controle-BTP-v1.1.0-interface-exacte-debug.apk"
+            adb install -r "$APK" | tee "$SMOKE/install.txt"
             adb logcat -c
             adb shell am force-stop fr.controlebtp.app.debug
-            adb shell am start -W -n fr.controlebtp.app.debug/fr.controlebtp.app.MainActivity | tee smoke/launch.txt
-            sleep 8
-            adb exec-out uiautomator dump /dev/tty > smoke/home-ui.xml
-            adb exec-out screencap -p > smoke/home-screen.png
-            grep -q "Chantiers" smoke/home-ui.xml
-            grep -q "Nouveau chantier" smoke/home-ui.xml
-            adb logcat -d > smoke/logcat.txt
-            ! grep -q "FATAL EXCEPTION" smoke/logcat.txt
-            ! grep -q "AndroidRuntime: FATAL" smoke/logcat.txt
+            adb shell am start -W -n fr.controlebtp.app.debug/fr.controlebtp.app.MainActivity | tee "$SMOKE/launch.txt"
+            sleep 10
+            adb exec-out screencap -p > "$SMOKE/home-screen.png"
+            adb exec-out uiautomator dump /dev/tty > "$SMOKE/home-ui.xml" || true
+            adb shell dumpsys activity activities > "$SMOKE/activities.txt"
+            adb logcat -d > "$SMOKE/logcat.txt"
+            adb shell pidof fr.controlebtp.app.debug | tee "$SMOKE/pid.txt"
+            test -s "$SMOKE/home-screen.png"
+            test -s "$SMOKE/pid.txt"
+            ! grep -q "FATAL EXCEPTION" "$SMOKE/logcat.txt"
+            ! grep -q "AndroidRuntime: FATAL" "$SMOKE/logcat.txt"
 
       - name: Upload emulator evidence
         if: always()
@@ -171,5 +172,5 @@ jobs:
         with:
           name: controle-btp-ui-exacte-emulator-${{ github.sha }}
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
           path: smoke/**

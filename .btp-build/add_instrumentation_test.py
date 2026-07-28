@@ -6,13 +6,14 @@ root = Path(sys.argv[1] if len(sys.argv) > 1 else "generated")
 target = root / "app/src/androidTest/java/fr/controlebtp/app/FirstRunFlowTest.kt"
 target.parent.mkdir(parents=True, exist_ok=True)
 target.write_text(
-    r'''package fr.controlebtp.app
+    r'''@file:OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+
+package fr.controlebtp.app
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.compose.ui.test.onAllNodes
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput

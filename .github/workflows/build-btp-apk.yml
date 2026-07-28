@@ -60,6 +60,14 @@ jobs:
           python3 .btp-build/apply_fixes.py generated
           python3 .btp-build/apply_lint_fix.py generated
 
+          test "$(wc -c < .btp-build/product-patch.gz.b64)" = "18152"
+          echo "559353bf7d95902479990fa0375b0ab00ffeacfea51799bb17d1246b35cb31e5  .btp-build/product-patch.gz.b64" | sha256sum -c -
+          base64 --decode .btp-build/product-patch.gz.b64 > /tmp/btp-product-fixes.patch.gz
+          echo "627922fc0605e67ed4f0e1a60feae4a08f1a88276fe3b129f1d9dbeaa790b354  /tmp/btp-product-fixes.patch.gz" | sha256sum -c -
+          gzip -dc /tmp/btp-product-fixes.patch.gz > /tmp/btp-product-fixes.patch
+          echo "b77830adc3cf6527d4f557529f1032beb2ec920ae3ff46cd07df6de4f9198735  /tmp/btp-product-fixes.patch" | sha256sum -c -
+          patch -p1 -d generated < /tmp/btp-product-fixes.patch
+
       - name: Unit tests, Android Lint and debug APK
         shell: bash
         run: |

@@ -56,6 +56,7 @@ jobs:
           base64 --decode /tmp/controle-btp-native-v12.b64 > /tmp/controle-btp-native-v12.tar.gz
           echo "3c03672b460d9d5badaa0789b2581d184b109e52424150c8bedcbb8ba3d2395d  /tmp/controle-btp-native-v12.tar.gz" | sha256sum -c -
           tar -xzf /tmp/controle-btp-native-v12.tar.gz -C native-build --strip-components=1
+          python3 .btp-native-v12/apply_ci_fixes.py native-build
           test -f native-build/settings.gradle.kts
           test -f native-build/app/build.gradle.kts
           test -f native-build/app/src/main/java/fr/controlebtp/app/MainActivity.kt

@@ -134,7 +134,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
           script: |
-            set -euxo pipefail
+            set -eu
             mkdir -p "$GITHUB_WORKSPACE/smoke"
             APK="$GITHUB_WORKSPACE/artifact/dist/Controle-BTP-v1.2.0-native-optimisee.apk"
             adb install -r "$APK" | tee "$GITHUB_WORKSPACE/smoke/install.txt"

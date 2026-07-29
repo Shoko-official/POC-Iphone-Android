@@ -1,0 +1,158 @@
+name: Build Controle BTP Native v1.2
+
+on:
+  push:
+    branches:
+      - codex/btp-native-v12
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: btp-native-v12-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Restore native Android project
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p native-build dist
+          cat .btp-native-v12/native.part* > /tmp/controle-btp-native-v12.b64
+          test "$(wc -c < /tmp/controle-btp-native-v12.b64)" = "60708"
+          echo "faea28d42d65bb9472466c87c48b68d2b407fb8e61604d695dc01a5a887b7cc3  /tmp/controle-btp-native-v12.b64" | sha256sum -c -
+          base64 --decode /tmp/controle-btp-native-v12.b64 > /tmp/controle-btp-native-v12.tar.gz
+          echo "3c03672b460d9d5badaa0789b2581d184b109e52424150c8bedcbb8ba3d2395d  /tmp/controle-btp-native-v12.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/controle-btp-native-v12.tar.gz -C native-build --strip-components=1
+          test -f native-build/settings.gradle.kts
+          test -f native-build/app/build.gradle.kts
+          test -f native-build/app/src/main/java/fr/controlebtp/app/MainActivity.kt
+          ! grep -R "WebView" native-build/app/src/main/java
+          ! grep -R "class=\"device\"" native-build/app/src/main || true
+
+      - name: Unit tests, lint and optimized APKs
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --stacktrace -p native-build clean testDebugUnitTest lintDebug assembleDebug assembleRelease 2>&1 | tee dist/build.log
+
+      - name: Prepare deliverables
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cp native-build/app/build/outputs/apk/release/app-release.apk dist/Controle-BTP-v1.2.0-native-optimisee.apk
+          cp native-build/app/build/outputs/apk/debug/app-debug.apk dist/Controle-BTP-v1.2.0-native-debug.apk
+          sha256sum dist/Controle-BTP-v1.2.0-native-optimisee.apk > dist/Controle-BTP-v1.2.0-native-optimisee.apk.sha256
+          unzip -t dist/Controle-BTP-v1.2.0-native-optimisee.apk | tee dist/apk-structure-check.txt
+          grep -q "No errors detected" dist/apk-structure-check.txt
+          printf '%s\n' \
+            'Version Android native Jetpack Compose, sans WebView ni faux cadre de téléphone.' \
+            'CameraX: stratégie KEEP_ONLY_LATEST et résolution 960x540.' \
+            'ML Kit: modèles OCR et QR embarqués.' \
+            'Build release: R8 et réduction des ressources activés.' \
+            > dist/README.txt
+
+      - name: Upload APK and reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: controle-btp-native-v12-${{ github.sha }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            dist/**
+            native-build/app/build/reports/**
+            native-build/app/build/test-results/**
+
+  emulator-smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: controle-btp-native-v12-${{ github.sha }}
+          path: artifact
+
+      - name: Enable KVM
+        shell: bash
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install and launch native app
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          script: |
+            set -euxo pipefail
+            mkdir -p "$GITHUB_WORKSPACE/smoke"
+            APK="$GITHUB_WORKSPACE/artifact/dist/Controle-BTP-v1.2.0-native-optimisee.apk"
+            adb install -r "$APK" | tee "$GITHUB_WORKSPACE/smoke/install.txt"
+            adb logcat -c
+            adb shell am force-stop fr.controlebtp.app
+            adb shell am start -W -n fr.controlebtp.app/fr.controlebtp.app.MainActivity | tee "$GITHUB_WORKSPACE/smoke/launch.txt"
+            sleep 8
+            adb exec-out screencap -p > "$GITHUB_WORKSPACE/smoke/home.png"
+            adb exec-out uiautomator dump /dev/tty > "$GITHUB_WORKSPACE/smoke/ui.xml" || true
+            adb shell dumpsys activity activities > "$GITHUB_WORKSPACE/smoke/activities.txt"
+            adb logcat -d > "$GITHUB_WORKSPACE/smoke/logcat.txt"
+            adb shell pidof fr.controlebtp.app | tee "$GITHUB_WORKSPACE/smoke/pid.txt"
+            test -s "$GITHUB_WORKSPACE/smoke/home.png"
+            test -s "$GITHUB_WORKSPACE/smoke/pid.txt"
+            ! grep -q "FATAL EXCEPTION" "$GITHUB_WORKSPACE/smoke/logcat.txt"
+            ! grep -q "AndroidRuntime: FATAL" "$GITHUB_WORKSPACE/smoke/logcat.txt"
+
+      - name: Upload emulator evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: controle-btp-native-v12-emulator-${{ github.sha }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: smoke/**
